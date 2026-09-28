@@ -1,0 +1,86 @@
+[
+  {
+    "StaffID": 1,
+    "Master": {
+      "FamilyName": "Ng",
+      "MiddleName": "",
+      "GivenName": "He",
+      "Name": "Ng He",
+      "NRIC": "30947823897",
+      "Department": "Worker",
+      "PayType": "Hourly",
+      "BaseRate": 10,
+      "OvertimeRate": 20,
+      "ActiveStatus": "OnContract"
+    },
+    "Preference": {
+      "PrimaryTeam": "",
+      "SecondaryTeam": "He",
+      "PrimarySkill": "30947823897",
+      "SecondarySkill": "Worker",
+      "BlackListTask": "Hourly",
+      "PreferredShift": 10,
+      "MaxDaysPerWeek": 20,
+      "PreferredVehicleType": "None",
+      "DedicatedVehicleID": null
+    },
+    "Licenses": [],
+    "Leaves": []
+  },
+  {
+    "StaffID": 2,
+    "Master": {
+      "FamilyName": "Lee",
+      "MiddleName": "",
+      "GivenName": "Yuan Leng",
+      "Name": "Lee Yuan Leng",
+      "NRIC": "90472973",
+      "Department": "Admin",
+      "PayType": "Monthly",
+      "BaseRate": 4000,
+      "OvertimeRate": 0,
+      "ActiveStatus": "OnContract"
+    },
+    "Preference": {
+      "PrimaryTeam": "",
+      "SecondaryTeam": "Yuan Leng",
+      "PrimarySkill": "90472973",
+      "SecondarySkill": "Admin",
+      "BlackListTask": "Monthly",
+      "PreferredShift": 4000,
+      "MaxDaysPerWeek": 0,
+      "PreferredVehicleType": "None",
+      "DedicatedVehicleID": null
+    },
+    "Licenses": [],
+    "Leaves": []
+  },
+  {
+    "StaffID": 3,
+    "Master": {
+      "FamilyName": "KFASL",
+      "MiddleName": "",
+      "GivenName": "KLJASF",
+      "Name": "KFASL KLJASF",
+      "NRIC": "849723947",
+      "Department": "Admin",
+      "PayType": "Monthly",
+      "BaseRate": 500,
+      "OvertimeRate": 0,
+      "ActiveStatus": "OffContract"
+    },
+    "Preference": {
+      "PrimaryTeam": "",
+      "SecondaryTeam": "KLJASF",
+      "PrimarySkill": "849723947",
+      "SecondarySkill": "Admin",
+      "BlackListTask": "Monthly",
+      "PreferredShift": 500,
+      "MaxDaysPerWeek": 0,
+      "PreferredVehicleType": "None",
+      "DedicatedVehicleID": null
+    },
+    "Licenses": [],
+    "Leaves": []
+  }
+]

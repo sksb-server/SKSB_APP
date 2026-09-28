@@ -1,0 +1,30 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<OutputType>WinExe</OutputType>
+		<TargetFramework>net8.0-windows</TargetFramework>
+		<PlatformTarget>AnyCPU</PlatformTarget>
+		<UseWindowsForms>true</UseWindowsForms>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
+		<GenerateRuntimeConfigurationFiles>true</GenerateRuntimeConfigurationFiles>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\Core\Core.csproj">
+			<Private>true</Private>
+			<CopyLocal>true</CopyLocal>
+		</ProjectReference>
+	</ItemGroup>
+
+	<Target Name="CopyPortalToRoot" AfterTargets="Build" Condition="'$(Configuration)' == 'Debug'">
+		<ItemGroup>
+			<PortalFiles Include="$(TargetDir)*.*" />
+		</ItemGroup>
+		<!-- Copies Portal.exe and dependencies straight to the Solution Root -->
+		<Copy SourceFiles="@(PortalFiles)"
+			  DestinationFolder="$(MSBuildThisFileDirectory)..\"
+			  SkipUnchangedFiles="true" />
+	</Target>
+
+</Project>

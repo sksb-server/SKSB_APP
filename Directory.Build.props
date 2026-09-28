@@ -1,0 +1,37 @@
+<Project>
+	<Target Name="AutoSyncExcelDnaToDocuments"
+			AfterTargets="ExcelDnaPack;Build"
+			Condition="'@(PackageReference->WithMetadataValue(&quot;Identity&quot;, &quot;ExcelDna.AddIn&quot;))' != ''">
+
+		<PropertyGroup>
+			<TargetAddInsDir>$(UserProfile)\Documents\SKSB_App\AddIns</TargetAddInsDir>
+		</PropertyGroup>
+
+		<MakeDir Directories="$(TargetAddInsDir)" Condition="!Exists('$(TargetAddInsDir)')" />
+
+		<ItemGroup>
+			<!-- 1. All compiled DLLs and JSON configurations -->
+			<AddInArtifacts Include="$(TargetDir)*.dll" />
+			<AddInArtifacts Include="$(TargetDir)*.runtimeconfig.json" />
+			<AddInArtifacts Include="$(TargetDir)*.deps.json" />
+
+			<!-- 2. The standard XLLs and DNA manifests -->
+			<AddInArtifacts Include="$(TargetDir)*-AddIn*.xll" />
+			<AddInArtifacts Include="$(TargetDir)*-AddIn*.dna" />
+
+			<!-- 3. Also pull the packed standalone XLLs from publish\ -->
+			<PackedArtifacts Include="$(TargetDir)publish\*-packed.xll" />
+		</ItemGroup>
+
+		<Copy SourceFiles="@(AddInArtifacts)"
+			  DestinationFolder="$(TargetAddInsDir)"
+			  SkipUnchangedFiles="false" />
+
+		<Copy SourceFiles="@(PackedArtifacts)"
+			  DestinationFolder="$(TargetAddInsDir)"
+			  SkipUnchangedFiles="false" />
+
+		<Message Importance="high"
+				 Text="[Excel-DNA Auto-Sync] Deployed @(AddInArtifacts->Count()) artifacts to $(TargetAddInsDir)" />
+	</Target>
+</Project>

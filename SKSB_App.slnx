@@ -1,0 +1,14 @@
+<Solution>
+  <Configurations>
+    <Platform Name="Any CPU" />
+    <Platform Name="x64" />
+    <Platform Name="x86" />
+  </Configurations>
+  <Project Path="Core/Core.csproj" />
+  <Project Path="DailyScheduler/DailyScheduler.csproj" Id="9c6e11cf-644b-4aec-9a2e-144ff26ff760" />
+  <Project Path="Launcher/Launcher.csproj" Id="ae9080fa-8165-4de9-9c79-a9fdda4afa63" />
+  <Project Path="Portal/Portal.csproj" />
+  <Project Path="ProjectManager/ProjectManager.csproj" Id="dad0ded3-b793-4538-8fea-783e3e0fd374" />
+  <Project Path="StaffManager/StaffManager.csproj" Id="3615a02e-4611-4a8d-ac67-591c247627c3" />
+  <Project Path="VechicleManager/VehicleManager.csproj" Id="97b5b45c-d6a6-4924-bb37-8aeb02813916" />
+</Solution>
