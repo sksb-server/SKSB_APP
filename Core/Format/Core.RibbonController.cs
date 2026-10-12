@@ -1,4 +1,4 @@
-﻿namespace SKSB_App.Core.UI;
+﻿namespace SKSB_App.Core;
 
 using System;
 using System.Runtime.InteropServices;
@@ -9,7 +9,7 @@ using SKSB_App.Core.Services;
 using SKSB_App.Core.Types;
 
 [ComVisible(true)]
-public class CoreFormatRibbon : ExcelRibbon
+public class RibbonController : ExcelRibbon
 {
     public override string GetCustomUI(string ribbonId)
     {
@@ -47,15 +47,12 @@ public class CoreFormatRibbon : ExcelRibbon
         {
             try
             {
-                // Prompts user for the list source (e.g., =DaysOfWeekList)
-                string listSource = Microsoft.VisualBasic.Interaction.InputBox(
-                    "Enter the list source formula (e.g., =DaysOfWeekList or =Lookups!$A$2#):",
-                    "Multi-Select Validation Source", "=DaysOfWeekList");
+                // Specify the reference cell whose style and validation list you want to adopt
+                // Example: "Lookups!$A$2" or a styled template cell
+                Commands.ApplyStyleAndDropdownToSelection("Lookups!$A$2");
 
-                if (!string.IsNullOrWhiteSpace(listSource))
-                {
-                    FormatCommands.ApplyCustomDropdownToSelection(listSource);
-                }
+                MessageBox.Show("Selected cell(s) formatted with reference style and multi-select validation.",
+                                "Format Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             catch (Exception ex)
             {
@@ -68,18 +65,10 @@ public class CoreFormatRibbon : ExcelRibbon
     {
         try
         {
-            // Sync all core enums directly from the format ribbon
-            TypesToExcel.Sync(
-                typeof(Department),
-                typeof(Shift),
-                typeof(PayType),
-                typeof(ContractStatus),
-                typeof(LeaveType),
-                typeof(Session),
-                typeof(DayOfWeek)
-            );
+            // Automatically discovers and syncs every public enum in Core.Types
+            TypesToExcel.SyncAllCoreEnums(typeof(Department));
 
-            MessageBox.Show("Core Enums Synchronised to 'Lookups' sheet successfully.",
+            MessageBox.Show("All Core Enums synchronised to 'Lookups' successfully.",
                             "Sync Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
         catch (Exception ex)

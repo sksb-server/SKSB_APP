@@ -3,14 +3,39 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Reflection;
 using ExcelDna.Integration;
 using SKSB_App.Core.WorkbookManager;
 
 public static class TypesToExcel
 {
-    // Toggle false so Lookups stays hidden from the bottom tab strip
     public const bool KeepLookupsSheetVisible = false;
 
+    /// <summary>
+    /// Auto-targets and synchronises ALL public Enums defined in the assembly containing sampleType (or Core.Types).
+    /// </summary>
+    /// <param name="assemblyMarkerType">Any type residing in the assembly containing your enums (e.g. typeof(Department)).</param>
+    /// <param name="excludeTypes">Optional list of enums you want to skip.</param>
+    public static void SyncAllCoreEnums(params Type[] excludeTypes)
+    {
+        // Directly targets the Core assembly where TypesToExcel lives
+        var assembly = typeof(TypesToExcel).Assembly;
+
+        var excludeSet = new HashSet<Type>(excludeTypes ?? Array.Empty<Type>());
+
+        Type[] allEnums = assembly
+            .GetTypes()
+            .Where(t => t.IsEnum && t.IsPublic && !excludeSet.Contains(t))
+            .OrderBy(t => t.Name)
+            .ToArray();
+
+        Sync(allEnums);
+    }
+
+    /// <summary>
+    /// Synchronises a specific collection of Enum types into defined names on the Lookups sheet.
+    /// Named ranges are automatically formatted as [EnumName]List.
+    /// </summary>
     public static void Sync(params Type[] enumTypes)
     {
         if (enumTypes == null || enumTypes.Length == 0) return;
@@ -94,12 +119,7 @@ public static class TypesToExcel
                 // 4. Hide the Lookups sheet if configured
                 if (!KeepLookupsSheetVisible)
                 {
-                    try
-                    {
-                        // Lookups is active -> 0-arg xlcWorkbookHide hides it cleanly
-                        XlCall.Excel(XlCall.xlcWorkbookHide);
-                    }
-                    catch { }
+                    try { XlCall.Excel(XlCall.xlcWorkbookHide); } catch { }
                 }
 
                 // 5. Restore original active sheet focus
@@ -125,14 +145,9 @@ public static class TypesToExcel
 
     private static void EnsureLookupsSheetExists(string targetSheet)
     {
-        // 1. Direct handle check using C-API textref pointer
         IntPtr existingId = WorkbookSession.GetSheetId(targetSheet);
-        if (existingId != IntPtr.Zero)
-        {
-            return; // Sheet already exists!
-        }
+        if (existingId != IntPtr.Zero) return;
 
-        // 2. Scan both dimensions of the workbook table of contents
         try
         {
             object sheetsObj = XlCall.Excel(XlCall.xlfGetWorkbook, 1);
@@ -149,17 +164,13 @@ public static class TypesToExcel
                         int bIdx = raw.LastIndexOf(']');
                         string clean = bIdx >= 0 ? raw.Substring(bIdx + 1) : raw;
 
-                        if (string.Equals(clean, targetSheet, StringComparison.OrdinalIgnoreCase))
-                        {
-                            return; // Sheet exists!
-                        }
+                        if (string.Equals(clean, targetSheet, StringComparison.OrdinalIgnoreCase)) return;
                     }
                 }
             }
         }
         catch { }
 
-        // 3. Genuinely does not exist: insert and rename once
         try
         {
             XlCall.Excel(XlCall.xlcWorkbookInsert, 1);

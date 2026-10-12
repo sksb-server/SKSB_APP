@@ -2,9 +2,8 @@
 
 using System;
 using ExcelDna.Integration;
-using SKSB_App.Core.UI;
 
-public class CoreEvents : IExcelAddIn
+public class Events : IExcelAddIn
 {
     private dynamic _xlApp;
 
@@ -42,7 +41,7 @@ public class CoreEvents : IExcelAddIn
                     Cancel = true;
 
                     // Show our WinForms multi-select interface
-                    FormatCommands.ShowChecklistForActiveCell(Target);
+                    Commands.ShowChecklistForActiveCell(Target);
                 }
             }
         }
