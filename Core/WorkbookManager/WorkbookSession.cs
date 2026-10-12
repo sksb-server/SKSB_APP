@@ -11,11 +11,57 @@ public static class WorkbookSession
     private static string _lastDetectedFile = string.Empty;
 
     public const string LookupsSheetName = "Lookups";
+    public const string DataSheetName = "Data";
+    public const string NameLookupsSheetName = "NameLookups";
 
     /// <summary>
-    /// Moves the Lookups sheet to the very end (rightmost position) of the workbook's sheet tabs.
+    /// Searches the active workbook for the first existing sheet matching a list of candidate aliases.
+    /// Iterates across both matrix dimensions to support all Excel C-API versions.
     /// </summary>
-    public static void MoveLookupsToEnd()
+    public static string ResolveSheetName(string[] candidates, string defaultFallback)
+    {
+        if (candidates == null || candidates.Length == 0)
+            return defaultFallback;
+
+        try
+        {
+            object sheetsObj = XlCall.Excel(XlCall.xlfGetWorkbook, 1);
+            if (sheetsObj is object[,] sheetArray)
+            {
+                foreach (object item in sheetArray)
+                {
+                    string rawName = item?.ToString() ?? string.Empty;
+                    int bracketIdx = rawName.LastIndexOf(']');
+                    string cleanName = bracketIdx >= 0 ? rawName.Substring(bracketIdx + 1) : rawName;
+
+                    foreach (var candidate in candidates)
+                    {
+                        if (string.Equals(cleanName, candidate, StringComparison.OrdinalIgnoreCase))
+                        {
+                            return cleanName;
+                        }
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[ResolveSheetName Error] {ex.Message}");
+        }
+
+        return defaultFallback;
+    }
+
+    /// <summary>
+    /// Moves both auxiliary sheets ('Lookups' and 'Data') to the very end of the sheet tabs.
+    /// </summary>
+    public static void MoveAuxiliarySheetsToEnd()
+    {
+        MoveSingleSheetToEnd(LookupsSheetName);
+        MoveSingleSheetToEnd(DataSheetName);
+    }
+
+    private static void MoveSingleSheetToEnd(string targetSheetName)
     {
         try
         {
@@ -26,39 +72,36 @@ public static class WorkbookSession
             dynamic sheets = wb.Sheets;
             int totalSheets = sheets.Count;
 
-            dynamic lookups = null;
-            try { lookups = sheets[LookupsSheetName]; } catch { }
-            if (lookups == null) return;
+            dynamic targetSheet = null;
+            try { targetSheet = sheets[targetSheetName]; } catch { }
+            if (targetSheet == null) return;
 
-            // Check if it is already the last sheet
             dynamic lastSheet = sheets[totalSheets];
-            if (string.Equals((string)lookups.Name, (string)lastSheet.Name, StringComparison.OrdinalIgnoreCase))
+            if (string.Equals((string)targetSheet.Name, (string)lastSheet.Name, StringComparison.OrdinalIgnoreCase))
                 return;
 
-            // Excel requires a sheet to be visible to move it
-            bool wasVisible = (lookups.Visible == -1); // -1 = xlSheetVisible
+            bool wasVisible = (targetSheet.Visible == -1); // -1 = xlSheetVisible
             if (!wasVisible)
             {
-                lookups.Visible = -1;
+                targetSheet.Visible = -1;
             }
 
-            // Move after the last sheet in the tab bar
-            lookups.Move(After: sheets[totalSheets]);
+            targetSheet.Move(After: sheets[totalSheets]);
 
-            // Restore hidden state if it was originally hidden
             if (!wasVisible)
             {
-                lookups.Visible = 0; // 0 = xlSheetHidden
+                targetSheet.Visible = 0; // 0 = xlSheetHidden
             }
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"[MoveLookupsToEnd Error] {ex.Message}");
+            System.Diagnostics.Debug.WriteLine($"[MoveSingleSheetToEnd Error] {ex.Message}");
         }
     }
 
     /// <summary>
     /// Checks whether the active document is a master template (.xltx / .xltm).
+    /// Safe against bracket and sheet name suffixes (e.g. "[Template.xltx]Sheet1").
     /// </summary>
     public static bool IsMasterTemplateFile()
     {
@@ -80,7 +123,7 @@ public static class WorkbookSession
     }
 
     /// <summary>
-    /// Evaluates template mode, updates Lookups visibility & tab position, and syncs enums.
+    /// Evaluates template mode, updates Lookups & Data visibility, and syncs all Core enums.
     /// </summary>
     public static bool EvaluateTemplateMode(bool showHeadsUp = true)
     {
@@ -97,8 +140,8 @@ public static class WorkbookSession
 
             if (isTemplate)
             {
-                // 1. Unhide and move Lookups to the end
-                SetLookupsVisibility(visible: true);
+                // 1. Unhide both Lookups & Data sheets and move to end
+                SetAuxiliarySheetsVisibility(visible: true);
 
                 // 2. Auto-sync all Core Enums into the Lookups sheet
                 TypesToExcel.SyncAllCoreEnums();
@@ -106,13 +149,13 @@ public static class WorkbookSession
                 if (showHeadsUp && !string.Equals(_lastDetectedFile, docName, StringComparison.OrdinalIgnoreCase))
                 {
                     _lastDetectedFile = docName;
-                    ShowStatusConfirmation("Template Design Mode: Lookups unhidden & Enums synced.");
+                    ShowStatusConfirmation("Template Design Mode: Lookups & Data unhidden, Enums synced.");
 
                     MessageBox.Show(
                         $"[Template Detected]\n\n" +
                         $"Document: {docName}\n\n" +
                         $"• Switched to Template Edit Mode automatically.\n" +
-                        $"• 'Lookups' sheet is positioned at the back and VISIBLE.\n" +
+                        $"• 'Lookups' & 'Data' sheets are VISIBLE at the back.\n" +
                         $"• All Core Enums have been synchronized.\n" +
                         $"• Double-clicking dropdown cells will open the Template Inspector.",
                         "Template Edit Mode Active",
@@ -125,8 +168,8 @@ public static class WorkbookSession
             {
                 _lastDetectedFile = string.Empty;
 
-                // Hide Lookups sheet in Operational Mode
-                SetLookupsVisibility(visible: false);
+                // Hide both Lookups & Data sheets in Operational Mode
+                SetAuxiliarySheetsVisibility(visible: false);
             }
 
             return isTemplate;
@@ -139,51 +182,58 @@ public static class WorkbookSession
         }
     }
 
-    public static void SetLookupsVisibility(bool visible)
+    /// <summary>
+    /// Unified visibility controller for both Lookups and Data auxiliary sheets.
+    /// </summary>
+    public static void SetAuxiliarySheetsVisibility(bool visible)
     {
         ExcelAsyncUtil.QueueAsMacro(() =>
         {
-            try
+            // Remember original active sheet to restore focus cleanly
+            object activeDoc = null;
+            try { activeDoc = XlCall.Excel(XlCall.xlfGetDocument, 76); } catch { }
+            string originalSheet = activeDoc?.ToString() ?? string.Empty;
+
+            SetSingleSheetVisibility(LookupsSheetName, visible);
+            SetSingleSheetVisibility(DataSheetName, visible);
+
+            MoveAuxiliarySheetsToEnd();
+
+            // Restore focus back to original sheet if hiding
+            if (!visible && !string.IsNullOrWhiteSpace(originalSheet))
             {
-                if (visible)
+                string cleanOriginal = originalSheet.Contains(']')
+                    ? originalSheet.Substring(originalSheet.LastIndexOf(']') + 1)
+                    : originalSheet;
+
+                if (!cleanOriginal.Equals(LookupsSheetName, StringComparison.OrdinalIgnoreCase) &&
+                    !cleanOriginal.Equals(DataSheetName, StringComparison.OrdinalIgnoreCase))
                 {
-                    XlCall.Excel(XlCall.xlcWorkbookUnhide, LookupsSheetName);
-                    // Ensure it moves to the very back
-                    MoveLookupsToEnd();
+                    try { XlCall.Excel(XlCall.xlcWorkbookSelect, new object[] { cleanOriginal }); } catch { }
                 }
                 else
                 {
-                    object activeDoc = null;
-                    try { activeDoc = XlCall.Excel(XlCall.xlfGetDocument, 76); } catch { }
-                    string originalSheet = activeDoc?.ToString() ?? string.Empty;
-
-                    MoveLookupsToEnd();
-
-                    try { XlCall.Excel(XlCall.xlcWorkbookSelect, new object[] { LookupsSheetName }); } catch { }
-                    try { XlCall.Excel(XlCall.xlcWorkbookHide); } catch { }
-
-                    if (!string.IsNullOrWhiteSpace(originalSheet))
-                    {
-                        string cleanOriginal = originalSheet.Contains(']')
-                            ? originalSheet.Substring(originalSheet.LastIndexOf(']') + 1)
-                            : originalSheet;
-
-                        if (!cleanOriginal.Equals(LookupsSheetName, StringComparison.OrdinalIgnoreCase))
-                        {
-                            try { XlCall.Excel(XlCall.xlcWorkbookSelect, new object[] { cleanOriginal }); } catch { }
-                        }
-                        else
-                        {
-                            try { XlCall.Excel(XlCall.xlcWorkbookSelect, new object[] { 1 }); } catch { }
-                        }
-                    }
+                    try { XlCall.Excel(XlCall.xlcWorkbookSelect, new object[] { 1 }); } catch { }
                 }
             }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[SetLookupsVisibility Error] {ex.Message}");
-            }
         });
+    }
+
+    private static void SetSingleSheetVisibility(string sheetName, bool visible)
+    {
+        try
+        {
+            dynamic xlApp = ExcelDnaUtil.Application;
+            dynamic ws = null;
+            try { ws = xlApp.ActiveWorkbook.Sheets[sheetName]; } catch { }
+            if (ws == null) return;
+
+            ws.Visible = visible ? -1 /* xlSheetVisible */ : 0 /* xlSheetHidden */;
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[SetSingleSheetVisibility Error: {sheetName}] {ex.Message}");
+        }
     }
 
     public static void ShowStatusConfirmation(string message)
@@ -218,35 +268,44 @@ public static class WorkbookSession
         {
             var refRange = new ExcelReference(startRow, endRow, startCol, endCol);
             XlCall.Excel(XlCall.xlcSelect, refRange);
-            XlCall.Excel(XlCall.xlcClear, 3);
+            XlCall.Excel(XlCall.xlcClear, 3); // 3 = Clear contents only
             XlCall.Excel(XlCall.xlcSelect, new ExcelReference(0, 0, 0, 0));
         }
         catch { }
     }
 
+    /// <summary>
+    /// Purges all operational rows while strictly protecting 'Lookups' and 'Data' sheets.
+    /// </summary>
     public static void PurgeAllSheetsData()
     {
         try
         {
             XlCall.Excel(XlCall.xlcEcho, false);
 
-            object sheetsObj = XlCall.Excel(XlCall.xlfGetWorkbook, 1);
-            if (sheetsObj is object[,] sheetArray)
-            {
-                int totalSheets = sheetArray.GetLength(1);
-                for (int i = 0; i < totalSheets; i++)
-                {
-                    string rawSheet = sheetArray[0, i]?.ToString() ?? string.Empty;
-                    int bIdx = rawSheet.LastIndexOf(']');
-                    string sheetName = bIdx >= 0 ? rawSheet.Substring(bIdx + 1) : rawSheet;
+            dynamic xlApp = ExcelDnaUtil.Application;
+            dynamic wb = xlApp.ActiveWorkbook;
+            if (wb == null) return;
 
-                    if (!string.IsNullOrEmpty(sheetName) && !sheetName.Equals(LookupsSheetName, StringComparison.OrdinalIgnoreCase))
-                    {
-                        XlCall.Excel(XlCall.xlcWorkbookSelect, new object[] { sheetName });
-                        ClearActiveSheetDataRows(1, 1000, 0, 20);
-                    }
+            foreach (dynamic ws in wb.Sheets)
+            {
+                string sName = (string)ws.Name;
+
+                // Protect both Lookups and Data from being wiped
+                if (sName.Equals(LookupsSheetName, StringComparison.OrdinalIgnoreCase) ||
+                    sName.Equals(DataSheetName, StringComparison.OrdinalIgnoreCase) ||
+                    sName.Equals(NameLookupsSheetName, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
                 }
+
+                ws.Activate();
+                ClearActiveSheetDataRows(1, 1000, 0, 25);
             }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[PurgeAllSheetsData Error] {ex.Message}");
         }
         finally
         {

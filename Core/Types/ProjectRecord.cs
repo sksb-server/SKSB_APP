@@ -89,6 +89,7 @@ public enum ProjectType
 {
     iJob,
     PVT,
+    MOV,
     Private,
     None
 }

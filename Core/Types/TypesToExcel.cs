@@ -147,8 +147,8 @@ public static class TypesToExcel
                     colZero += 2; // Spacer column
                 }
 
-                // 4. Move Lookups to the end of the tabs
-                WorkbookSession.MoveLookupsToEnd();
+                // 4. Move auxiliary sheets ('Lookups' and 'Data') to the end of the tabs
+                WorkbookSession.MoveAuxiliarySheetsToEnd();
 
                 // 5. Hide Lookups if NOT in template edit mode
                 if (!WorkbookSession.IsTemplateEditMode)
@@ -189,7 +189,6 @@ public static class TypesToExcel
     {
         try
         {
-            // Use Excel COM interface via dynamic to reliably unhide before selecting
             dynamic xlApp = ExcelDnaUtil.Application;
             dynamic ws = xlApp.ActiveWorkbook.Sheets[sheetName];
             if (ws != null)
@@ -201,14 +200,17 @@ public static class TypesToExcel
         }
         catch { }
 
-        // Fallback to pure C-API select
         try { XlCall.Excel(XlCall.xlcWorkbookSelect, new object[] { sheetName }); } catch { }
     }
 
     private static void EnsureLookupsSheetExists(string targetSheet)
     {
         IntPtr existingId = WorkbookSession.GetSheetId(targetSheet);
-        if (existingId != IntPtr.Zero) return;
+        if (existingId != IntPtr.Zero)
+        {
+            WorkbookSession.MoveAuxiliarySheetsToEnd();
+            return;
+        }
 
         try
         {
@@ -222,7 +224,11 @@ public static class TypesToExcel
                     int bIdx = raw.LastIndexOf(']');
                     string clean = bIdx >= 0 ? raw.Substring(bIdx + 1) : raw;
 
-                    if (string.Equals(clean, targetSheet, StringComparison.OrdinalIgnoreCase)) return;
+                    if (string.Equals(clean, targetSheet, StringComparison.OrdinalIgnoreCase))
+                    {
+                        WorkbookSession.MoveAuxiliarySheetsToEnd();
+                        return;
+                    }
                 }
             }
         }
@@ -239,6 +245,7 @@ public static class TypesToExcel
                 : fullName;
 
             XlCall.Excel(XlCall.xlcWorkbookName, tempName, targetSheet);
+            WorkbookSession.MoveAuxiliarySheetsToEnd();
         }
         catch { }
     }

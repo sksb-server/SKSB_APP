@@ -1,25 +1,27 @@
 ﻿namespace SKSB_App.StaffManager;
 
-using ExcelDna.Integration;
-using SKSB_App.Core.Types;
-using SKSB_App.Core.WorkbookManager;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
+using System.Linq;
 using System.Text;
 using System.Windows.Forms;
+using ExcelDna.Integration;
+using SKSB_App.Core.Types;
+using SKSB_App.Core.WorkbookManager;
 
 public static class SheetMapper
 {
-    private const int MasterColumnCount = 10;     // Columns A to J (StaffID -> ActiveStatus)
-    private const int PreferenceColumnCount = 11; // Columns A to K (StaffID -> DedicatedVehicleID)
-    private const int LicenseColumnCount = 5;     // Columns A to E (StaffID, Name, LicenseClass, ExpiryDate, Status)
-    private const int SkillColumnCount = 5;     
+    // All Staff: reading A through D (4 columns)
+    private const int MasterColumnSpan = 4;
+    // Vehicle Licenses: A through G (7 columns)
+    private const int VehicleLicenseColumnSpan = 7;
+    // Skill Licenses: A through G (7 columns)
+    private const int SkillLicenseColumnSpan = 7;
 
-    private static readonly string[] AllStaffSheet = { "All Staff", "Staff Master", "Master", "All Staffs" };
-    private static readonly string[] PreferenceSheetAliases = { "Staff_Preference", "Staff Preference", "Preference", "Preferences" };
-    private static readonly string[] LicenseSheetAliases = { "Staff_License", "Staff License", "License", "Licenses", "Staff_Licenses" };
-    private static readonly string[] SkillSheetAliases = { "Staff_Skill", "Staff_Skills", "Staff Skill", "Staff Skills", "Skills", "Skill"};
+    private static readonly string[] MasterSheetAliases = { "All Staff", "All_Staff", "Staff_Master" };
+    private static readonly string[] VehicleLicenseSheetAliases = { "Vehicle Licenses", "Vehicle_Licenses", "Staff_License" };
+    private static readonly string[] SkillLicenseSheetAliases = { "Skill Licenses", "Skill_Licenses", "Staff_Skill" };
 
     public static List<StaffRecord> ExtractStaffRecords()
     {
@@ -27,15 +29,20 @@ public static class SheetMapper
         var staffLookup = new Dictionary<long, StaffRecord>();
         var validationErrors = new List<string>();
 
-        // -----------------------------------------------------------------
-        // 1. MASTER RECORDS (Columns A to J)
-        // -----------------------------------------------------------------
-        string masterSheet = WorkbookSession.ResolveSheetName(AllStaffSheet, "Staff_Master");
+        // -------------------------------------------------------------
+        // 0. RETRIEVE DYNAMIC LICENSE TYPES LIST FROM EXCEL
+        // -------------------------------------------------------------
+        var allowedLicenseTypes = FetchAllowedSkillLicenseTypes();
+
+        // -------------------------------------------------------------
+        // 1. ALL STAFF (Sheet: "All Staff", Columns A to D)
+        // -------------------------------------------------------------
+        string masterSheet = WorkbookSession.ResolveSheetName(MasterSheetAliases, "All Staff");
         IntPtr masterSheetId = WorkbookSession.GetSheetId(masterSheet);
 
         var masterRef = masterSheetId != IntPtr.Zero
-            ? new ExcelReference(1, 500, 0, MasterColumnCount - 1, masterSheetId)
-            : new ExcelReference(1, 500, 0, MasterColumnCount - 1);
+            ? new ExcelReference(1, 500, 0, MasterColumnSpan - 1, masterSheetId)
+            : new ExcelReference(1, 500, 0, MasterColumnSpan - 1);
 
         if (masterRef.GetValue() is object[,] masterGrid)
         {
@@ -43,52 +50,35 @@ public static class SheetMapper
             for (int r = 0; r < rows; r++)
             {
                 object rawId = masterGrid[r, 0];
-                if (rawId == null || rawId is ExcelEmpty || !long.TryParse(rawId.ToString(), out long staffId) || staffId == 0)
+                if (rawId == null || rawId is ExcelEmpty || !long.TryParse(rawId.ToString(), out long staffId) || staffId <= 0)
                     continue;
 
                 string familyName = CleanCellString(masterGrid[r, 1]);
                 string middleName = CleanCellString(masterGrid[r, 2]);
                 string givenName = CleanCellString(masterGrid[r, 3]);
-                string nric = CleanCellString(masterGrid[r, 4]);
-                string deptStr = CleanCellString(masterGrid[r, 5]);
-                string payStr = CleanCellString(masterGrid[r, 6]);
 
-                decimal.TryParse(CleanCellString(masterGrid[r, 7]), NumberStyles.Any, CultureInfo.InvariantCulture, out decimal baseRate);
-                decimal.TryParse(CleanCellString(masterGrid[r, 8]), NumberStyles.Any, CultureInfo.InvariantCulture, out decimal otRate);
-                string statusStr = CleanCellString(masterGrid[r, 9]);
-
-                // HARD VALIDATION: Must have at least a Given or Family name
-                if (string.IsNullOrWhiteSpace(givenName) && string.IsNullOrWhiteSpace(familyName))
+                if (string.IsNullOrWhiteSpace(familyName) && string.IsNullOrWhiteSpace(givenName))
                 {
-                    validationErrors.Add($"• Row {r + 2} [Staff_Master]: Staff ID {staffId} has no Family or Given Name.");
+                    validationErrors.Add($"• Row {r + 2} [All Staff]: Staff ID {staffId} has no Family or Given Name.");
                     continue;
                 }
-
-                // SMART FALLBACKS
-                Department dept = Enum.TryParse(deptStr, true, out Department parsedDept) ? parsedDept : Department.Worker;
-                PayType payType = Enum.TryParse(payStr, true, out PayType parsedPay) ? parsedPay : PayType.Hourly;
-                ContractStatus status = Enum.TryParse(statusStr, true, out ContractStatus parsedStatus) ? parsedStatus : ContractStatus.Active;
-
-                if (baseRate < 0) baseRate = 0;
-                if (otRate < 0) otRate = 0;
 
                 var staff = new StaffRecord
                 {
                     StaffID = staffId,
                     StaffDetails = new StaffDetails
                     {
+                        StaffID = staffId,
                         FamilyName = familyName,
                         MiddleName = middleName,
                         GivenName = givenName,
-                        Name = $"{familyName} {givenName}".Trim(),
-                        NRIC = nric,
-                        Department = dept,
-                        PayType = payType,
-                        BaseRate = baseRate,
-                        OvertimeRate = otRate,
-                        ActiveStatus = status
+                        Department = Department.Worker,
+                        PayType = PayType.Hourly,
+                        BaseRate = 11.00m,
+                        ContractStatus = ContractStatus.Active
                     },
-                    Licenses = new List<VehicleRecord>()
+                    VehicleLicenses = new List<VehicleLicense>(),
+                    SkillLicenses = new List<SkillLicense>()
                 };
 
                 staffLookup[staffId] = staff;
@@ -96,137 +86,142 @@ public static class SheetMapper
             }
         }
 
-        // -----------------------------------------------------------------
-        // 2. PREFERENCES (Columns A to K)
-        // -----------------------------------------------------------------
-        string prefSheet = WorkbookSession.ResolveSheetName(PreferenceSheetAliases, "Staff_Preference");
-        IntPtr prefSheetId = WorkbookSession.GetSheetId(prefSheet);
+        // -------------------------------------------------------------
+        // 2. VEHICLE LICENSES (Sheet: "Vehicle Licenses", Columns A to G)
+        // -------------------------------------------------------------
+        string vLicSheet = WorkbookSession.ResolveSheetName(VehicleLicenseSheetAliases, "Vehicle Licenses");
+        IntPtr vLicSheetId = WorkbookSession.GetSheetId(vLicSheet);
 
-        var prefRef = prefSheetId != IntPtr.Zero
-            ? new ExcelReference(1, 500, 0, PreferenceColumnCount - 1, prefSheetId)
-            : new ExcelReference(1, 500, 0, PreferenceColumnCount - 1);
+        var vLicRef = vLicSheetId != IntPtr.Zero
+            ? new ExcelReference(1, 1000, 0, VehicleLicenseColumnSpan - 1, vLicSheetId)
+            : new ExcelReference(1, 1000, 0, VehicleLicenseColumnSpan - 1);
 
-        if (prefRef.GetValue() is object[,] prefGrid)
+        if (vLicRef.GetValue() is object[,] vLicGrid)
         {
-            int rows = prefGrid.GetLength(0);
+            int rows = vLicGrid.GetLength(0);
             for (int r = 0; r < rows; r++)
             {
-                object rawId = prefGrid[r, 0];
-                if (rawId == null || rawId is ExcelEmpty || !long.TryParse(rawId.ToString(), out long staffId) || staffId == 0)
-                    continue;
+                object rawLicId = vLicGrid[r, 0];
+                long.TryParse(rawLicId?.ToString(), out long licId);
 
-                if (!staffLookup.TryGetValue(staffId, out var targetStaff))
-                    continue;
-
-                targetStaff.Preference.PrimaryTeam = CleanCellString(prefGrid[r, 2]);
-                targetStaff.Preference.SecondaryTeam = CleanCellString(prefGrid[r, 3]);
-                targetStaff.Preference.PrimarySkill = CleanCellString(prefGrid[r, 4]);
-                targetStaff.Preference.SecondarySkill = CleanCellString(prefGrid[r, 5]);
-                targetStaff.Preference.BlackListTask = CleanCellString(prefGrid[r, 6]);
-
-                string shiftStr = CleanCellString(prefGrid[r, 7]);
-                targetStaff.Preference.PreferredShift = Enum.TryParse(shiftStr, true, out Shift s) ? s : Shift.Morning;
-
-                int.TryParse(CleanCellString(prefGrid[r, 8]), out int maxDays);
-                targetStaff.Preference.MaxDaysPerWeek = (maxDays > 0 && maxDays <= 7) ? maxDays : 6;
-
-                var validLicenses = targetStaff.Licenses
-                    .Where(l => l.LicenseStatus == LicenseStatus.Valid)
-                    .Select(l => l.LicenseType)
-                    .ToHashSet();
-
-                var prefVehicle = targetStaff.Preference.PreferredVehicleType;
-
-                bool isAuthorized = prefVehicle switch
-                {
-                    VehicleType.None => true,
-                    VehicleType.Van or VehicleType.Pickup => validLicenses.Contains(LicenseClass.D) || validLicenses.Contains(LicenseClass.GDL_D),
-                    VehicleType.Lorry_1T => validLicenses.Contains(LicenseClass.GDL_D),
-                    VehicleType.Lorry_3T or VehicleType.Lorry_5T => validLicenses.Contains(LicenseClass.GDL_E) || validLicenses.Contains(LicenseClass.GDL_E_Full),
-                    VehicleType.Forklift => validLicenses.Contains(LicenseClass.Forklift),
-                    _ => false
-                };
-
-                if (!isAuthorized)
-                {
-                    // Auto-reset or log conflict
-                    targetStaff.Preference.PreferredVehicleType = VehicleType.None;
-                    targetStaff.Preference.DedicatedVehicleID = null;
-                }
-            }
-        }
-
-        // -----------------------------------------------------------------
-        // 3. LICENSES (Columns A to E)
-        // -----------------------------------------------------------------
-        string licenseSheet = WorkbookSession.ResolveSheetName(LicenseSheetAliases, "Staff_License");
-        IntPtr licenseSheetId = WorkbookSession.GetSheetId(licenseSheet);
-
-        var licenseRef = licenseSheetId != IntPtr.Zero
-            ? new ExcelReference(1, 1000, 0, LicenseColumnCount - 1, licenseSheetId)
-            : new ExcelReference(1, 1000, 0, LicenseColumnCount - 1);
-
-        if (licenseRef.GetValue() is object[,] licenseGrid)
-        {
-            int rows = licenseGrid.GetLength(0);
-            for (int r = 0; r < rows; r++)
-            {
-                object rawId = licenseGrid[r, 0];
-                if (rawId == null || rawId is ExcelEmpty || !long.TryParse(rawId.ToString(), out long staffId) || staffId == 0)
+                object rawStaffId = vLicGrid[r, 1];
+                if (rawStaffId == null || rawStaffId is ExcelEmpty || !long.TryParse(rawStaffId.ToString(), out long staffId) || staffId <= 0)
                     continue;
 
                 if (!staffLookup.TryGetValue(staffId, out var targetStaff))
                 {
-                    validationErrors.Add($"• Row {r + 2} [Staff_License]: Staff ID {staffId} does not exist in Staff Master.");
+                    validationErrors.Add($"• Row {r + 2} [Vehicle Licenses]: Staff ID {staffId} does not exist in 'All Staff'.");
                     continue;
                 }
 
-                string licStr = CleanCellString(licenseGrid[r, 2]);
-                if (string.IsNullOrWhiteSpace(licStr)) continue;
+                string licClassStr = CleanCellString(vLicGrid[r, 3]);
+                if (string.IsNullOrWhiteSpace(licClassStr))
+                    continue;
 
-                if (!Enum.TryParse(licStr, true, out LicenseClass licClass) || licClass == LicenseClass.None)
+                if (!Enum.TryParse(licClassStr, true, out LicenseClass licClass) || licClass == LicenseClass.None)
                 {
-                    validationErrors.Add($"• Row {r + 2} [Staff_License]: Unrecognized License Class '{licStr}' for Staff ID {staffId}.");
+                    validationErrors.Add($"• Row {r + 2} [Vehicle Licenses]: Invalid License_Class '{licClassStr}' for Staff ID {staffId}.");
                     continue;
                 }
 
-                DateOnly expiry = ParseExcelDate(licenseGrid[r, 3]);
-                // FALLBACK: If expiry not provided, default to 1 year ahead
-                if (expiry == default || expiry <= DateOnly.FromDateTime(DateTime.Today.AddYears(-10)))
-                {
-                    expiry = DateOnly.FromDateTime(DateTime.Today.AddYears(1));
-                }
+                DateOnly renewDate = ParseExcelDate(vLicGrid[r, 4]);
+                DateOnly expiryDate = ParseExcelDate(vLicGrid[r, 5]);
+                string statusStr = CleanCellString(vLicGrid[r, 6]);
 
-                string statusStr = CleanCellString(licenseGrid[r, 4]);
-                LicenseStatus status = Enum.TryParse(statusStr, true, out LicenseStatus parsedLicStatus)
-                    ? parsedLicStatus
-                    : (expiry < DateOnly.FromDateTime(DateTime.Today) ? LicenseStatus.Invalid : LicenseStatus.Valid);
+                if (renewDate == default) renewDate = DateOnly.FromDateTime(DateTime.Today);
+                if (expiryDate == default) expiryDate = renewDate.AddYears(1);
 
-                targetStaff.Licenses.Add(new VehicleRecord
+                LicenseStatus licStatus = Enum.TryParse(statusStr, true, out LicenseStatus parsedStatus)
+                    ? parsedStatus
+                    : (DateOnly.FromDateTime(DateTime.Today) > expiryDate ? LicenseStatus.Invalid : LicenseStatus.Valid);
+
+                targetStaff.VehicleLicenses.Add(new VehicleLicense
                 {
+                    LicenseID = licId,
                     StaffID = staffId,
                     LicenseClass = licClass,
-                    ExpiryDate = expiry,
-                    LicenseStatus = status
+                    RenewDate = renewDate,
+                    ExpiryDate = expiryDate,
+                    LicenseStatus = licStatus
                 });
             }
         }
 
-        // -----------------------------------------------------------------
-        // 4. PRE-SAVE GATEWAY: ABORT IF HARD ERRORS DETECTED
-        // -----------------------------------------------------------------
+        // -------------------------------------------------------------
+        // 3. SKILL LICENSES (Sheet: "Skill Licenses", Columns A to G)
+        // -------------------------------------------------------------
+        string sLicSheet = WorkbookSession.ResolveSheetName(SkillLicenseSheetAliases, "Skill Licenses");
+        IntPtr sLicSheetId = WorkbookSession.GetSheetId(sLicSheet);
+
+        var sLicRef = sLicSheetId != IntPtr.Zero
+            ? new ExcelReference(1, 1000, 0, SkillLicenseColumnSpan - 1, sLicSheetId)
+            : new ExcelReference(1, 1000, 0, SkillLicenseColumnSpan - 1);
+
+        if (sLicRef.GetValue() is object[,] sLicGrid)
+        {
+            int rows = sLicGrid.GetLength(0);
+            for (int r = 0; r < rows; r++)
+            {
+                object rawLicId = sLicGrid[r, 0];
+                long.TryParse(rawLicId?.ToString(), out long licId);
+
+                object rawStaffId = sLicGrid[r, 1];
+                if (rawStaffId == null || rawStaffId is ExcelEmpty || !long.TryParse(rawStaffId.ToString(), out long staffId) || staffId <= 0)
+                    continue;
+
+                if (!staffLookup.TryGetValue(staffId, out var targetStaff))
+                {
+                    validationErrors.Add($"• Row {r + 2} [Skill Licenses]: Staff ID {staffId} does not exist in 'All Staff'.");
+                    continue;
+                }
+
+                string skillType = CleanCellString(sLicGrid[r, 3]);
+                if (string.IsNullOrWhiteSpace(skillType))
+                    continue;
+
+                // VALIDATION CHECK: License Type must exist in LicenseTypesList
+                if (allowedLicenseTypes.Count > 0 && !allowedLicenseTypes.Contains(skillType))
+                {
+                    string allowedJoined = string.Join(", ", allowedLicenseTypes);
+                    validationErrors.Add($"• Row {r + 2} [Skill Licenses]: Unrecognized License Type '{skillType}' for Staff ID {staffId}. Allowed types: [{allowedJoined}].");
+                    continue;
+                }
+
+                DateOnly renewDate = ParseExcelDate(sLicGrid[r, 4]);
+                DateOnly expiryDate = ParseExcelDate(sLicGrid[r, 5]);
+                string statusStr = CleanCellString(sLicGrid[r, 6]);
+
+                if (renewDate == default) renewDate = DateOnly.FromDateTime(DateTime.Today);
+                if (expiryDate == default) expiryDate = renewDate.AddYears(1);
+
+                LicenseStatus licStatus = Enum.TryParse(statusStr, true, out LicenseStatus parsedStatus)
+                    ? parsedStatus
+                    : (DateOnly.FromDateTime(DateTime.Today) > expiryDate ? LicenseStatus.Invalid : LicenseStatus.Valid);
+
+                targetStaff.SkillLicenses.Add(new SkillLicense
+                {
+                    LicenseID = licId,
+                    StaffID = staffId,
+                    LicenseType = skillType,
+                    RenewDate = renewDate,
+                    ExpiryDate = expiryDate,
+                    LicenseStatus = licStatus
+                });
+            }
+        }
+
+        // -------------------------------------------------------------
+        // PRE-SAVE VALIDATION GATEWAY: Prevent dirty database saves
+        // -------------------------------------------------------------
         if (validationErrors.Count > 0)
         {
             var sb = new StringBuilder();
-            sb.AppendLine("Cannot save to database due to the following data validation issues:\n");
-            foreach (var err in validationErrors)
-            {
-                sb.AppendLine(err);
-            }
-            sb.AppendLine("\nPlease correct these errors on the worksheet and try saving again.");
+            sb.AppendLine("Cannot save to system due to validation errors:\n");
+            foreach (var err in validationErrors) sb.AppendLine(err);
+            sb.AppendLine("\nPlease correct the entries and try saving again.");
 
             MessageBox.Show(sb.ToString(), "Pre-Save Validation Failed", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return new List<StaffRecord>(); // Returns empty list so save safely aborts without overwriting DB
+            return new List<StaffRecord>();
         }
 
         return result;
@@ -236,23 +231,24 @@ public static class SheetMapper
     {
         if (staffList == null || staffList.Count == 0) return;
 
-        string targetMaster = WorkbookSession.ResolveSheetName(AllStaffSheet, "Staff_Master");
-        string targetPref = WorkbookSession.ResolveSheetName(PreferenceSheetAliases, "Staff_Preference");
-        string targetLic = WorkbookSession.ResolveSheetName(LicenseSheetAliases, "Staff_License");
+        string targetMaster = WorkbookSession.ResolveSheetName(MasterSheetAliases, "All Staff");
+        string targetVLic = WorkbookSession.ResolveSheetName(VehicleLicenseSheetAliases, "Vehicle Licenses");
+        string targetSLic = WorkbookSession.ResolveSheetName(SkillLicenseSheetAliases, "Skill Licenses");
 
         object initialActiveSheet = XlCall.Excel(XlCall.xlfGetDocument, 1);
 
         try
         {
             XlCall.Excel(XlCall.xlcEcho, false);
-            int rowCount = staffList.Count;
 
-            // 1. Populate Master Table
+            // 1. POPULATE ALL STAFF (Columns A to D)
             XlCall.Excel(XlCall.xlcWorkbookSelect, new object[] { targetMaster });
-            var clearMasterRef = new ExcelReference(1, 500, 0, MasterColumnCount - 1);
-            clearMasterRef.SetValue(new object[500, MasterColumnCount]);
+            var clearMasterRef = new ExcelReference(1, 500, 0, MasterColumnSpan - 1);
+            clearMasterRef.SetValue(new object[500, MasterColumnSpan]);
 
-            object[,] masterOutput = new object[rowCount, MasterColumnCount];
+            int rowCount = staffList.Count;
+            object[,] masterOutput = new object[rowCount, MasterColumnSpan];
+
             for (int i = 0; i < rowCount; i++)
             {
                 var s = staffList[i];
@@ -260,74 +256,81 @@ public static class SheetMapper
                 masterOutput[i, 1] = s.StaffDetails.FamilyName;
                 masterOutput[i, 2] = s.StaffDetails.MiddleName;
                 masterOutput[i, 3] = s.StaffDetails.GivenName;
-                masterOutput[i, 4] = s.StaffDetails.NRIC;
-                masterOutput[i, 5] = s.StaffDetails.Department == Department.None ? "Worker" : s.StaffDetails.Department.ToString();
-                masterOutput[i, 6] = s.StaffDetails.PayType == PayType.None ? "Hourly" : s.StaffDetails.PayType.ToString();
-                masterOutput[i, 7] = s.StaffDetails.BaseRate;
-                masterOutput[i, 8] = s.StaffDetails.OvertimeRate;
-                masterOutput[i, 9] = s.StaffDetails.ActiveStatus.ToString();
             }
 
-            var writeMasterRef = new ExcelReference(1, rowCount, 0, MasterColumnCount - 1);
+            var writeMasterRef = new ExcelReference(1, rowCount, 0, MasterColumnSpan - 1);
             writeMasterRef.SetValue(masterOutput);
 
-            // 2. Populate Preference Table
-            XlCall.Excel(XlCall.xlcWorkbookSelect, new object[] { targetPref });
-            var clearPrefRef = new ExcelReference(1, 500, 0, PreferenceColumnCount - 1);
-            clearPrefRef.SetValue(new object[500, PreferenceColumnCount]);
-
-            object[,] prefOutput = new object[rowCount, PreferenceColumnCount];
-            for (int i = 0; i < rowCount; i++)
-            {
-                var s = staffList[i];
-                prefOutput[i, 0] = s.StaffID;
-                prefOutput[i, 1] = s.StaffDetails.Name;
-                prefOutput[i, 2] = s.Preference.PrimaryTeam;
-                prefOutput[i, 3] = s.Preference.SecondaryTeam;
-                prefOutput[i, 4] = s.Preference.PrimarySkill;
-                prefOutput[i, 5] = s.Preference.SecondarySkill;
-                prefOutput[i, 6] = s.Preference.BlackListTask;
-                prefOutput[i, 7] = s.Preference.PreferredShift == Shift.None ? "Morning" : s.Preference.PreferredShift.ToString();
-                prefOutput[i, 8] = s.Preference.MaxDaysPerWeek <= 0 ? 6 : s.Preference.MaxDaysPerWeek;
-                prefOutput[i, 9] = s.Preference.PreferredVehicleType == VehicleType.None ? string.Empty : s.Preference.PreferredVehicleType.ToString();
-                prefOutput[i, 10] = s.Preference.DedicatedVehicleID.HasValue ? s.Preference.DedicatedVehicleID.Value : string.Empty;
-            }
-
-            var writePrefRef = new ExcelReference(1, rowCount, 0, PreferenceColumnCount - 1);
-            writePrefRef.SetValue(prefOutput);
-
-            // 3. Populate Licenses Table (Columns A to E)
-            var allLicenses = new List<(StaffRecord Staff, VehicleRecord License)>();
+            // 2. POPULATE VEHICLE LICENSES (Columns A to G)
+            var allVLicenses = new List<(StaffRecord Staff, VehicleLicense Lic)>();
             foreach (var s in staffList)
             {
-                if (s.Licenses != null)
+                if (s.VehicleLicenses != null)
                 {
-                    foreach (var lic in s.Licenses)
+                    foreach (var lic in s.VehicleLicenses)
                     {
-                        allLicenses.Add((s, lic));
+                        allVLicenses.Add((s, lic));
                     }
                 }
             }
 
-            XlCall.Excel(XlCall.xlcWorkbookSelect, new object[] { targetLic });
-            var clearLicRef = new ExcelReference(1, 1000, 0, LicenseColumnCount - 1);
-            clearLicRef.SetValue(new object[1000, LicenseColumnCount]);
+            XlCall.Excel(XlCall.xlcWorkbookSelect, new object[] { targetVLic });
+            var clearVRef = new ExcelReference(1, 1000, 0, VehicleLicenseColumnSpan - 1);
+            clearVRef.SetValue(new object[1000, VehicleLicenseColumnSpan]);
 
-            if (allLicenses.Count > 0)
+            if (allVLicenses.Count > 0)
             {
-                object[,] licOutput = new object[allLicenses.Count, LicenseColumnCount];
-                for (int i = 0; i < allLicenses.Count; i++)
+                object[,] vOutput = new object[allVLicenses.Count, VehicleLicenseColumnSpan];
+                for (int i = 0; i < allVLicenses.Count; i++)
                 {
-                    var (staff, lic) = allLicenses[i];
-                    licOutput[i, 0] = lic.StaffID;
-                    licOutput[i, 1] = staff.StaffDetails.Name;
-                    licOutput[i, 2] = lic.LicenseClass == LicenseClass.None ? string.Empty : lic.LicenseClass.ToString();
-                    licOutput[i, 3] = lic.ExpiryDate.ToDateTime(TimeOnly.MinValue).ToOADate();
-                    licOutput[i, 4] = lic.LicenseStatus.ToString();
+                    var (staff, lic) = allVLicenses[i];
+                    vOutput[i, 0] = lic.LicenseID > 0 ? (object)lic.LicenseID : string.Empty;
+                    vOutput[i, 1] = lic.StaffID;
+                    vOutput[i, 2] = staff.StaffDetails.Name;
+                    vOutput[i, 3] = lic.LicenseClass == LicenseClass.None ? string.Empty : lic.LicenseClass.ToString();
+                    vOutput[i, 4] = lic.RenewDate.ToDateTime(TimeOnly.MinValue).ToOADate();
+                    vOutput[i, 5] = lic.ExpiryDate.ToDateTime(TimeOnly.MinValue).ToOADate();
+                    vOutput[i, 6] = lic.LicenseStatus.ToString();
                 }
 
-                var writeLicRef = new ExcelReference(1, allLicenses.Count, 0, LicenseColumnCount - 1);
-                writeLicRef.SetValue(licOutput);
+                var writeVRef = new ExcelReference(1, allVLicenses.Count, 0, VehicleLicenseColumnSpan - 1);
+                writeVRef.SetValue(vOutput);
+            }
+
+            // 3. POPULATE SKILL LICENSES (Columns A to G)
+            var allSLicenses = new List<(StaffRecord Staff, SkillLicense Lic)>();
+            foreach (var s in staffList)
+            {
+                if (s.SkillLicenses != null)
+                {
+                    foreach (var lic in s.SkillLicenses)
+                    {
+                        allSLicenses.Add((s, lic));
+                    }
+                }
+            }
+
+            XlCall.Excel(XlCall.xlcWorkbookSelect, new object[] { targetSLic });
+            var clearSRef = new ExcelReference(1, 1000, 0, SkillLicenseColumnSpan - 1);
+            clearSRef.SetValue(new object[1000, SkillLicenseColumnSpan]);
+
+            if (allSLicenses.Count > 0)
+            {
+                object[,] sOutput = new object[allSLicenses.Count, SkillLicenseColumnSpan];
+                for (int i = 0; i < allSLicenses.Count; i++)
+                {
+                    var (staff, lic) = allSLicenses[i];
+                    sOutput[i, 0] = lic.LicenseID > 0 ? (object)lic.LicenseID : string.Empty;
+                    sOutput[i, 1] = lic.StaffID;
+                    sOutput[i, 2] = staff.StaffDetails.Name;
+                    sOutput[i, 3] = lic.LicenseType;
+                    sOutput[i, 4] = lic.RenewDate.ToDateTime(TimeOnly.MinValue).ToOADate();
+                    sOutput[i, 5] = lic.ExpiryDate.ToDateTime(TimeOnly.MinValue).ToOADate();
+                    sOutput[i, 6] = lic.LicenseStatus.ToString();
+                }
+
+                var writeSRef = new ExcelReference(1, allSLicenses.Count, 0, SkillLicenseColumnSpan - 1);
+                writeSRef.SetValue(sOutput);
             }
         }
         finally
@@ -348,13 +351,45 @@ public static class SheetMapper
         }
     }
 
-    private static string CleanCellString(object? cell)
+    /// <summary>
+    /// Evaluates the dynamic =LicenseTypesList defined name in Excel to enforce validation in C#.
+    /// </summary>
+    private static HashSet<string> FetchAllowedSkillLicenseTypes()
     {
-        if (cell == null || cell is ExcelEmpty || cell is ExcelMissing || cell is ExcelError)
-            return string.Empty;
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            dynamic xlApp = ExcelDnaUtil.Application;
+            dynamic eval = xlApp.Evaluate("LicenseTypesList");
 
-        return cell.ToString()?.Trim() ?? string.Empty;
+            if (eval is object[,] arr)
+            {
+                int rCount = arr.GetLength(0);
+                int cCount = arr.GetLength(1);
+                for (int r = 1; r <= rCount; r++)
+                {
+                    for (int c = 1; c <= cCount; c++)
+                    {
+                        string val = arr[r, c]?.ToString()?.Trim() ?? string.Empty;
+                        if (!string.IsNullOrEmpty(val)) set.Add(val);
+                    }
+                }
+            }
+            else if (eval != null)
+            {
+                string single = eval.ToString()?.Trim() ?? string.Empty;
+                if (!string.IsNullOrEmpty(single)) set.Add(single);
+            }
+        }
+        catch { }
+
+        return set;
     }
+
+    private static string CleanCellString(object? cell) =>
+        (cell == null || cell is ExcelEmpty || cell is ExcelMissing || cell is ExcelError)
+            ? string.Empty
+            : cell.ToString()?.Trim() ?? string.Empty;
 
     private static DateOnly ParseExcelDate(object? cell)
     {

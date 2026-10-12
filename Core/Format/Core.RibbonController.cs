@@ -84,15 +84,15 @@ public class RibbonController : ExcelRibbon
 
         if (isPressed)
         {
-            // 1. Unhide Lookups sheet
-            WorkbookSession.SetLookupsVisibility(visible: true);
+            // 1. Unhide both Lookups and Data auxiliary sheets
+            WorkbookSession.SetAuxiliarySheetsVisibility(visible: true);
 
             // 2. Sync enums
             TypesToExcel.SyncAllCoreEnums();
 
             MessageBox.Show(
                 "Template Edit Mode is now ENABLED.\n\n" +
-                "• 'Lookups' worksheet is now VISIBLE.\n" +
+                "• 'Lookups' & 'Data' worksheets are now VISIBLE at the back.\n" +
                 "• All Core Enums have been synchronized.\n" +
                 "• Double-clicking dropdown cells will open the Template Inspector.",
                 "Template Mode",
@@ -102,12 +102,12 @@ public class RibbonController : ExcelRibbon
         }
         else
         {
-            // Hide Lookups sheet back down
-            WorkbookSession.SetLookupsVisibility(visible: false);
+            // Hide both Lookups and Data sheets
+            WorkbookSession.SetAuxiliarySheetsVisibility(visible: false);
 
             MessageBox.Show(
                 "Template Edit Mode is now DISABLED.\n\n" +
-                "• 'Lookups' worksheet is now HIDDEN.\n" +
+                "• 'Lookups' & 'Data' worksheets are now HIDDEN.\n" +
                 "• Switched to Operational Mode.",
                 "Operational Mode",
                 MessageBoxButtons.OK,
@@ -140,7 +140,7 @@ public class RibbonController : ExcelRibbon
             TypesToExcel.SyncAllCoreEnums();
             MessageBox.Show(
                 "All Core Enums have been synchronized to the 'Lookups' sheet successfully.\n\n" +
-                "Press Ctrl + F3 to inspect the registered *List names.",
+                "Press Ctrl + F3 to inspect the registered *List names in Name Manager.",
                 "Sync Complete",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Information
@@ -155,15 +155,20 @@ public class RibbonController : ExcelRibbon
     public void OnPurgeTemplateDataClicked(IRibbonControl control)
     {
         var confirm = MessageBox.Show(
-            "Clear all row data on this template?",
-            "Purge Data",
+            "Clear all operational data rows on this template?\n\n(Headers, styles, and the 'Lookups' and 'Data' sheets will be preserved)",
+            "Purge Template Data",
             MessageBoxButtons.YesNo,
             MessageBoxIcon.Warning
         );
 
         if (confirm == DialogResult.Yes)
         {
-            ExcelAsyncUtil.QueueAsMacro(() => WorkbookSession.PurgeAllSheetsData());
+            ExcelAsyncUtil.QueueAsMacro(() =>
+            {
+                WorkbookSession.PurgeAllSheetsData();
+                MessageBox.Show("All sheet data has been purged. Template is now clean.",
+                                "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            });
         }
     }
 }

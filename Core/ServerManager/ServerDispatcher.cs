@@ -10,6 +10,9 @@ public static class ServerDispatcher
 {
     private static readonly PostgreSqlService DbService = new();
 
+    // -------------------------------------------------------------
+    // Main Routing Dispatcher:
+    // -------------------------------------------------------------
     public static void Dispatch<T>(T data)
     {
         if (data is IEnumerable<StaffRecord> staffList)
@@ -60,6 +63,9 @@ public static class ServerDispatcher
 
             var allMaintenance = list.SelectMany(v => v.Maintenances.Select(m =>
             {
+                // Inject parent plate if missing
+                if (string.IsNullOrWhiteSpace(m.VehiclePlate))
+                    m.VehiclePlate = v.VehiclePlate;
                 return m;
             })).ToList();
             SaveVehicleMaintenanceToDb(allMaintenance);
@@ -320,19 +326,15 @@ public static class ServerDispatcher
         var masterRecords = vehicleItems.Select(v => new
         {
             VehiclePlate = v.VehiclePlate.Trim().ToUpperInvariant(),
-            Vin = v.VehicleDetail.VIN,
+            Vin = v.VehicleDetail.VIN ?? string.Empty,
             VehicleType = v.VehicleDetail.Type.ToString(),
-            Brand = v.VehicleDetail.Brand,
-            Model = v.VehicleDetail.Model,
+            Brand = v.VehicleDetail.Brand ?? string.Empty,
+            Model = v.VehicleDetail.Model ?? string.Empty,
             RoadTaxExpiry = v.VehicleDetail.RoadTaxExpiry.ToDateTime(TimeOnly.MinValue),
             InspectionExpiry = v.VehicleDetail.InspectionExpiry.ToDateTime(TimeOnly.MinValue),
             CurrentOdometer = v.VehicleDetail.CurrentOdometer,
             Status = v.VehicleStatus.ToString()
         }).ToList();
-
-        const string sqlReconcileMaintenance = @"
-        DELETE FROM vehicle_maintenance 
-        WHERE vehicle_plate != ALL(@ActivePlates);";
 
         const string sqlReconcileVehicles = @"
         DELETE FROM vehicle_master 
@@ -360,7 +362,6 @@ public static class ServerDispatcher
 
         DbService.ExecuteInTransaction((db, trans) =>
         {
-            db.Execute(sqlReconcileMaintenance, new { ActivePlates = activePlates }, transaction: trans);
             db.Execute(sqlReconcileVehicles, new { ActivePlates = activePlates }, transaction: trans);
             db.Execute(sqlMasterUpsert, masterRecords, transaction: trans);
         });
@@ -368,40 +369,42 @@ public static class ServerDispatcher
 
     private static void SaveVehicleMaintenanceToDb(IEnumerable<Maintenance> records)
     {
-        var validRecords = records.Where(m => m.VehicleID > 0).Select(m => new
-        {
-            MaintenanceId = m.MaintenanceID,
-            VehicleId = m.VehicleID,
-            ServiceType = m.ServiceType.ToString(),
-            DateIn = m.DateIn.ToDateTime(TimeOnly.MinValue),
-            EstimatedReturn = m.EstimatedReturn.ToDateTime(TimeOnly.MinValue),
-            DateCompleted = m.DateCompleted.HasValue
-                ? (DateTime?)m.DateCompleted.Value.ToDateTime(TimeOnly.MinValue)
-                : null,
-            OdometerIn = m.OdometerIn,
-            OdometerOut = m.OdometerOut,
-            RepairCost = m.RepairCost,
-            WorkshopName = m.WorkshopName,
-            WorkshopAddress = m.WorkshopAddress,
-            Status = m.MaintenanceStatus.ToString(),
-            Remarks = m.Remarks
-        }).ToList();
+        var validRecords = records
+            .Where(m => !string.IsNullOrWhiteSpace(m.VehiclePlate))
+            .Select(m => new
+            {
+                MaintenanceId = m.MaintenanceID,
+                VehiclePlate = m.VehiclePlate.Trim().ToUpperInvariant(),
+                ServiceType = m.ServiceType.ToString(),
+                DateIn = m.DateIn.ToDateTime(TimeOnly.MinValue),
+                EstimatedReturn = m.EstimatedReturn.ToDateTime(TimeOnly.MinValue),
+                DateCompleted = m.DateCompleted.HasValue
+                    ? (DateTime?)m.DateCompleted.Value.ToDateTime(TimeOnly.MinValue)
+                    : null,
+                OdometerIn = m.OdometerIn,
+                OdometerOut = m.OdometerOut,
+                RepairCost = m.RepairCost,
+                WorkshopName = m.WorkshopName,
+                WorkshopAddress = m.WorkshopAddress,
+                Status = m.MaintenanceStatus.ToString(),
+                Remarks = m.Remarks
+            }).ToList();
 
         if (!validRecords.Any()) return;
 
         const string sqlMaintenanceUpsert = @"
         INSERT INTO vehicle_maintenance (
-            maintenance_id, vehicle_id, service_type, date_in, estimated_return,
+            maintenance_id, vehicle_plate, service_type, date_in, estimated_return,
             date_completed, odometer_in, odometer_out, repair_cost, workshop_name,
             workshop_address, status, remarks
         )
         VALUES (
-            @MaintenanceId, @VehicleId, @ServiceType, @DateIn, @EstimatedReturn,
+            @MaintenanceId, @VehiclePlate, @ServiceType, @DateIn, @EstimatedReturn,
             @DateCompleted, @OdometerIn, @OdometerOut, @RepairCost, @WorkshopName,
             @WorkshopAddress, @Status, @Remarks
         )
         ON CONFLICT (maintenance_id) DO UPDATE SET
-            vehicle_id       = EXCLUDED.vehicle_id,
+            vehicle_plate    = EXCLUDED.vehicle_plate,
             service_type     = EXCLUDED.service_type,
             date_in          = EXCLUDED.date_in,
             estimated_return = EXCLUDED.estimated_return,

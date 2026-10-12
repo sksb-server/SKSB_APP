@@ -35,20 +35,40 @@ public static class Commands
     }
 
     /// <summary>
-    /// Checks whether a cell possesses the "DropDown" named style.
+    /// Checks whether a cell possesses the "DropDown" named style OR has list validation.
     /// </summary>
     public static bool IsCustomDropdownCell(dynamic cell)
     {
+        if (cell == null) return false;
+
         try
         {
-            if (cell == null) return false;
-
-            // Grab the top-left cell if a range is selected
             dynamic singleCell = cell.Cells[1, 1];
-            if (singleCell.Style == null) return false;
 
-            string currentStyleName = singleCell.Style.Name?.ToString() ?? string.Empty;
-            return string.Equals(currentStyleName, DropDownStyleName, StringComparison.OrdinalIgnoreCase);
+            // 1. Try checking the Style name
+            try
+            {
+                dynamic style = singleCell.Style;
+                if (style != null)
+                {
+                    string sName = style.Name?.ToString() ?? string.Empty;
+                    if (string.Equals(sName, DropDownStyleName, StringComparison.OrdinalIgnoreCase))
+                        return true;
+                }
+            }
+            catch { }
+
+            // 2. Fallback: check if the cell has List validation (Type 3 = xlValidateList)
+            try
+            {
+                if (singleCell.Validation != null && singleCell.Validation.Type == 3)
+                {
+                    return true;
+                }
+            }
+            catch { }
+
+            return false;
         }
         catch
         {
@@ -67,18 +87,26 @@ public static class Commands
         try
         {
             string currentList = string.Empty;
+            bool isMultiSelect = true;
+
             try
             {
                 if (cell.Validation != null && cell.Validation.Type == 3)
                 {
                     currentList = cell.Validation.Formula1 ?? string.Empty;
+                    isMultiSelect = !cell.Validation.ShowError;
                 }
             }
             catch { }
 
+            // Default to a helpful prompt if empty
+            if (string.IsNullOrWhiteSpace(currentList))
+            {
+                currentList = "=StaffNamesList";
+            }
+
             string cellAddress = cell.Address?.ToString() ?? "Selected Cell";
 
-            // 1. Create the DPI-aware parent form
             using var form = new Form
             {
                 Text = $"Template Editor - {cellAddress}",
@@ -94,7 +122,6 @@ public static class Commands
                 Padding = new Padding(12)
             };
 
-            // 2. Use a TableLayoutPanel so row heights scale fluidly with text
             var tableLayout = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
@@ -105,34 +132,30 @@ public static class Commands
             };
             tableLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
 
-            // Info Label
             var lblInfo = new Label
             {
                 Text = $"Target Style: '{DropDownStyleName}'\n" +
-           "Source list formula (e.g. =DaysOfWeekList or =Lookups!$M$2#):",
+                       "Enter source list formula (e.g. =StaffNamesList, =DepartmentList, =LicenseTypesList):",
                 AutoSize = true,
                 Margin = new Padding(0, 0, 0, 8)
             };
 
-            // List Source / Formula TextBox
             var txtFormula = new TextBox
             {
                 Text = currentList,
                 Font = new Font("Segoe UI", 10f),
-                Width = 320,
+                Width = 340,
                 Margin = new Padding(0, 0, 0, 10)
             };
 
-            // Multi-Select CheckBox
             var chkMultiSelect = new CheckBox
             {
-                Text = "Allow Multi-Selections (Disables Excel's Single-Item Blocker)",
-                Checked = true,
+                Text = "Allow Multi-Selections (Checklist popup)",
+                Checked = isMultiSelect,
                 AutoSize = true,
                 Margin = new Padding(0, 0, 0, 14)
             };
 
-            // Action Buttons Panel
             var btnPanel = new FlowLayoutPanel
             {
                 FlowDirection = FlowDirection.RightToLeft,
@@ -164,6 +187,12 @@ public static class Commands
                 string formula = txtFormula.Text.Trim();
                 if (!string.IsNullOrEmpty(formula))
                 {
+                    // Ensure the style exists and is assigned
+                    dynamic xlApp = ExcelDnaUtil.Application;
+                    EnsureNamedStyleExists(xlApp, DropDownStyleName);
+                    cell.Style = DropDownStyleName;
+
+                    // Apply the validation formula
                     cell.Validation.Delete();
                     cell.Validation.Add(3, 1, 1, formula);
                     cell.Validation.IgnoreBlank = true;
@@ -178,7 +207,6 @@ public static class Commands
             btnPanel.Controls.Add(btnCancel);
             btnPanel.Controls.Add(btnSave);
 
-            // Add elements into TableLayoutPanel rows
             tableLayout.Controls.Add(lblInfo, 0, 0);
             tableLayout.Controls.Add(txtFormula, 0, 1);
             tableLayout.Controls.Add(chkMultiSelect, 0, 2);

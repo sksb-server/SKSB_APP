@@ -1,6 +1,7 @@
 ﻿namespace SKSB_App.Core.Format;
 
 using System;
+using System.Windows.Forms;
 using ExcelDna.Integration;
 using SKSB_App.Core.WorkbookManager;
 
@@ -14,17 +15,14 @@ public class Events : IExcelAddIn
     {
         ExcelAsyncUtil.QueueAsMacro(() =>
         {
-            // 1. Hook double click
             HookDoubleClick();
 
-            // 2. Hook window switch events
             try
             {
                 XlCall.Excel(XlCall.xlcOnWindow, Type.Missing, "OnWindowActivatedMacro");
             }
             catch { }
 
-            // 3. Delayed cold-boot timer (allows Excel window to initialize fully)
             try
             {
                 double nowSerial = Convert.ToDouble(XlCall.Excel(XlCall.xlfNow));
@@ -54,10 +52,7 @@ public class Events : IExcelAddIn
                 RibbonController.RefreshRibbonUI();
             }
         }
-        catch (Exception ex)
-        {
-            System.Diagnostics.Debug.WriteLine($"[DelayedTemplateCheckMacro] Error: {ex.Message}");
-        }
+        catch { }
     }
 
     [ExcelCommand(Name = "OnWindowActivatedMacro")]
@@ -104,21 +99,34 @@ public class Events : IExcelAddIn
 
     private static void OnSheetBeforeDoubleClick(dynamic sh, dynamic target, ref bool cancel)
     {
-        if (!Commands.IsCustomDropdownCell(target))
-            return;
-
-        cancel = true; // Prevent default cell text editing
-
-        // Re-evaluate template status right on click to guarantee accurate state
-        WorkbookSession.EvaluateTemplateMode(showHeadsUp: false);
-
-        if (WorkbookSession.IsTemplateEditMode)
+        try
         {
-            Commands.InspectAndEditCell(target);
+            // Re-evaluate template status right on click
+            WorkbookSession.EvaluateTemplateMode(showHeadsUp: false);
+
+            if (WorkbookSession.IsTemplateEditMode)
+            {
+                // If in Template Edit Mode, cancel in-cell editing and launch inspector
+                if (Commands.IsCustomDropdownCell(target))
+                {
+                    cancel = true; // Stop the blinking text cursor
+                    Commands.InspectAndEditCell(target);
+                    return;
+                }
+            }
+            else
+            {
+                // Operational mode
+                if (Commands.IsCustomDropdownCell(target))
+                {
+                    cancel = true;
+                    Commands.ShowChecklistForActiveCell(target);
+                }
+            }
         }
-        else
+        catch (Exception ex)
         {
-            Commands.ShowChecklistForActiveCell(target);
+            System.Diagnostics.Debug.WriteLine($"[Core DoubleClick Error] {ex.Message}");
         }
     }
 }

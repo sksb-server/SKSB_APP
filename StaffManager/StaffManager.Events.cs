@@ -2,11 +2,15 @@
 
 using ExcelDna.Integration;
 using SKSB_App.Core.FileManager;
+using SKSB_App.Core.FileManager.Constants;
+using SKSB_App.Core.Format;
 using SKSB_App.Core.ServerManager;
 using SKSB_App.Core.Services;
 using SKSB_App.Core.Types;
 using SKSB_App.Core.WorkbookManager;
 using System;
+using System.Collections.Generic;
+using System.IO;
 using System.Windows.Forms;
 
 public class Events : IExcelAddIn
@@ -15,25 +19,22 @@ public class Events : IExcelAddIn
     private static dynamic? _appEvents;
     private static WorkbookBeforeCloseDelegate? _closeHandler;
 
-    public static bool IsTemplateEditMode { get; set; } = false;
-
     public void AutoOpen()
     {
         ExcelAsyncUtil.QueueAsMacro(() =>
         {
-            HookApplicationClose(); //[cite: 10]
+            HookApplicationClose();
 
-            // 1. Synchronise Staff Manager specific enums into Lookups tab
-            SyncStaffEnums();
+            // 1. Sync live database entities (e.g. Registered Vehicle Plates) to the 'Data' sheet
             SyncStaffLookupsData();
 
-            // 2. Delayed auto-load live records[cite: 10]
+            // 2. Startup reconciliation with conflict detection
             double nowSerial = Convert.ToDouble(XlCall.Excel(XlCall.xlfNow));
-            XlCall.Excel(XlCall.xlcOnTime, nowSerial + (1.0 / 86400.0), "DelayedAutoLoadMacro"); //[cite: 10]
+            XlCall.Excel(XlCall.xlcOnTime, nowSerial + (1.0 / 86400.0), "DelayedAutoLoadMacro");
 
-            // 3. Hotkeys[cite: 10]
-            XlCall.Excel(XlCall.xlcOnKey, "^s", "OnHotKeySave"); //[cite: 10]
-            XlCall.Excel(XlCall.xlcOnKey, "^+s", "OnHotKeySave"); //[cite: 10]
+            // 3. Hotkeys
+            XlCall.Excel(XlCall.xlcOnKey, "^s", "OnHotKeySave");
+            XlCall.Excel(XlCall.xlcOnKey, "^+s", "OnHotKeySave");
         });
     }
 
@@ -44,29 +45,19 @@ public class Events : IExcelAddIn
             UnhookApplicationClose();
             XlCall.Excel(XlCall.xlcOnKey, "^s");
             XlCall.Excel(XlCall.xlcOnKey, "^+s");
-            XlCall.Excel(XlCall.xlcMessage, false);
         });
-    }
-
-    public static void SyncStaffEnums()
-    {
-        TypesToExcel.Sync(            );
     }
 
     public static void SyncStaffLookupsData()
     {
-        var vehicles = Services.Load<List<VehicleRecord>>();
-        if (vehicles != null && vehicles.Count > 0)
-        {
-            // sync vehicle records from server
-        }
+        // Pushes Vehicle plates from database snapshot into 'Data' sheet -> Generates =VehiclePlateList in Name Manager
+        DataToExcel.SyncData<VehicleRecord, string>("VehiclePlate", v => v.VehiclePlate);
     }
 
     private static void HookApplicationClose()
     {
         try
         {
-            // Dynamic binding via ExcelDnaUtil (requires zero COM references in .csproj)
             dynamic xlApp = ExcelDnaUtil.Application;
             _appEvents = xlApp;
             _closeHandler = new WorkbookBeforeCloseDelegate(OnWorkbookBeforeClose);
@@ -96,42 +87,59 @@ public class Events : IExcelAddIn
     {
         try
         {
-            if (IsTemplateEditMode || WorkbookSession.IsMasterTemplateFile()) return;
+            if (WorkbookSession.IsMasterTemplateFile() || WorkbookSession.IsTemplateEditMode) return;
 
             while (true)
             {
+                // Attempt standard silent server save
                 bool saved = ServerSyncCommands.SaveStaffSilent();
 
                 if (saved)
                 {
-                    MessageBox.Show(
-                        "Auto-save completed successfully. Your changes have been synchronised to the system.",
-                        "SKSB Staff Manager",
-                        MessageBoxButtons.OK,
-                        MessageBoxIcon.Information
-                    );
-
-                    wb.Saved = true; // Tell Excel it's clean so it doesn't prompt[cite: 37]
+                    // Success: Clear any offline stash if it existed
+                    Services.ClearPendingOfflineSnapshot<List<StaffRecord>>();
+                    wb.Saved = true;
                     return;
                 }
 
-                // Save failed -> Prompt user
-                var choice = MessageBox.Show(
-                    "Unable to synchronise staff records to the database.\n\n" +
-                    "• Click 'Retry' to attempt saving to the database again.\n" +
-                    "• Click 'Cancel' to return to Excel without closing.",
-                    "System Synchronisation Warning",
-                    MessageBoxButtons.RetryCancel,
-                    MessageBoxIcon.Warning
+                // Failed: Show 3-way conflict dialog
+                using var dialog = new ExitSyncConflictDialog(
+                    "Staff Manager",
+                    "Could not persist records to the PostgreSQL server (connection timeout or schema conflict)."
                 );
+                dialog.ShowDialog();
 
-                if (choice == DialogResult.Cancel)
+                switch (dialog.Resolution)
                 {
-                    cancel = true; // Keep workbook open so data isn't lost[cite: 37]
-                    return;
-                }
+                    case ExitResolution.Retry:
+                        // Loops back to top and retries SaveStaffSilent()
+                        continue;
 
-                // If user clicked 'Retry', loop continues and calls SaveStaffSilent() again[cite: 34]
+                    case ExitResolution.SaveLocallyAndQuit:
+                        // Extract current rows from Excel
+                        var currentRecords = SheetMapper.ExtractStaffRecords();
+                        if (currentRecords != null && currentRecords.Count > 0)
+                        {
+                            Services.SaveOfflineSnapshot(currentRecords);
+                            MessageBox.Show(
+                                "Your staff records have been safely saved to local disk.\n\n" +
+                                "The system will automatically detect this file and prompt to commit it to the server when you next start.",
+                                "Saved Offline",
+                                MessageBoxButtons.OK,
+                                MessageBoxIcon.Information
+                            );
+                        }
+
+                        // Mark clean so Excel closes without prompt
+                        wb.Saved = true;
+                        return;
+
+                    case ExitResolution.Cancel:
+                    default:
+                        // Abort close sequence and keep workbook open
+                        cancel = true;
+                        return;
+                }
             }
         }
         catch (Exception ex)
@@ -145,23 +153,71 @@ public class Events : IExcelAddIn
     {
         try
         {
-            if (WorkbookSession.IsMasterTemplateFile())
+            if (WorkbookSession.IsMasterTemplateFile() || WorkbookSession.IsTemplateEditMode)
             {
-                IsTemplateEditMode = true;
-                WorkbookSession.ShowStatusConfirmation("Template Design Mode: Auto-load bypassed.");
+                WorkbookSession.ShowStatusConfirmation("Design Mode: Auto-load bypassed.");
                 return;
             }
 
-            if (IsTemplateEditMode)
+            // -------------------------------------------------------------
+            // STARTUP RECONCILIATION: Check for pending offline file
+            // -------------------------------------------------------------
+            if (Services.HasPendingOfflineSnapshot<List<StaffRecord>>())
             {
-                WorkbookSession.ShowStatusConfirmation("Edit Mode Active: Auto-load bypassed.");
-                return;
+                var pendingRecords = Services.LoadPendingOfflineSnapshot<List<StaffRecord>>();
+                DateTime localOfflineTime = File.GetLastWriteTime(
+                    Folder.Data.GetFilePath("List`1_PendingUpload.json")
+                );
+
+                // Check server's latest timestamp
+                DateTime? serverLastUpdate = Services.GetServerLatestTimestamp("staff_master");
+
+                bool canCommit = true;
+
+                if (serverLastUpdate.HasValue && serverLastUpdate.Value > localOfflineTime)
+                {
+                    // Conflict: Server has newer data than our offline exit file
+                    var conflictChoice = MessageBox.Show(
+                        $"[Synchronization Conflict Detected]\n\n" +
+                        $"• Your offline saved file: {localOfflineTime:yyyy-MM-dd HH:mm:ss}\n" +
+                        $"• Newer server version:  {serverLastUpdate.Value:yyyy-MM-dd HH:mm:ss}\n\n" +
+                        "The server was updated after your offline save.\n\n" +
+                        "Do you still want to COMMIT your offline changes to the server?\n" +
+                        "• Yes: Overwrite server records with your local offline version.\n" +
+                        "• No: Discard local offline changes and load the latest server copy.",
+                        "Data Version Conflict",
+                        MessageBoxButtons.YesNo,
+                        MessageBoxIcon.Question
+                    );
+
+                    canCommit = (conflictChoice == DialogResult.Yes);
+                }
+
+                if (canCommit && pendingRecords != null && pendingRecords.Count > 0)
+                {
+                    // Commit offline records to the server
+                    var (success, count, _) = ServerSyncCommands.SaveStaffAsync(pendingRecords)
+                                                                .GetAwaiter()
+                                                                .GetResult();
+                    if (success)
+                    {
+                        Services.ClearPendingOfflineSnapshot<List<StaffRecord>>();
+                        SheetMapper.PopulateWorksheet(pendingRecords);
+                        WorkbookSession.ShowStatusConfirmation($"Committed {count} offline staff records to server.");
+                        return;
+                    }
+                }
+                else
+                {
+                    // User chose 'No': Clear pending offline file and fall through to regular server load
+                    Services.ClearPendingOfflineSnapshot<List<StaffRecord>>();
+                }
             }
 
-            bool success = ServerSyncCommands.LoadStaffSilent();
-            if (success)
+            // Standard operational load from PostgreSQL
+            if (ServerSyncCommands.LoadStaffSilent())
             {
-                WorkbookSession.ShowStatusConfirmation("Staff records loaded successfully from system.");
+                WorkbookSession.ShowStatusConfirmation("Staff records loaded from server.");
             }
         }
         catch (Exception ex)
@@ -173,7 +229,7 @@ public class Events : IExcelAddIn
     [ExcelCommand(Name = "OnHotKeySave")]
     public static void OnHotKeySave()
     {
-        if (IsTemplateEditMode || WorkbookSession.IsMasterTemplateFile())
+        if (WorkbookSession.IsMasterTemplateFile() || WorkbookSession.IsTemplateEditMode)
         {
             XlCall.Excel(XlCall.xlcSave);
             return;
@@ -182,8 +238,8 @@ public class Events : IExcelAddIn
         bool success = ServerSyncCommands.SaveStaffSilent();
         if (success)
         {
-            MessageBox.Show("Save completed successfully.", "SKSB Staff Manager",
-                            MessageBoxButtons.OK, MessageBoxIcon.Information);
+            Services.ClearPendingOfflineSnapshot<List<StaffRecord>>();
+            MessageBox.Show("Save completed successfully.", "SKSB Staff Manager", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
     }
 }

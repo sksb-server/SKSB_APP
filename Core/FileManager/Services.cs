@@ -76,4 +76,65 @@ public static class Services
 
         return type.Name;
     }
+
+    private static string GetPendingUploadPath<T>() =>
+        Folder.Data.GetFilePath($"{typeof(T).Name}_PendingUpload.json");
+
+    /// <summary>
+    /// Stashes unsaved operational records to disk when the database/server connection fails.
+    /// </summary>
+    public static string SaveOfflineSnapshot<T>(T data)
+    {
+        string filePath = GetPendingUploadPath<T>();
+        string json = JsonSerializer.Serialize(data, new JsonSerializerOptions { WriteIndented = true });
+        File.WriteAllText(filePath, json);
+        return filePath;
+    }
+
+    /// <summary>
+    /// Checks whether an uncommitted offline file is waiting for sync.
+    /// </summary>
+    public static bool HasPendingOfflineSnapshot<T>() =>
+        File.Exists(GetPendingUploadPath<T>());
+
+    /// <summary>
+    /// Loads the stashed offline records.
+    /// </summary>
+    public static T? LoadPendingOfflineSnapshot<T>()
+    {
+        string filePath = GetPendingUploadPath<T>();
+        if (!File.Exists(filePath)) return default;
+
+        string json = File.ReadAllText(filePath);
+        return JsonSerializer.Deserialize<T>(json);
+    }
+
+    /// <summary>
+    /// Clears the pending offline file once successfully committed to PostgreSQL.
+    /// </summary>
+    public static void ClearPendingOfflineSnapshot<T>()
+    {
+        string filePath = GetPendingUploadPath<T>();
+        if (File.Exists(filePath))
+        {
+            File.Delete(filePath);
+        }
+    }
+
+    /// <summary>
+    /// Queries the server for the most recent updated_at timestamp in the corresponding table.
+    /// </summary>
+    public static DateTime? GetServerLatestTimestamp(string tableName)
+    {
+        try
+        {
+            var db = new PostgreSqlService();
+            string sql = $"SELECT MAX(updated_at) FROM {tableName};";
+            return db.ExecuteScalar<DateTime?>(sql);
+        }
+        catch
+        {
+            return null; // Database offline or unreachable
+        }
+    }
 }

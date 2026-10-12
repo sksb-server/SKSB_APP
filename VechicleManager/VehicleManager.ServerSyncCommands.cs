@@ -3,7 +3,6 @@
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
-using ExcelDna.Integration;
 using SKSB_App.Core.FileManager;
 using SKSB_App.Core.Types;
 
@@ -13,10 +12,17 @@ public static class ServerSyncCommands
     {
         try
         {
-            var vehicleList = VehicleSheetMapper.ExtractVehicleRecords();
-            if (vehicleList == null || vehicleList.Count == 0) return true;
+            var vehicleList = SheetMapper.ExtractVehicleRecords();
+            // Critical: If extraction failed or errors exist, do NOT report success
+            if (vehicleList == null || vehicleList.Count == 0)
+            {
+                return false;
+            }
 
-            string snapshotPath = Services.SaveAsync(vehicleList, writeToDatabase: true).GetAwaiter().GetResult();
+            string snapshotPath = Services.SaveAsync(vehicleList, writeToDatabase: true)
+                                          .GetAwaiter()
+                                          .GetResult();
+
             return !string.IsNullOrEmpty(snapshotPath);
         }
         catch (Exception ex)
@@ -33,7 +39,7 @@ public static class ServerSyncCommands
             var vehicleList = Services.Load<List<VehicleRecord>>();
             if (vehicleList != null && vehicleList.Count > 0)
             {
-                VehicleSheetMapper.PopulateWorksheet(vehicleList);
+                SheetMapper.PopulateWorksheet(vehicleList);
                 return true;
             }
             return false;
@@ -45,9 +51,6 @@ public static class ServerSyncCommands
         }
     }
 
-    /// <summary>
-    /// Persists pre-extracted vehicle records to disk and PostgreSQL on a background worker thread.
-    /// </summary>
     public static async Task<(bool Success, int Count, string Path)> SaveVehiclesAsync(List<VehicleRecord> vehicleList)
     {
         if (vehicleList == null || vehicleList.Count == 0) return (false, 0, string.Empty);

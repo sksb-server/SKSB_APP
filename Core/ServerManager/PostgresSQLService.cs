@@ -57,4 +57,11 @@ public class PostgreSqlService
             throw;
         }
     }
+
+    public T? ExecuteScalar<T>(string sql, object? param = null)
+    {
+        using var db = CreateConnection();
+        db.Open();
+        return db.ExecuteScalar<T>(sql, param);
+    }
 }

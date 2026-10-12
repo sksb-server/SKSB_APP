@@ -3,24 +3,19 @@
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
-using ExcelDna.Integration;
 using SKSB_App.Core.FileManager;
 using SKSB_App.Core.Types;
 
 public static class ServerSyncCommands
 {
-    /// <summary>
-    /// Synchronously extracts sheet data and saves to backend/database without UI notifications.
-    /// </summary>
     public static bool SaveStaffSilent()
     {
         try
         {
             var staffList = SheetMapper.ExtractStaffRecords();
-            // If validation failed, ExtractStaffRecords() returns an empty list
             if (staffList == null || staffList.Count == 0)
             {
-                return false; // Prevents marking workbook as pristine when errors exist
+                return false;
             }
 
             string snapshotPath = Services.SaveAsync(staffList, writeToDatabase: true)
@@ -36,9 +31,6 @@ public static class ServerSyncCommands
         }
     }
 
-    /// <summary>
-    /// Loads staff records from storage and writes them directly into the sheet.
-    /// </summary>
     public static bool LoadStaffSilent()
     {
         try
@@ -58,15 +50,9 @@ public static class ServerSyncCommands
         }
     }
 
-    /// <summary>
-    /// Persists pre-extracted staff records to disk and PostgreSQL on a background worker thread.
-    /// </summary>
     public static async Task<(bool Success, int Count, string Path)> SaveStaffAsync(List<StaffRecord> staffList)
     {
-        if (staffList == null || staffList.Count == 0)
-        {
-            return (false, 0, string.Empty);
-        }
+        if (staffList == null || staffList.Count == 0) return (false, 0, string.Empty);
 
         string path = await Services.SaveAsync(staffList, writeToDatabase: true);
         return (!string.IsNullOrEmpty(path), staffList.Count, path);
