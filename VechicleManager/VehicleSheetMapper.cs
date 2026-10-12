@@ -15,10 +15,10 @@ public static class VehicleSheetMapper
     private static readonly string[] MasterSheetAliases = { "Vehicle_Master", "Vehicle Master", "Master" };
     private static readonly string[] MaintenanceSheetAliases = { "Vehicle_Maintenance", "Maintenance", "Logs" };
 
-    public static List<Vehicle> ExtractVehicleRecords()
+    public static List<VehicleRecord> ExtractVehicleRecords()
     {
-        var result = new List<Vehicle>();
-        var vehicleLookup = new Dictionary<long, Vehicle>();
+        var result = new List<VehicleRecord>();
+        var vehicleLookup = new Dictionary<long, VehicleRecord>();
 
         // 1. Ingest Master Records
         string masterSheet = WorkbookSession.ResolveSheetName(MasterSheetAliases, "Vehicle_Master");
@@ -48,10 +48,10 @@ public static class VehicleSheetMapper
                 int.TryParse(CleanCellString(masterGrid[r, 8]), out int odometer);
                 string statusStr = CleanCellString(masterGrid[r, 9]);
 
-                var vehicle = new Vehicle
+                var vehicle = new VehicleRecord
                 {
                     VehicleID = vehicleId,
-                    Master = new VehicleMaster
+                    Master = new VehicleDetail
                     {
                         RegistrationNumber = regNum,
                         Type = Enum.TryParse(typeStr, true, out VehicleType vType) ? vType : VehicleType.None,
@@ -61,9 +61,9 @@ public static class VehicleSheetMapper
                         RoadTaxExpiry = roadTax,
                         PuspakomExpiry = puspakom,
                         CurrentOdometer = odometer,
-                        Status = Enum.TryParse(statusStr, true, out OperationalStatus status) ? status : OperationalStatus.Active
+                        Status = Enum.TryParse(statusStr, true, out VehicleStatus status) ? status : VehicleStatus.Active
                     },
-                    MaintenanceLogs = new List<MaintenanceRecord>()
+                    Maintenances = new List<Maintenance>()
                 };
 
                 vehicleLookup[vehicleId] = vehicle;
@@ -103,7 +103,7 @@ public static class VehicleSheetMapper
                 string workshop = CleanCellString(logGrid[r, 8]);
                 string statusStr = CleanCellString(logGrid[r, 9]);
 
-                var record = new MaintenanceRecord
+                var record = new Maintenance
                 {
                     MaintenanceID = maintId,
                     VehicleID = parentVehId,
@@ -117,14 +117,14 @@ public static class VehicleSheetMapper
                     Status = Enum.TryParse(statusStr, true, out MaintenanceStatus mStatus) ? mStatus : MaintenanceStatus.Scheduled
                 };
 
-                targetVehicle.MaintenanceLogs.Add(record);
+                targetVehicle.Maintenances.Add(record);
             }
         }
 
         return result;
     }
 
-    public static void PopulateWorksheet(List<Vehicle> vehicleList)
+    public static void PopulateWorksheet(List<VehicleRecord> vehicleList)
     {
         if (vehicleList == null || vehicleList.Count == 0) return;
 
@@ -162,10 +162,10 @@ public static class VehicleSheetMapper
             writeMasterRef.SetValue(masterOutput);
 
             // 2. Flatten & Populate Maintenance Table
-            var allLogs = new List<MaintenanceRecord>();
+            var allLogs = new List<Maintenance>();
             foreach (var v in vehicleList)
             {
-                if (v.MaintenanceLogs != null) allLogs.AddRange(v.MaintenanceLogs);
+                if (v.Maintenances != null) allLogs.AddRange(v.Maintenances);
             }
 
             XlCall.Excel(XlCall.xlcWorkbookSelect, new object[] { targetLogs });

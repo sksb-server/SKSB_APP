@@ -54,7 +54,7 @@ public class Events : IExcelAddIn
             typeof(Department),
             typeof(Shift),
             typeof(PayType),
-            typeof(ActiveStatus),
+            typeof(ContractStatus),
             typeof(LeaveType),
             typeof(Session),
             typeof(LicenseClass),
@@ -65,7 +65,7 @@ public class Events : IExcelAddIn
 
     public static void SyncStaffLookupsData()
     {
-        var vehicles = Services.Load<List<Vehicle>>();
+        var vehicles = Services.Load<List<VehicleRecord>>();
         if (vehicles != null && vehicles.Count > 0)
         {
             ServerLookups.SyncValues("VehicleID", vehicles, v => v.VehicleID);

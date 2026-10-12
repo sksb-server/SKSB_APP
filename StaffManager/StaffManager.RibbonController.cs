@@ -10,7 +10,7 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 
 [ComVisible(true)]
-public class StaffManagerRibbon : ExcelRibbon
+public class RibbonController : ExcelRibbon
 {
     private static IRibbonUI? _ribbonUi;
 
@@ -186,7 +186,7 @@ public class StaffManagerRibbon : ExcelRibbon
 
     public void OnSaveClicked(IRibbonControl control)
     {
-        var staffList = StaffSheetMapper.ExtractStaffRecords();
+        var staffList = SheetMapper.ExtractStaffRecords();
         if (staffList == null || staffList.Count == 0)
         {
             MessageBox.Show("No valid staff records found to save.",
@@ -229,7 +229,7 @@ public class StaffManagerRibbon : ExcelRibbon
 
             ExcelAsyncUtil.QueueAsMacro(() =>
             {
-                StaffSheetMapper.PopulateWorksheet(records);
+                SheetMapper.PopulateWorksheet(records);
                 MessageBox.Show($"Successfully populated {records.Count} staff record(s).",
                                 "Load Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
             });

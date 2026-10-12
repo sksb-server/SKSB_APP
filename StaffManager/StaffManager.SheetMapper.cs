@@ -9,26 +9,28 @@ using System.Globalization;
 using System.Text;
 using System.Windows.Forms;
 
-public static class StaffSheetMapper
+public static class SheetMapper
 {
     private const int MasterColumnCount = 10;     // Columns A to J (StaffID -> ActiveStatus)
     private const int PreferenceColumnCount = 11; // Columns A to K (StaffID -> DedicatedVehicleID)
     private const int LicenseColumnCount = 5;     // Columns A to E (StaffID, Name, LicenseClass, ExpiryDate, Status)
+    private const int SkillColumnCount = 5;     
 
-    private static readonly string[] MasterSheetAliases = { "Staff_Master", "Staff Master", "Master" };
+    private static readonly string[] AllStaffSheet = { "All Staff", "Staff Master", "Master", "All Staffs" };
     private static readonly string[] PreferenceSheetAliases = { "Staff_Preference", "Staff Preference", "Preference", "Preferences" };
     private static readonly string[] LicenseSheetAliases = { "Staff_License", "Staff License", "License", "Licenses", "Staff_Licenses" };
+    private static readonly string[] SkillSheetAliases = { "Staff_Skill", "Staff_Skills", "Staff Skill", "Staff Skills", "Skills", "Skill"};
 
-    public static List<Staff> ExtractStaffRecords()
+    public static List<StaffRecord> ExtractStaffRecords()
     {
-        var result = new List<Staff>();
-        var staffLookup = new Dictionary<long, Staff>();
+        var result = new List<StaffRecord>();
+        var staffLookup = new Dictionary<long, StaffRecord>();
         var validationErrors = new List<string>();
 
         // -----------------------------------------------------------------
         // 1. MASTER RECORDS (Columns A to J)
         // -----------------------------------------------------------------
-        string masterSheet = WorkbookSession.ResolveSheetName(MasterSheetAliases, "Staff_Master");
+        string masterSheet = WorkbookSession.ResolveSheetName(AllStaffSheet, "Staff_Master");
         IntPtr masterSheetId = WorkbookSession.GetSheetId(masterSheet);
 
         var masterRef = masterSheetId != IntPtr.Zero
@@ -65,15 +67,15 @@ public static class StaffSheetMapper
                 // SMART FALLBACKS
                 Department dept = Enum.TryParse(deptStr, true, out Department parsedDept) ? parsedDept : Department.Worker;
                 PayType payType = Enum.TryParse(payStr, true, out PayType parsedPay) ? parsedPay : PayType.Hourly;
-                ActiveStatus status = Enum.TryParse(statusStr, true, out ActiveStatus parsedStatus) ? parsedStatus : ActiveStatus.OnContract;
+                ContractStatus status = Enum.TryParse(statusStr, true, out ContractStatus parsedStatus) ? parsedStatus : ContractStatus.Active;
 
                 if (baseRate < 0) baseRate = 0;
                 if (otRate < 0) otRate = 0;
 
-                var staff = new Staff
+                var staff = new StaffRecord
                 {
                     StaffID = staffId,
-                    Master = new Master
+                    StaffDetails = new StaffDetails
                     {
                         FamilyName = familyName,
                         MiddleName = middleName,
@@ -86,7 +88,7 @@ public static class StaffSheetMapper
                         OvertimeRate = otRate,
                         ActiveStatus = status
                     },
-                    Licenses = new List<License>()
+                    Licenses = new List<VehicleRecord>()
                 };
 
                 staffLookup[staffId] = staff;
@@ -200,10 +202,10 @@ public static class StaffSheetMapper
                     ? parsedLicStatus
                     : (expiry < DateOnly.FromDateTime(DateTime.Today) ? LicenseStatus.Invalid : LicenseStatus.Valid);
 
-                targetStaff.Licenses.Add(new License
+                targetStaff.Licenses.Add(new VehicleRecord
                 {
                     StaffID = staffId,
-                    LicenseType = licClass,
+                    LicenseClass = licClass,
                     ExpiryDate = expiry,
                     LicenseStatus = status
                 });
@@ -224,17 +226,17 @@ public static class StaffSheetMapper
             sb.AppendLine("\nPlease correct these errors on the worksheet and try saving again.");
 
             MessageBox.Show(sb.ToString(), "Pre-Save Validation Failed", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-            return new List<Staff>(); // Returns empty list so save safely aborts without overwriting DB
+            return new List<StaffRecord>(); // Returns empty list so save safely aborts without overwriting DB
         }
 
         return result;
     }
 
-    public static void PopulateWorksheet(List<Staff> staffList)
+    public static void PopulateWorksheet(List<StaffRecord> staffList)
     {
         if (staffList == null || staffList.Count == 0) return;
 
-        string targetMaster = WorkbookSession.ResolveSheetName(MasterSheetAliases, "Staff_Master");
+        string targetMaster = WorkbookSession.ResolveSheetName(AllStaffSheet, "Staff_Master");
         string targetPref = WorkbookSession.ResolveSheetName(PreferenceSheetAliases, "Staff_Preference");
         string targetLic = WorkbookSession.ResolveSheetName(LicenseSheetAliases, "Staff_License");
 
@@ -255,15 +257,15 @@ public static class StaffSheetMapper
             {
                 var s = staffList[i];
                 masterOutput[i, 0] = s.StaffID;
-                masterOutput[i, 1] = s.Master.FamilyName;
-                masterOutput[i, 2] = s.Master.MiddleName;
-                masterOutput[i, 3] = s.Master.GivenName;
-                masterOutput[i, 4] = s.Master.NRIC;
-                masterOutput[i, 5] = s.Master.Department == Department.None ? "Worker" : s.Master.Department.ToString();
-                masterOutput[i, 6] = s.Master.PayType == PayType.None ? "Hourly" : s.Master.PayType.ToString();
-                masterOutput[i, 7] = s.Master.BaseRate;
-                masterOutput[i, 8] = s.Master.OvertimeRate;
-                masterOutput[i, 9] = s.Master.ActiveStatus.ToString();
+                masterOutput[i, 1] = s.StaffDetails.FamilyName;
+                masterOutput[i, 2] = s.StaffDetails.MiddleName;
+                masterOutput[i, 3] = s.StaffDetails.GivenName;
+                masterOutput[i, 4] = s.StaffDetails.NRIC;
+                masterOutput[i, 5] = s.StaffDetails.Department == Department.None ? "Worker" : s.StaffDetails.Department.ToString();
+                masterOutput[i, 6] = s.StaffDetails.PayType == PayType.None ? "Hourly" : s.StaffDetails.PayType.ToString();
+                masterOutput[i, 7] = s.StaffDetails.BaseRate;
+                masterOutput[i, 8] = s.StaffDetails.OvertimeRate;
+                masterOutput[i, 9] = s.StaffDetails.ActiveStatus.ToString();
             }
 
             var writeMasterRef = new ExcelReference(1, rowCount, 0, MasterColumnCount - 1);
@@ -279,7 +281,7 @@ public static class StaffSheetMapper
             {
                 var s = staffList[i];
                 prefOutput[i, 0] = s.StaffID;
-                prefOutput[i, 1] = s.Master.Name;
+                prefOutput[i, 1] = s.StaffDetails.Name;
                 prefOutput[i, 2] = s.Preference.PrimaryTeam;
                 prefOutput[i, 3] = s.Preference.SecondaryTeam;
                 prefOutput[i, 4] = s.Preference.PrimarySkill;
@@ -295,7 +297,7 @@ public static class StaffSheetMapper
             writePrefRef.SetValue(prefOutput);
 
             // 3. Populate Licenses Table (Columns A to E)
-            var allLicenses = new List<(Staff Staff, License License)>();
+            var allLicenses = new List<(StaffRecord Staff, VehicleRecord License)>();
             foreach (var s in staffList)
             {
                 if (s.Licenses != null)
@@ -318,8 +320,8 @@ public static class StaffSheetMapper
                 {
                     var (staff, lic) = allLicenses[i];
                     licOutput[i, 0] = lic.StaffID;
-                    licOutput[i, 1] = staff.Master.Name;
-                    licOutput[i, 2] = lic.LicenseType == LicenseClass.None ? string.Empty : lic.LicenseType.ToString();
+                    licOutput[i, 1] = staff.StaffDetails.Name;
+                    licOutput[i, 2] = lic.LicenseClass == LicenseClass.None ? string.Empty : lic.LicenseClass.ToString();
                     licOutput[i, 3] = lic.ExpiryDate.ToDateTime(TimeOnly.MinValue).ToOADate();
                     licOutput[i, 4] = lic.LicenseStatus.ToString();
                 }

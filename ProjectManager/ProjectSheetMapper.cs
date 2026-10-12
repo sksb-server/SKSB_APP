@@ -51,10 +51,10 @@ public static class ProjectSheetMapper
                 var project = new ProjectRecord
                 {
                     ProjectID = projectId,
-                    Master = new ProjectMaster
+                    ProjectDetails = new ProjectDetails
                     {
                         ProjectID = projectCode, // String ID/Code mapping
-                        ProjectClass = Enum.TryParse(classStr, true, out ProjectClassification pClass) ? pClass : ProjectClassification.None,
+                        ProjectType = Enum.TryParse(classStr, true, out ProjectType pClass) ? pClass : ProjectType.None,
                         ProjectName = projectName,
                         Priority = Enum.TryParse(priorityStr, true, out ProjectPriority priority) ? priority : ProjectPriority.Standard,
                         Status = Enum.TryParse(statusStr, true, out ProjectStatus status) ? status : ProjectStatus.Planned,
@@ -95,19 +95,19 @@ public static class ProjectSheetMapper
             {
                 var p = projectList[i];
                 output[i, 0] = p.ProjectID;
-                output[i, 1] = p.Master.ProjectID;
-                output[i, 2] = p.Master.ProjectClass == ProjectClassification.None ? string.Empty : p.Master.ProjectClass.ToString();
-                output[i, 3] = p.Master.ProjectName;
-                output[i, 4] = p.Master.Priority.ToString();
-                output[i, 5] = p.Master.Status.ToString();
-                output[i, 6] = p.Master.StartDate.ToDateTime(TimeOnly.MinValue).ToOADate();
-                output[i, 7] = p.Master.TargetEndDate.ToDateTime(TimeOnly.MinValue).ToOADate();
-                output[i, 8] = p.Master.ActualEndDate.ToDateTime(TimeOnly.MinValue).ToOADate();
-                output[i, 9] = p.Master.RequiredHeadcount;
-                output[i, 10] = p.Master.RequiredVehicleType == VehicleType.None ? string.Empty : p.Master.RequiredVehicleType.ToString();
-                output[i, 11] = p.Master.RequiredSkills;
-                output[i, 12] = p.Master.Address;
-                output[i, 13] = p.Master.Remarks;
+                output[i, 1] = p.ProjectDetails.ProjectID;
+                output[i, 2] = p.ProjectDetails.ProjectType == ProjectType.None ? string.Empty : p.ProjectDetails.ProjectType.ToString();
+                output[i, 3] = p.ProjectDetails.ProjectName;
+                output[i, 4] = p.ProjectDetails.Priority.ToString();
+                output[i, 5] = p.ProjectDetails.Status.ToString();
+                output[i, 6] = p.ProjectDetails.StartDate.ToDateTime(TimeOnly.MinValue).ToOADate();
+                output[i, 7] = p.ProjectDetails.TargetEndDate.ToDateTime(TimeOnly.MinValue).ToOADate();
+                output[i, 8] = p.ProjectDetails.ActualEndDate.ToDateTime(TimeOnly.MinValue).ToOADate();
+                output[i, 9] = p.ProjectDetails.RequiredHeadcount;
+                output[i, 10] = p.ProjectDetails.RequiredVehicleType == VehicleType.None ? string.Empty : p.ProjectDetails.RequiredVehicleType.ToString();
+                output[i, 11] = p.ProjectDetails.RequiredSkills;
+                output[i, 12] = p.ProjectDetails.Address;
+                output[i, 13] = p.ProjectDetails.Remarks;
             }
 
             var writeRef = new ExcelReference(1, projectList.Count, 0, ColumnCount - 1);

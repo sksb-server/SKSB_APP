@@ -23,7 +23,7 @@ public class Events : IExcelAddIn
 
             // Synchronise Project-specific enums
             TypesToExcel.Sync(
-                typeof(ProjectClassification),
+                typeof(ProjectType),
                 typeof(ProjectStatus),
                 typeof(ProjectPriority),
                 typeof(VehicleType)

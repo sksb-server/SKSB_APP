@@ -5,7 +5,7 @@
     <Platform Name="x86" />
   </Configurations>
   <Project Path="Core/Core.csproj" />
-  <Project Path="DailyScheduler/DailyScheduler.csproj" Id="9c6e11cf-644b-4aec-9a2e-144ff26ff760" />
+  <Project Path="DailyScheduler/ScheduleManager.csproj" Id="9c6e11cf-644b-4aec-9a2e-144ff26ff760" />
   <Project Path="Launcher/Launcher.csproj" Id="ae9080fa-8165-4de9-9c79-a9fdda4afa63" />
   <Project Path="Portal/Portal.csproj" />
   <Project Path="ProjectManager/ProjectManager.csproj" Id="dad0ded3-b793-4538-8fea-783e3e0fd374" />

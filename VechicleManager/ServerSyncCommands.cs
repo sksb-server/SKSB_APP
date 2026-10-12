@@ -30,7 +30,7 @@ public static class ServerSyncCommands
     {
         try
         {
-            var vehicleList = Services.Load<List<Vehicle>>();
+            var vehicleList = Services.Load<List<VehicleRecord>>();
             if (vehicleList != null && vehicleList.Count > 0)
             {
                 VehicleSheetMapper.PopulateWorksheet(vehicleList);
@@ -48,7 +48,7 @@ public static class ServerSyncCommands
     /// <summary>
     /// Persists pre-extracted vehicle records to disk and PostgreSQL on a background worker thread.
     /// </summary>
-    public static async Task<(bool Success, int Count, string Path)> SaveVehiclesAsync(List<Vehicle> vehicleList)
+    public static async Task<(bool Success, int Count, string Path)> SaveVehiclesAsync(List<VehicleRecord> vehicleList)
     {
         if (vehicleList == null || vehicleList.Count == 0) return (false, 0, string.Empty);
 
@@ -56,8 +56,8 @@ public static class ServerSyncCommands
         return (!string.IsNullOrEmpty(path), vehicleList.Count, path);
     }
 
-    public static List<Vehicle>? FetchVehicleRecords()
+    public static List<VehicleRecord>? FetchVehicleRecords()
     {
-        return Services.Load<List<Vehicle>>();
+        return Services.Load<List<VehicleRecord>>();
     }
 }

@@ -16,7 +16,7 @@ public static class ServerSyncCommands
     {
         try
         {
-            var staffList = StaffSheetMapper.ExtractStaffRecords();
+            var staffList = SheetMapper.ExtractStaffRecords();
             // If validation failed, ExtractStaffRecords() returns an empty list
             if (staffList == null || staffList.Count == 0)
             {
@@ -43,10 +43,10 @@ public static class ServerSyncCommands
     {
         try
         {
-            var staffList = Services.Load<List<Staff>>();
+            var staffList = Services.Load<List<StaffRecord>>();
             if (staffList != null && staffList.Count > 0)
             {
-                StaffSheetMapper.PopulateWorksheet(staffList);
+                SheetMapper.PopulateWorksheet(staffList);
                 return true;
             }
             return false;
@@ -61,7 +61,7 @@ public static class ServerSyncCommands
     /// <summary>
     /// Persists pre-extracted staff records to disk and PostgreSQL on a background worker thread.
     /// </summary>
-    public static async Task<(bool Success, int Count, string Path)> SaveStaffAsync(List<Staff> staffList)
+    public static async Task<(bool Success, int Count, string Path)> SaveStaffAsync(List<StaffRecord> staffList)
     {
         if (staffList == null || staffList.Count == 0)
         {
@@ -72,8 +72,8 @@ public static class ServerSyncCommands
         return (!string.IsNullOrEmpty(path), staffList.Count, path);
     }
 
-    public static List<Staff>? FetchStaffRecords()
+    public static List<StaffRecord>? FetchStaffRecords()
     {
-        return Services.Load<List<Staff>>();
+        return Services.Load<List<StaffRecord>>();
     }
 }

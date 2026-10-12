@@ -12,7 +12,7 @@ public static class ServerDispatcher
 
     public static void Dispatch<T>(T data)
     {
-        if (data is IEnumerable<Staff> staffList)
+        if (data is IEnumerable<StaffRecord> staffList)
         {
             var list = staffList.ToList();
             SaveStaffToDb(list);
@@ -24,14 +24,14 @@ public static class ServerDispatcher
             })).ToList();
             SaveLicensesToDb(allLicenses);
 
-            var allLeaves = list.SelectMany(s => s.Leaves.Select(l =>
+            var allLeaves = list.SelectMany(s => s.SkillLicenses.Select(l =>
             {
                 if (l.StaffID == 0) l.StaffID = s.StaffID;
                 return l;
             })).ToList();
             SaveLeavesToDb(allLeaves);
         }
-        else if (data is Staff singleStaff)
+        else if (data is StaffRecord singleStaff)
         {
             SaveStaffToDb(new[] { singleStaff });
             if (singleStaff.Licenses.Any())
@@ -39,10 +39,10 @@ public static class ServerDispatcher
                 singleStaff.Licenses.ForEach(lic => { if (lic.StaffID == 0) lic.StaffID = singleStaff.StaffID; });
                 SaveLicensesToDb(singleStaff.Licenses);
             }
-            if (singleStaff.Leaves.Any())
+            if (singleStaff.SkillLicenses.Any())
             {
-                singleStaff.Leaves.ForEach(l => { if (l.StaffID == 0) l.StaffID = singleStaff.StaffID; });
-                SaveLeavesToDb(singleStaff.Leaves);
+                singleStaff.SkillLicenses.ForEach(l => { if (l.StaffID == 0) l.StaffID = singleStaff.StaffID; });
+                SaveLeavesToDb(singleStaff.SkillLicenses);
             }
         }
         else if (data is IEnumerable<ProjectRecord> projectList)
@@ -53,32 +53,32 @@ public static class ServerDispatcher
         {
             SaveProjectsToDb(new[] { singleProject });
         }
-        else if (data is IEnumerable<Vehicle> vehicleList)
+        else if (data is IEnumerable<VehicleRecord> vehicleList)
         {
             var list = vehicleList.ToList();
             SaveVehiclesToDb(list);
 
-            var allMaintenance = list.SelectMany(v => v.MaintenanceLogs.Select(m =>
+            var allMaintenance = list.SelectMany(v => v.Maintenances.Select(m =>
             {
                 if (m.VehicleID == 0) m.VehicleID = v.VehicleID;
                 return m;
             })).ToList();
             SaveVehicleMaintenanceToDb(allMaintenance);
         }
-        else if (data is Vehicle singleVehicle)
+        else if (data is VehicleRecord singleVehicle)
         {
             SaveVehiclesToDb(new[] { singleVehicle });
-            if (singleVehicle.MaintenanceLogs.Any())
+            if (singleVehicle.Maintenances.Any())
             {
-                singleVehicle.MaintenanceLogs.ForEach(m => { if (m.VehicleID == 0) m.VehicleID = singleVehicle.VehicleID; });
-                SaveVehicleMaintenanceToDb(singleVehicle.MaintenanceLogs);
+                singleVehicle.Maintenances.ForEach(m => { if (m.VehicleID == 0) m.VehicleID = singleVehicle.VehicleID; });
+                SaveVehicleMaintenanceToDb(singleVehicle.Maintenances);
             }
         }
-        else if (data is IEnumerable<License> licenses)
+        else if (data is IEnumerable<VehicleRecord> licenses)
         {
             SaveLicensesToDb(licenses);
         }
-        else if (data is IEnumerable<Leave> leaves)
+        else if (data is IEnumerable<SkillLicense> leaves)
         {
             SaveLeavesToDb(leaves);
         }
@@ -86,7 +86,7 @@ public static class ServerDispatcher
 
     #region Staff Database Operations
 
-    private static void SaveStaffToDb(IEnumerable<Staff> staffList)
+    private static void SaveStaffToDb(IEnumerable<StaffRecord> staffList)
     {
         var staffItems = staffList.Where(s => s.StaffID > 0).ToList();
         if (!staffItems.Any()) return;
@@ -96,17 +96,17 @@ public static class ServerDispatcher
         var masterRecords = staffItems.Select(s => new
         {
             StaffId = s.StaffID,
-            FamilyName = s.Master.FamilyName,
-            MiddleName = s.Master.MiddleName,
-            GivenName = s.Master.GivenName,
-            Name = s.Master.Name,
-            FullName = s.Master.Name,
-            Nric = s.Master.NRIC,
-            Department = s.Master.Department.ToString(),
-            PayType = s.Master.PayType.ToString(),
-            BaseRate = s.Master.BaseRate,
-            OvertimeRate = s.Master.OvertimeRate,
-            ActiveStatus = s.Master.ActiveStatus.ToString()
+            FamilyName = s.StaffDetails.FamilyName,
+            MiddleName = s.StaffDetails.MiddleName,
+            GivenName = s.StaffDetails.GivenName,
+            Name = s.StaffDetails.Name,
+            FullName = s.StaffDetails.Name,
+            Nric = s.StaffDetails.NRIC,
+            Department = s.StaffDetails.Department.ToString(),
+            PayType = s.StaffDetails.PayType.ToString(),
+            BaseRate = s.StaffDetails.BaseRate,
+            OvertimeRate = s.StaffDetails.OvertimeRate,
+            ActiveStatus = s.StaffDetails.ActiveStatus.ToString()
         }).ToList();
 
         var prefRecords = staffItems.Select(s => new
@@ -189,14 +189,14 @@ public static class ServerDispatcher
         });
     }
 
-    private static void SaveLicensesToDb(IEnumerable<License> licenses)
+    private static void SaveLicensesToDb(IEnumerable<VehicleRecord> licenses)
     {
         var licenseItems = licenses
-            .Where(l => l.StaffID > 0 && l.LicenseType != LicenseClass.None)
+            .Where(l => l.StaffID > 0 && l.LicenseClass != LicenseClass.None)
             .Select(l => new
             {
                 StaffId = l.StaffID,
-                LicenseType = l.LicenseType.ToString(),
+                LicenseType = l.LicenseClass.ToString(),
                 ExpiryDate = l.ExpiryDate.ToDateTime(TimeOnly.MinValue),
                 Status = l.LicenseStatus.ToString()
             }).ToList();
@@ -214,7 +214,7 @@ public static class ServerDispatcher
         DbService.ExecuteTransaction(sqlLicenses, licenseItems);
     }
 
-    private static void SaveLeavesToDb(IEnumerable<Leave> leaves)
+    private static void SaveLeavesToDb(IEnumerable<SkillLicense> leaves)
     {
         var leaveItems = leaves.Where(l => l.StaffID > 0).Select(l => new
         {
@@ -330,7 +330,7 @@ public static class ServerDispatcher
 
     #region Vehicle Database Operations
 
-    private static void SaveVehiclesToDb(IEnumerable<Vehicle> vehicleList)
+    private static void SaveVehiclesToDb(IEnumerable<VehicleRecord> vehicleList)
     {
         var vehicleItems = vehicleList.Where(v => v.VehicleID > 0).ToList();
         if (!vehicleItems.Any()) return;
@@ -383,7 +383,7 @@ public static class ServerDispatcher
         });
     }
 
-    private static void SaveVehicleMaintenanceToDb(IEnumerable<MaintenanceRecord> records)
+    private static void SaveVehicleMaintenanceToDb(IEnumerable<Maintenance> records)
     {
         var validRecords = records.Where(m => m.VehicleID > 0).Select(m => new
         {

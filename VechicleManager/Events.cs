@@ -24,7 +24,7 @@ public class Events : IExcelAddIn
             // Sync strictly vehicle-related enums
             TypesToExcel.Sync(
                 typeof(VehicleType),
-                typeof(OperationalStatus),
+                typeof(VehicleStatus),
                 typeof(ServiceType),
                 typeof(MaintenanceStatus)
             );
