@@ -4,32 +4,62 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Reflection;
+using System.Windows.Forms;
 using ExcelDna.Integration;
 using SKSB_App.Core.WorkbookManager;
 
 public static class TypesToExcel
 {
-    public const bool KeepLookupsSheetVisible = false;
-
     /// <summary>
-    /// Auto-targets and synchronises ALL public Enums defined in the assembly containing sampleType (or Core.Types).
+    /// Auto-targets and synchronises ALL public Enums found in Core and loaded domain assemblies.
     /// </summary>
-    /// <param name="assemblyMarkerType">Any type residing in the assembly containing your enums (e.g. typeof(Department)).</param>
-    /// <param name="excludeTypes">Optional list of enums you want to skip.</param>
     public static void SyncAllCoreEnums(params Type[] excludeTypes)
     {
-        // Directly targets the Core assembly where TypesToExcel lives
-        var assembly = typeof(TypesToExcel).Assembly;
-
         var excludeSet = new HashSet<Type>(excludeTypes ?? Array.Empty<Type>());
 
-        Type[] allEnums = assembly
-            .GetTypes()
-            .Where(t => t.IsEnum && t.IsPublic && !excludeSet.Contains(t))
+        // 1. Scan the Core assembly + any loaded SKSB assemblies in the AppDomain
+        var targetAssemblies = AppDomain.CurrentDomain.GetAssemblies()
+            .Where(a => !a.IsDynamic && (a.FullName?.StartsWith("SKSB_App", StringComparison.OrdinalIgnoreCase) ?? false))
+            .Distinct()
+            .ToList();
+
+        // Ensure Core is included even if AppDomain filtering misses it
+        var coreAssembly = typeof(TypesToExcel).Assembly;
+        if (!targetAssemblies.Contains(coreAssembly))
+        {
+            targetAssemblies.Add(coreAssembly);
+        }
+
+        var allEnums = new List<Type>();
+        foreach (var asm in targetAssemblies)
+        {
+            try
+            {
+                var enums = asm.GetTypes()
+                    .Where(t => t.IsEnum && t.IsPublic && !excludeSet.Contains(t));
+                allEnums.AddRange(enums);
+            }
+            catch (ReflectionTypeLoadException ex)
+            {
+                var loadable = ex.Types.Where(t => t != null && t.IsEnum && t.IsPublic && !excludeSet.Contains(t!));
+                allEnums.AddRange(loadable!);
+            }
+            catch { }
+        }
+
+        var uniqueEnums = allEnums
+            .GroupBy(t => t.Name)
+            .Select(g => g.First())
             .OrderBy(t => t.Name)
             .ToArray();
 
-        Sync(allEnums);
+        if (uniqueEnums.Length == 0)
+        {
+            System.Diagnostics.Debug.WriteLine("[TypesToExcel] Warning: No public enums discovered.");
+            return;
+        }
+
+        Sync(uniqueEnums);
     }
 
     /// <summary>
@@ -59,6 +89,8 @@ public static class TypesToExcel
 
     public static void SyncDictionary(Dictionary<string, string[]> enumMappings)
     {
+        if (enumMappings == null || enumMappings.Count == 0) return;
+
         ExcelAsyncUtil.QueueAsMacro(() =>
         {
             try
@@ -72,12 +104,11 @@ public static class TypesToExcel
                 try { activeDoc = XlCall.Excel(XlCall.xlfGetDocument, 76); } catch { }
                 string originalSheet = activeDoc?.ToString() ?? string.Empty;
 
-                // 2. Ensure Lookups exists WITHOUT spawning rogue sheets
+                // 2. Ensure Lookups exists
                 EnsureLookupsSheetExists(targetSheet);
 
-                // 3. Unhide and Select Lookups so SetValue() executes natively without XlCallException
-                try { XlCall.Excel(XlCall.xlcWorkbookUnhide, targetSheet); } catch { }
-                try { XlCall.Excel(XlCall.xlcWorkbookSelect, new object[] { targetSheet }); } catch { }
+                // 3. Make Lookups visible and active so ExcelReference.SetValue can write cleanly
+                MakeSheetVisibleAndActive(targetSheet);
 
                 int colZero = 0;
 
@@ -95,7 +126,7 @@ public static class TypesToExcel
                     var headerRef = new ExcelReference(0, 0, colZero, colZero);
                     headerRef.SetValue(new object[,] { { name } });
 
-                    // Write Data Rows and define global Name
+                    // Write Data Rows and Define Name
                     if (rowCount > 0)
                     {
                         var valRef = new ExcelReference(1, rowCount, colZero, colZero);
@@ -116,20 +147,31 @@ public static class TypesToExcel
                     colZero += 2; // Spacer column
                 }
 
-                // 4. Hide the Lookups sheet if configured
-                if (!KeepLookupsSheetVisible)
+                // 4. Move Lookups to the end of the tabs
+                WorkbookSession.MoveLookupsToEnd();
+
+                // 5. Hide Lookups if NOT in template edit mode
+                if (!WorkbookSession.IsTemplateEditMode)
                 {
-                    try { XlCall.Excel(XlCall.xlcWorkbookHide); } catch { }
+                    try
+                    {
+                        XlCall.Excel(XlCall.xlcWorkbookSelect, new object[] { targetSheet });
+                        XlCall.Excel(XlCall.xlcWorkbookHide);
+                    }
+                    catch { }
                 }
 
-                // 5. Restore original active sheet focus
+                // 6. Restore original active sheet focus
                 if (!string.IsNullOrWhiteSpace(originalSheet))
                 {
                     string cleanOriginal = originalSheet.Contains(']')
                         ? originalSheet.Substring(originalSheet.LastIndexOf(']') + 1)
                         : originalSheet;
 
-                    try { XlCall.Excel(XlCall.xlcWorkbookSelect, new object[] { cleanOriginal }); } catch { }
+                    if (!cleanOriginal.Equals(targetSheet, StringComparison.OrdinalIgnoreCase))
+                    {
+                        try { XlCall.Excel(XlCall.xlcWorkbookSelect, new object[] { cleanOriginal }); } catch { }
+                    }
                 }
             }
             catch (Exception ex)
@@ -143,6 +185,26 @@ public static class TypesToExcel
         });
     }
 
+    private static void MakeSheetVisibleAndActive(string sheetName)
+    {
+        try
+        {
+            // Use Excel COM interface via dynamic to reliably unhide before selecting
+            dynamic xlApp = ExcelDnaUtil.Application;
+            dynamic ws = xlApp.ActiveWorkbook.Sheets[sheetName];
+            if (ws != null)
+            {
+                ws.Visible = -1; // xlSheetVisible
+                ws.Activate();
+                return;
+            }
+        }
+        catch { }
+
+        // Fallback to pure C-API select
+        try { XlCall.Excel(XlCall.xlcWorkbookSelect, new object[] { sheetName }); } catch { }
+    }
+
     private static void EnsureLookupsSheetExists(string targetSheet)
     {
         IntPtr existingId = WorkbookSession.GetSheetId(targetSheet);
@@ -153,19 +215,14 @@ public static class TypesToExcel
             object sheetsObj = XlCall.Excel(XlCall.xlfGetWorkbook, 1);
             if (sheetsObj is object[,] sheetArray)
             {
-                int dim0 = sheetArray.GetLength(0);
                 int dim1 = sheetArray.GetLength(1);
-
-                for (int r = 0; r < dim0; r++)
+                for (int c = 0; c < dim1; c++)
                 {
-                    for (int c = 0; c < dim1; c++)
-                    {
-                        string raw = sheetArray[r, c]?.ToString() ?? string.Empty;
-                        int bIdx = raw.LastIndexOf(']');
-                        string clean = bIdx >= 0 ? raw.Substring(bIdx + 1) : raw;
+                    string raw = sheetArray[0, c]?.ToString() ?? string.Empty;
+                    int bIdx = raw.LastIndexOf(']');
+                    string clean = bIdx >= 0 ? raw.Substring(bIdx + 1) : raw;
 
-                        if (string.Equals(clean, targetSheet, StringComparison.OrdinalIgnoreCase)) return;
-                    }
+                    if (string.Equals(clean, targetSheet, StringComparison.OrdinalIgnoreCase)) return;
                 }
             }
         }

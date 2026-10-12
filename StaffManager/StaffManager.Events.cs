@@ -50,17 +50,7 @@ public class Events : IExcelAddIn
 
     public static void SyncStaffEnums()
     {
-        TypesToExcel.Sync(
-            typeof(Department),
-            typeof(Shift),
-            typeof(PayType),
-            typeof(ContractStatus),
-            typeof(LeaveType),
-            typeof(Session),
-            typeof(LicenseClass),
-            typeof(LicenseStatus), // Generates =LicenseStatusList for Column E
-            typeof(VehicleType)
-            );
+        TypesToExcel.Sync(            );
     }
 
     public static void SyncStaffLookupsData()
@@ -68,8 +58,7 @@ public class Events : IExcelAddIn
         var vehicles = Services.Load<List<VehicleRecord>>();
         if (vehicles != null && vehicles.Count > 0)
         {
-            ServerLookups.SyncValues("VehicleID", vehicles, v => v.VehicleID);
-            ServerLookups.SyncValues("VehiclePlate", vehicles, v => v.Master.RegistrationNumber);
+            // sync vehicle records from server
         }
     }
 

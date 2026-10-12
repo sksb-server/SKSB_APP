@@ -17,32 +17,32 @@ public static class ServerDispatcher
             var list = staffList.ToList();
             SaveStaffToDb(list);
 
-            var allLicenses = list.SelectMany(s => s.Licenses.Select(lic =>
+            var allVehicleLicenses = list.SelectMany(s => s.VehicleLicenses.Select(lic =>
             {
                 if (lic.StaffID == 0) lic.StaffID = s.StaffID;
                 return lic;
             })).ToList();
-            SaveLicensesToDb(allLicenses);
+            SaveVehicleLicensesToDb(allVehicleLicenses);
 
-            var allLeaves = list.SelectMany(s => s.SkillLicenses.Select(l =>
+            var allSkillLicenses = list.SelectMany(s => s.SkillLicenses.Select(skill =>
             {
-                if (l.StaffID == 0) l.StaffID = s.StaffID;
-                return l;
+                if (skill.StaffID == 0) skill.StaffID = s.StaffID;
+                return skill;
             })).ToList();
-            SaveLeavesToDb(allLeaves);
+            SaveSkillLicensesToDb(allSkillLicenses);
         }
         else if (data is StaffRecord singleStaff)
         {
             SaveStaffToDb(new[] { singleStaff });
-            if (singleStaff.Licenses.Any())
+            if (singleStaff.VehicleLicenses.Any())
             {
-                singleStaff.Licenses.ForEach(lic => { if (lic.StaffID == 0) lic.StaffID = singleStaff.StaffID; });
-                SaveLicensesToDb(singleStaff.Licenses);
+                singleStaff.VehicleLicenses.ForEach(lic => { if (lic.StaffID == 0) lic.StaffID = singleStaff.StaffID; });
+                SaveVehicleLicensesToDb(singleStaff.VehicleLicenses);
             }
             if (singleStaff.SkillLicenses.Any())
             {
-                singleStaff.SkillLicenses.ForEach(l => { if (l.StaffID == 0) l.StaffID = singleStaff.StaffID; });
-                SaveLeavesToDb(singleStaff.SkillLicenses);
+                singleStaff.SkillLicenses.ForEach(skill => { if (skill.StaffID == 0) skill.StaffID = singleStaff.StaffID; });
+                SaveSkillLicensesToDb(singleStaff.SkillLicenses);
             }
         }
         else if (data is IEnumerable<ProjectRecord> projectList)
@@ -60,7 +60,6 @@ public static class ServerDispatcher
 
             var allMaintenance = list.SelectMany(v => v.Maintenances.Select(m =>
             {
-                if (m.VehicleID == 0) m.VehicleID = v.VehicleID;
                 return m;
             })).ToList();
             SaveVehicleMaintenanceToDb(allMaintenance);
@@ -70,17 +69,16 @@ public static class ServerDispatcher
             SaveVehiclesToDb(new[] { singleVehicle });
             if (singleVehicle.Maintenances.Any())
             {
-                singleVehicle.Maintenances.ForEach(m => { if (m.VehicleID == 0) m.VehicleID = singleVehicle.VehicleID; });
                 SaveVehicleMaintenanceToDb(singleVehicle.Maintenances);
             }
         }
-        else if (data is IEnumerable<VehicleRecord> licenses)
+        else if (data is IEnumerable<VehicleLicense> vehicleLicenses)
         {
-            SaveLicensesToDb(licenses);
+            SaveVehicleLicensesToDb(vehicleLicenses);
         }
-        else if (data is IEnumerable<SkillLicense> leaves)
+        else if (data is IEnumerable<SkillLicense> skillLicenses)
         {
-            SaveLeavesToDb(leaves);
+            SaveSkillLicensesToDb(skillLicenses);
         }
     }
 
@@ -99,97 +97,80 @@ public static class ServerDispatcher
             FamilyName = s.StaffDetails.FamilyName,
             MiddleName = s.StaffDetails.MiddleName,
             GivenName = s.StaffDetails.GivenName,
-            Name = s.StaffDetails.Name,
-            FullName = s.StaffDetails.Name,
+            DisplayName = s.StaffDetails.Name,
             Nric = s.StaffDetails.NRIC,
+            Address = s.StaffDetails.Address,
+            Email = s.StaffDetails.Email,
+            Phone = s.StaffDetails.Phone,
             Department = s.StaffDetails.Department.ToString(),
             PayType = s.StaffDetails.PayType.ToString(),
             BaseRate = s.StaffDetails.BaseRate,
-            OvertimeRate = s.StaffDetails.OvertimeRate,
-            ActiveStatus = s.StaffDetails.ActiveStatus.ToString()
+            ContractStatus = s.StaffDetails.ContractStatus.ToString(),
+            BankName = s.StaffDetails.BankName,
+            BankNumber = s.StaffDetails.BankNumber,
+            EpfNumber = s.StaffDetails.EPFNumber,
+            SocsoNumber = s.StaffDetails.SocsoNumber,
+            TinNumber = s.StaffDetails.TINNumber,
+            JoinDate = s.StaffDetails.JoinDate.ToDateTime(TimeOnly.MinValue),
+            ConfirmDate = s.StaffDetails.ConfirmDate.HasValue
+                ? (DateTime?)s.StaffDetails.ConfirmDate.Value.ToDateTime(TimeOnly.MinValue)
+                : null,
+            ResignDate = s.StaffDetails.ResignDate.HasValue
+                ? (DateTime?)s.StaffDetails.ResignDate.Value.ToDateTime(TimeOnly.MinValue)
+                : null
         }).ToList();
 
-        var prefRecords = staffItems.Select(s => new
-        {
-            StaffId = s.StaffID,
-            PrimaryTeam = s.Preference.PrimaryTeam,
-            SecondaryTeam = s.Preference.SecondaryTeam,
-            PrimarySkill = s.Preference.PrimarySkill,
-            SecondarySkill = s.Preference.SecondarySkill,
-            BlacklistTask = s.Preference.BlackListTask,
-            PreferredShift = s.Preference.PreferredShift.ToString(),
-            MaxDaysPerWeek = s.Preference.MaxDaysPerWeek,
-            PreferredRestDay = s.Preference.PrimaryRestDay.ToString(),
-            PreferredVehicleType = s.Preference.PreferredVehicleType.ToString(),
-            DedicatedVehicleId = s.Preference.DedicatedVehicleID
-        }).ToList();
-
-        const string sqlReconcileLicenses = "DELETE FROM staff_licenses WHERE staff_id != ALL(@ActiveIds);";
-        const string sqlReconcileLeaves = "DELETE FROM staff_leave WHERE staff_id != ALL(@ActiveIds);";
-        const string sqlReconcilePrefs = "DELETE FROM staff_preference WHERE staff_id != ALL(@ActiveIds);";
+        const string sqlReconcileVehicleLicenses = "DELETE FROM staff_licenses WHERE staff_id != ALL(@ActiveIds);";
+        const string sqlReconcileSkillLicenses = "DELETE FROM staff_skill_licenses WHERE staff_id != ALL(@ActiveIds);";
         const string sqlReconcileMaster = "DELETE FROM staff_master WHERE staff_id != ALL(@ActiveIds);";
 
         const string sqlMasterUpsert = @"
         INSERT INTO staff_master (
-            staff_id, family_name, middle_name, given_name, display_name, full_name,
-            nric, department, pay_type, base_rate, overtime_rate, active_status
+            staff_id, family_name, middle_name, given_name, display_name,
+            nric, address, email, phone, department, pay_type, base_rate,
+            contract_status, bank_name, bank_number, epf_number, socso_number,
+            tin_number, join_date, confirm_date, resign_date
         )
         VALUES (
-            @StaffId, @FamilyName, @MiddleName, @GivenName, @Name, @FullName,
-            @Nric, @Department, @PayType, @BaseRate, @OvertimeRate, @ActiveStatus
+            @StaffId, @FamilyName, @MiddleName, @GivenName, @DisplayName,
+            @Nric, @Address, @Email, @Phone, @Department, @PayType, @BaseRate,
+            @ContractStatus, @BankName, @BankNumber, @EpfNumber, @SocsoNumber,
+            @TinNumber, @JoinDate, @ConfirmDate, @ResignDate
         )
         ON CONFLICT (staff_id) DO UPDATE SET
-            family_name   = EXCLUDED.family_name,
-            middle_name   = EXCLUDED.middle_name,
-            given_name    = EXCLUDED.given_name,
-            display_name  = EXCLUDED.display_name,
-            full_name     = EXCLUDED.full_name,
-            nric          = EXCLUDED.nric,
-            department    = EXCLUDED.department,
-            pay_type      = EXCLUDED.pay_type,
-            base_rate     = EXCLUDED.base_rate,
-            overtime_rate = EXCLUDED.overtime_rate,
-            active_status = EXCLUDED.active_status,
-            updated_at    = CURRENT_TIMESTAMP;";
-
-        const string sqlPrefUpsert = @"
-        INSERT INTO staff_preference (
-            staff_id, primary_team, secondary_team, primary_skill, 
-            secondary_skill, blacklist_task, preferred_shift, 
-            max_days_per_week, preferred_rest_day, preferred_vehicle_type, dedicated_vehicle_id
-        )
-        VALUES (
-            @StaffId, @PrimaryTeam, @SecondaryTeam, @PrimarySkill, 
-            @SecondarySkill, @BlacklistTask, 
-            @PreferredShift, 
-            @MaxDaysPerWeek, @PreferredRestDay, @PreferredVehicleType, @DedicatedVehicleId
-        )
-        ON CONFLICT (staff_id) DO UPDATE SET
-            primary_team           = EXCLUDED.primary_team,
-            secondary_team         = EXCLUDED.secondary_team,
-            primary_skill          = EXCLUDED.primary_skill,
-            secondary_skill        = EXCLUDED.secondary_skill,
-            blacklist_task         = EXCLUDED.blacklist_task,
-            preferred_shift        = EXCLUDED.preferred_shift,
-            max_days_per_week      = EXCLUDED.max_days_per_week,
-            preferred_rest_day     = EXCLUDED.preferred_rest_day,
-            preferred_vehicle_type = EXCLUDED.preferred_vehicle_type,
-            dedicated_vehicle_id   = EXCLUDED.dedicated_vehicle_id,
-            updated_at             = CURRENT_TIMESTAMP;";
+            family_name     = EXCLUDED.family_name,
+            middle_name     = EXCLUDED.middle_name,
+            given_name      = EXCLUDED.given_name,
+            display_name    = EXCLUDED.display_name,
+            nric            = EXCLUDED.nric,
+            address         = EXCLUDED.address,
+            email           = EXCLUDED.email,
+            phone           = EXCLUDED.phone,
+            department      = EXCLUDED.department,
+            pay_type        = EXCLUDED.pay_type,
+            base_rate       = EXCLUDED.base_rate,
+            contract_status = EXCLUDED.contract_status,
+            bank_name       = EXCLUDED.bank_name,
+            bank_number     = EXCLUDED.bank_number,
+            epf_number      = EXCLUDED.epf_number,
+            socso_number    = EXCLUDED.socso_number,
+            tin_number      = EXCLUDED.tin_number,
+            join_date       = EXCLUDED.join_date,
+            confirm_date    = EXCLUDED.confirm_date,
+            resign_date     = EXCLUDED.resign_date,
+            updated_at      = CURRENT_TIMESTAMP;";
 
         DbService.ExecuteInTransaction((db, trans) =>
         {
-            db.Execute(sqlReconcileLicenses, new { ActiveIds = activeIds }, transaction: trans);
-            db.Execute(sqlReconcileLeaves, new { ActiveIds = activeIds }, transaction: trans);
-            db.Execute(sqlReconcilePrefs, new { ActiveIds = activeIds }, transaction: trans);
+            db.Execute(sqlReconcileVehicleLicenses, new { ActiveIds = activeIds }, transaction: trans);
+            db.Execute(sqlReconcileSkillLicenses, new { ActiveIds = activeIds }, transaction: trans);
             db.Execute(sqlReconcileMaster, new { ActiveIds = activeIds }, transaction: trans);
 
             db.Execute(sqlMasterUpsert, masterRecords, transaction: trans);
-            db.Execute(sqlPrefUpsert, prefRecords, transaction: trans);
         });
     }
 
-    private static void SaveLicensesToDb(IEnumerable<VehicleRecord> licenses)
+    private static void SaveVehicleLicensesToDb(IEnumerable<VehicleLicense> licenses)
     {
         var licenseItems = licenses
             .Where(l => l.StaffID > 0 && l.LicenseClass != LicenseClass.None)
@@ -197,6 +178,7 @@ public static class ServerDispatcher
             {
                 StaffId = l.StaffID,
                 LicenseType = l.LicenseClass.ToString(),
+                RenewDate = l.RenewDate.ToDateTime(TimeOnly.MinValue),
                 ExpiryDate = l.ExpiryDate.ToDateTime(TimeOnly.MinValue),
                 Status = l.LicenseStatus.ToString()
             }).ToList();
@@ -204,9 +186,10 @@ public static class ServerDispatcher
         if (!licenseItems.Any()) return;
 
         const string sqlLicenses = @"
-        INSERT INTO staff_licenses (staff_id, license_type, expiry_date, status)
-        VALUES (@StaffId, @LicenseType, @ExpiryDate, @Status)
+        INSERT INTO staff_licenses (staff_id, license_type, renew_date, expiry_date, status)
+        VALUES (@StaffId, @LicenseType, @RenewDate, @ExpiryDate, @Status)
         ON CONFLICT (staff_id, license_type) DO UPDATE SET
+            renew_date  = EXCLUDED.renew_date,
             expiry_date = EXCLUDED.expiry_date,
             status      = EXCLUDED.status,
             updated_at  = CURRENT_TIMESTAMP;";
@@ -214,49 +197,36 @@ public static class ServerDispatcher
         DbService.ExecuteTransaction(sqlLicenses, licenseItems);
     }
 
-    private static void SaveLeavesToDb(IEnumerable<SkillLicense> leaves)
+    private static void SaveSkillLicensesToDb(IEnumerable<SkillLicense> skillLicenses)
     {
-        var leaveItems = leaves.Where(l => l.StaffID > 0).Select(l => new
-        {
-            LeaveId = l.LeaveID,
-            StaffId = l.StaffID,
-            LeaveType = l.LeaveType.ToString(),
-            StartDate = l.DateStart.ToDateTime(TimeOnly.MinValue),
-            EndDate = l.DateEnd.ToDateTime(TimeOnly.MinValue),
-            SessionType = l.SessionType.ToString(),
-            DaysTaken = l.TotalDays,
-            Status = l.ApprovalStatus.ToString()
-        }).ToList();
+        var skillItems = skillLicenses
+            .Where(s => s.StaffID > 0 && !string.IsNullOrWhiteSpace(s.LicenseType))
+            .Select(s => new
+            {
+                LicenseId = s.LicenseID,
+                StaffId = s.StaffID,
+                LicenseType = s.LicenseType,
+                RenewDate = s.RenewDate.ToDateTime(TimeOnly.MinValue),
+                ExpiryDate = s.ExpiryDate.ToDateTime(TimeOnly.MinValue),
+                Status = s.LicenseStatus.ToString()
+            }).ToList();
 
-        if (!leaveItems.Any()) return;
+        if (!skillItems.Any()) return;
 
-        const string sqlLeave = @"
-        INSERT INTO staff_leave (
-            leave_id, staff_id, leave_type, start_date, end_date, 
-            days_taken, status, session_type
+        const string sqlSkillLicense = @"
+        INSERT INTO staff_skill_licenses (
+            license_id, staff_id, license_type, renew_date, expiry_date, status
         )
         VALUES (
-            @LeaveId, @StaffId, @LeaveType, @StartDate, @EndDate, 
-            @DaysTaken, @Status, @SessionType
+            @LicenseId, @StaffId, @LicenseType, @RenewDate, @ExpiryDate, @Status
         )
-        ON CONFLICT (leave_id) DO UPDATE SET
-            staff_id     = EXCLUDED.staff_id,
-            leave_type   = EXCLUDED.leave_type,
-            start_date   = EXCLUDED.start_date,
-            end_date     = EXCLUDED.end_date,
-            days_taken   = EXCLUDED.days_taken,
-            status       = EXCLUDED.status,
-            session_type = EXCLUDED.session_type,
-            updated_at   = CURRENT_TIMESTAMP;";
+        ON CONFLICT (staff_id, license_type) DO UPDATE SET
+            renew_date  = EXCLUDED.renew_date,
+            expiry_date = EXCLUDED.expiry_date,
+            status      = EXCLUDED.status,
+            updated_at  = CURRENT_TIMESTAMP;";
 
-        const string sqlSyncSeq = @"
-        SELECT setval(
-            pg_get_serial_sequence('staff_leave', 'leave_id'),
-            COALESCE(MAX(leave_id), 1)
-        ) FROM staff_leave;";
-
-        DbService.ExecuteTransaction(sqlLeave, leaveItems);
-        DbService.Execute(sqlSyncSeq);
+        DbService.ExecuteTransaction(sqlSkillLicense, skillItems);
     }
 
     #endregion
@@ -265,7 +235,7 @@ public static class ServerDispatcher
 
     private static void SaveProjectsToDb(IEnumerable<ProjectRecord> projectList)
     {
-        var projectItems = projectList.Where(p => p.ProjectID > 0).ToList();
+        var projectItems = projectList.Where(p => !string.IsNullOrWhiteSpace(p.ProjectID)).ToList();
         if (!projectItems.Any()) return;
 
         var activeIds = projectItems.Select(p => p.ProjectID).ToArray();
@@ -273,51 +243,61 @@ public static class ServerDispatcher
         var projectRecords = projectItems.Select(p => new
         {
             ProjectId = p.ProjectID,
-            ProjectCode = string.IsNullOrWhiteSpace(p.Master.ProjectID) ? $"PRJ-{p.ProjectID}" : p.Master.ProjectID,
-            ProjectName = p.Master.ProjectName,
-            ProjectClass = p.Master.ProjectClass.ToString(),
-            Priority = p.Master.Priority.ToString(),
-            Status = p.Master.Status.ToString(),
-            StartDate = p.Master.StartDate.ToDateTime(TimeOnly.MinValue),
-            TargetEndDate = p.Master.TargetEndDate.ToDateTime(TimeOnly.MinValue),
-            ActualEndDate = p.Master.ActualEndDate == default
-                ? (DateTime?)null
-                : p.Master.ActualEndDate.ToDateTime(TimeOnly.MinValue),
-            RequiredHeadcount = p.Master.RequiredHeadcount,
-            RequiredVehicleType = p.Master.RequiredVehicleType.ToString(),
-            RequiredSkills = p.Master.RequiredSkills,
-            Address = p.Master.Address,
-            Remarks = p.Master.Remarks
+            ProjectName = p.ProjectDetails.ProjectName,
+            ProjectType = p.ProjectDetails.ProjectType.ToString(),
+            CompanyId = p.ProjectDetails.CompanyID,
+            CompanyName = p.ProjectDetails.CompanyName,
+            Priority = p.ProjectDetails.Priority.ToString(),
+            Status = p.ProjectDetails.Status.ToString(),
+            District = p.ProjectDetails.District.ToString(),
+            Address = p.ProjectDetails.Address,
+            Remarks = p.ProjectDetails.Remarks,
+            StartDate = p.ProjectDetails.StartDate.ToDateTime(TimeOnly.MinValue),
+            TargetEndDate = p.ProjectDetails.TargetEndDate.ToDateTime(TimeOnly.MinValue),
+            ActualEndDate = p.ProjectDetails.ActualEndDate.HasValue
+                ? (DateTime?)p.ProjectDetails.ActualEndDate.Value.ToDateTime(TimeOnly.MinValue)
+                : null,
+            EstProjectCost = p.ProjectDetails.EstProjectCost,
+            ProjectTotalCost = p.ProjectDetails.ProjectTotalCost,
+            PromisedReturn = p.ProjectDetails.PromisedReturn,
+            ActualReturn = p.ProjectDetails.ActualReturn,
+            Profit = p.ProjectDetails.Profit
         }).ToList();
 
         const string sqlReconcileProjects = "DELETE FROM project_master WHERE project_id != ALL(@ActiveIds);";
 
         const string sqlProjectUpsert = @"
         INSERT INTO project_master (
-            project_id, project_code, project_name, project_class, priority, status,
-            start_date, target_end_date, actual_end_date, required_headcount,
-            required_vehicle_type, required_skills, address, remarks
+            project_id, project_name, project_type, company_id, company_name,
+            priority, status, district, address, remarks, start_date,
+            target_end_date, actual_end_date, est_project_cost, project_total_cost,
+            promised_return, actual_return, profit
         )
         VALUES (
-            @ProjectId, @ProjectCode, @ProjectName, @ProjectClass, @Priority, @Status,
-            @StartDate, @TargetEndDate, @ActualEndDate, @RequiredHeadcount,
-            @RequiredVehicleType, @RequiredSkills, @Address, @Remarks
+            @ProjectId, @ProjectName, @ProjectType, @CompanyId, @CompanyName,
+            @Priority, @Status, @District, @Address, @Remarks, @StartDate,
+            @TargetEndDate, @ActualEndDate, @EstProjectCost, @ProjectTotalCost,
+            @PromisedReturn, @ActualReturn, @Profit
         )
         ON CONFLICT (project_id) DO UPDATE SET
-            project_code          = EXCLUDED.project_code,
-            project_name          = EXCLUDED.project_name,
-            project_class         = EXCLUDED.project_class,
-            priority              = EXCLUDED.priority,
-            status                = EXCLUDED.status,
-            start_date            = EXCLUDED.start_date,
-            target_end_date       = EXCLUDED.target_end_date,
-            actual_end_date       = EXCLUDED.actual_end_date,
-            required_headcount    = EXCLUDED.required_headcount,
-            required_vehicle_type = EXCLUDED.required_vehicle_type,
-            required_skills       = EXCLUDED.required_skills,
-            address               = EXCLUDED.address,
-            remarks               = EXCLUDED.remarks,
-            updated_at            = CURRENT_TIMESTAMP;";
+            project_name       = EXCLUDED.project_name,
+            project_type       = EXCLUDED.project_type,
+            company_id         = EXCLUDED.company_id,
+            company_name       = EXCLUDED.company_name,
+            priority           = EXCLUDED.priority,
+            status             = EXCLUDED.status,
+            district           = EXCLUDED.district,
+            address            = EXCLUDED.address,
+            remarks            = EXCLUDED.remarks,
+            start_date         = EXCLUDED.start_date,
+            target_end_date    = EXCLUDED.target_end_date,
+            actual_end_date    = EXCLUDED.actual_end_date,
+            est_project_cost   = EXCLUDED.est_project_cost,
+            project_total_cost = EXCLUDED.project_total_cost,
+            promised_return    = EXCLUDED.promised_return,
+            actual_return      = EXCLUDED.actual_return,
+            profit             = EXCLUDED.profit,
+            updated_at         = CURRENT_TIMESTAMP;";
 
         DbService.ExecuteInTransaction((db, trans) =>
         {
@@ -332,53 +312,56 @@ public static class ServerDispatcher
 
     private static void SaveVehiclesToDb(IEnumerable<VehicleRecord> vehicleList)
     {
-        var vehicleItems = vehicleList.Where(v => v.VehicleID > 0).ToList();
+        var vehicleItems = vehicleList.Where(v => !string.IsNullOrWhiteSpace(v.VehiclePlate)).ToList();
         if (!vehicleItems.Any()) return;
 
-        var activeIds = vehicleItems.Select(v => v.VehicleID).ToArray();
+        var activePlates = vehicleItems.Select(v => v.VehiclePlate).ToArray();
 
         var masterRecords = vehicleItems.Select(v => new
         {
-            VehicleId = v.VehicleID,
-            RegistrationNumber = v.Master.RegistrationNumber.Trim().ToUpperInvariant(),
-            VehicleType = v.Master.Type.ToString(),
-            Brand = v.Master.Brand,
-            Model = v.Master.Model,
-            CapacityTonnage = v.Master.CapacityTonnage,
-            RoadTaxExpiry = v.Master.RoadTaxExpiry.ToDateTime(TimeOnly.MinValue),
-            PuspakomExpiry = v.Master.PuspakomExpiry.ToDateTime(TimeOnly.MinValue),
-            CurrentOdometer = v.Master.CurrentOdometer,
-            Status = v.Master.Status.ToString()
+            VehiclePlate = v.VehiclePlate.Trim().ToUpperInvariant(),
+            Vin = v.VehicleDetail.VIN,
+            VehicleType = v.VehicleDetail.Type.ToString(),
+            Brand = v.VehicleDetail.Brand,
+            Model = v.VehicleDetail.Model,
+            RoadTaxExpiry = v.VehicleDetail.RoadTaxExpiry.ToDateTime(TimeOnly.MinValue),
+            InspectionExpiry = v.VehicleDetail.InspectionExpiry.ToDateTime(TimeOnly.MinValue),
+            CurrentOdometer = v.VehicleDetail.CurrentOdometer,
+            Status = v.VehicleStatus.ToString()
         }).ToList();
 
-        const string sqlReconcileMaintenance = "DELETE FROM vehicle_maintenance WHERE vehicle_id != ALL(@ActiveIds);";
-        const string sqlReconcileVehicles = "DELETE FROM vehicle_master WHERE vehicle_id != ALL(@ActiveIds);";
+        const string sqlReconcileMaintenance = @"
+        DELETE FROM vehicle_maintenance 
+        WHERE vehicle_plate != ALL(@ActivePlates);";
+
+        const string sqlReconcileVehicles = @"
+        DELETE FROM vehicle_master 
+        WHERE vehicle_plate != ALL(@ActivePlates);";
 
         const string sqlMasterUpsert = @"
         INSERT INTO vehicle_master (
-            vehicle_id, registration_number, vehicle_type, brand, model,
-            capacity_tonnage, road_tax_expiry, puspakom_expiry, current_odometer, status
+            vehicle_plate, vin, vehicle_type, brand, model,
+            road_tax_expiry, inspection_expiry, current_odometer, status
         )
         VALUES (
-            @VehicleId, @RegistrationNumber, @VehicleType, @Brand, @Model,
-            @CapacityTonnage, @RoadTaxExpiry, @PuspakomExpiry, @CurrentOdometer, @Status
+            @VehiclePlate, @Vin, @VehicleType, @Brand, @Model,
+            @RoadTaxExpiry, @InspectionExpiry, @CurrentOdometer, @Status
         )
-        ON CONFLICT (vehicle_id) DO UPDATE SET
-            registration_number = EXCLUDED.registration_number,
-            vehicle_type        = EXCLUDED.vehicle_type,
-            brand               = EXCLUDED.brand,
-            model               = EXCLUDED.model,
-            capacity_tonnage    = EXCLUDED.capacity_tonnage,
-            road_tax_expiry     = EXCLUDED.road_tax_expiry,
-            puspakom_expiry     = EXCLUDED.puspakom_expiry,
-            current_odometer    = EXCLUDED.current_odometer,
-            status              = EXCLUDED.status,
-            updated_at          = CURRENT_TIMESTAMP;";
+        ON CONFLICT (vehicle_plate) DO UPDATE SET
+            vin               = EXCLUDED.vin,
+            vehicle_type      = EXCLUDED.vehicle_type,
+            brand             = EXCLUDED.brand,
+            model             = EXCLUDED.model,
+            road_tax_expiry   = EXCLUDED.road_tax_expiry,
+            inspection_expiry = EXCLUDED.inspection_expiry,
+            current_odometer  = EXCLUDED.current_odometer,
+            status            = EXCLUDED.status,
+            updated_at        = CURRENT_TIMESTAMP;";
 
         DbService.ExecuteInTransaction((db, trans) =>
         {
-            db.Execute(sqlReconcileMaintenance, new { ActiveIds = activeIds }, transaction: trans);
-            db.Execute(sqlReconcileVehicles, new { ActiveIds = activeIds }, transaction: trans);
+            db.Execute(sqlReconcileMaintenance, new { ActivePlates = activePlates }, transaction: trans);
+            db.Execute(sqlReconcileVehicles, new { ActivePlates = activePlates }, transaction: trans);
             db.Execute(sqlMasterUpsert, masterRecords, transaction: trans);
         });
     }
@@ -390,39 +373,47 @@ public static class ServerDispatcher
             MaintenanceId = m.MaintenanceID,
             VehicleId = m.VehicleID,
             ServiceType = m.ServiceType.ToString(),
-            DateOut = m.DateOut.ToDateTime(TimeOnly.MinValue),
+            DateIn = m.DateIn.ToDateTime(TimeOnly.MinValue),
             EstimatedReturn = m.EstimatedReturn.ToDateTime(TimeOnly.MinValue),
             DateCompleted = m.DateCompleted.HasValue
                 ? (DateTime?)m.DateCompleted.Value.ToDateTime(TimeOnly.MinValue)
                 : null,
-            OdometerAtService = m.OdometerAtService,
-            CostAmount = m.CostAmount,
+            OdometerIn = m.OdometerIn,
+            OdometerOut = m.OdometerOut,
+            RepairCost = m.RepairCost,
             WorkshopName = m.WorkshopName,
-            Status = m.Status.ToString()
+            WorkshopAddress = m.WorkshopAddress,
+            Status = m.MaintenanceStatus.ToString(),
+            Remarks = m.Remarks
         }).ToList();
 
         if (!validRecords.Any()) return;
 
         const string sqlMaintenanceUpsert = @"
         INSERT INTO vehicle_maintenance (
-            maintenance_id, vehicle_id, service_type, date_out, estimated_return,
-            date_completed, odometer_at_service, cost_amount, workshop_name, status
+            maintenance_id, vehicle_id, service_type, date_in, estimated_return,
+            date_completed, odometer_in, odometer_out, repair_cost, workshop_name,
+            workshop_address, status, remarks
         )
         VALUES (
-            @MaintenanceId, @VehicleId, @ServiceType, @DateOut, @EstimatedReturn,
-            @DateCompleted, @OdometerAtService, @CostAmount, @WorkshopName, @Status
+            @MaintenanceId, @VehicleId, @ServiceType, @DateIn, @EstimatedReturn,
+            @DateCompleted, @OdometerIn, @OdometerOut, @RepairCost, @WorkshopName,
+            @WorkshopAddress, @Status, @Remarks
         )
         ON CONFLICT (maintenance_id) DO UPDATE SET
-            vehicle_id          = EXCLUDED.vehicle_id,
-            service_type        = EXCLUDED.service_type,
-            date_out            = EXCLUDED.date_out,
-            estimated_return    = EXCLUDED.estimated_return,
-            date_completed      = EXCLUDED.date_completed,
-            odometer_at_service = EXCLUDED.odometer_at_service,
-            cost_amount         = EXCLUDED.cost_amount,
-            workshop_name       = EXCLUDED.workshop_name,
-            status              = EXCLUDED.status,
-            updated_at          = CURRENT_TIMESTAMP;";
+            vehicle_id       = EXCLUDED.vehicle_id,
+            service_type     = EXCLUDED.service_type,
+            date_in          = EXCLUDED.date_in,
+            estimated_return = EXCLUDED.estimated_return,
+            date_completed   = EXCLUDED.date_completed,
+            odometer_in      = EXCLUDED.odometer_in,
+            odometer_out     = EXCLUDED.odometer_out,
+            repair_cost      = EXCLUDED.repair_cost,
+            workshop_name    = EXCLUDED.workshop_name,
+            workshop_address = EXCLUDED.workshop_address,
+            status           = EXCLUDED.status,
+            remarks          = EXCLUDED.remarks,
+            updated_at       = CURRENT_TIMESTAMP;";
 
         DbService.ExecuteTransaction(sqlMaintenanceUpsert, validRecords);
     }
