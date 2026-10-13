@@ -1,4 +1,4 @@
-﻿namespace SKSB_App.Core.Format;
+﻿namespace SKSB_App.Core.TemplateEditor;
 
 using System;
 using System.Runtime.InteropServices;
@@ -19,8 +19,9 @@ public class RibbonController : ExcelRibbon
         <customUI xmlns='http://schemas.microsoft.com/office/2009/07/customui' onLoad='OnRibbonLoad'>
           <ribbon>
             <tabs>
-              <tab id='tabFormat' label='Format'>
-                <group id='grpCellFormat' label='Template &amp; Formatting'>
+              <!-- Renamed tab from 'Format' to 'Template Editor' -->
+              <tab id='tabTemplateEditor' label='Template Editor'>
+                <group id='grpTemplateDesign' label='Template Design &amp; Validation'>
                   <!-- Exposed Template Edit Mode Toggle Button -->
                   <toggleButton id='btnToggleTemplateMode'
                                 label='Template Edit Mode'
@@ -43,7 +44,7 @@ public class RibbonController : ExcelRibbon
                           getVisible='GetPurgeVisible' 
                           onAction='OnPurgeTemplateDataClicked' />
                 </group>
-                <group id='grpSync' label='Core Data'>
+                <group id='grpSync' label='Core Lookups'>
                   <!-- Exposed Manual Sync All Enums Button -->
                   <button id='btnSyncCoreEnums' 
                           label='Sync All Enums' 
@@ -95,7 +96,7 @@ public class RibbonController : ExcelRibbon
                 "• 'Lookups' & 'Data' worksheets are now VISIBLE at the back.\n" +
                 "• All Core Enums have been synchronized.\n" +
                 "• Double-clicking dropdown cells will open the Template Inspector.",
-                "Template Mode",
+                "Template Editor",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Information
             );
@@ -109,7 +110,7 @@ public class RibbonController : ExcelRibbon
                 "Template Edit Mode is now DISABLED.\n\n" +
                 "• 'Lookups' & 'Data' worksheets are now HIDDEN.\n" +
                 "• Switched to Operational Mode.",
-                "Operational Mode",
+                "Template Editor",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Information
             );
@@ -128,7 +129,7 @@ public class RibbonController : ExcelRibbon
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Failed applying DropDown style: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show($"Failed applying DropDown style: {ex.Message}", "Template Editor Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         });
     }
@@ -141,14 +142,14 @@ public class RibbonController : ExcelRibbon
             MessageBox.Show(
                 "All Core Enums have been synchronized to the 'Lookups' sheet successfully.\n\n" +
                 "Press Ctrl + F3 to inspect the registered *List names in Name Manager.",
-                "Sync Complete",
+                "Template Editor - Sync Complete",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Information
             );
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Sync trigger failed: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show($"Sync trigger failed: {ex.Message}", "Template Editor Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 
@@ -156,7 +157,7 @@ public class RibbonController : ExcelRibbon
     {
         var confirm = MessageBox.Show(
             "Clear all operational data rows on this template?\n\n(Headers, styles, and the 'Lookups' and 'Data' sheets will be preserved)",
-            "Purge Template Data",
+            "Template Editor - Purge Template Data",
             MessageBoxButtons.YesNo,
             MessageBoxIcon.Warning
         );
@@ -167,7 +168,7 @@ public class RibbonController : ExcelRibbon
             {
                 WorkbookSession.PurgeAllSheetsData();
                 MessageBox.Show("All sheet data has been purged. Template is now clean.",
-                                "Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                                "Template Editor", MessageBoxButtons.OK, MessageBoxIcon.Information);
             });
         }
     }

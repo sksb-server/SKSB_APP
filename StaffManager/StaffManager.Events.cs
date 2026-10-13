@@ -3,7 +3,7 @@
 using ExcelDna.Integration;
 using SKSB_App.Core.FileManager;
 using SKSB_App.Core.FileManager.Constants;
-using SKSB_App.Core.Format;
+using SKSB_App.Core.TemplateEditor;
 using SKSB_App.Core.ServerManager;
 using SKSB_App.Core.Services;
 using SKSB_App.Core.Types;

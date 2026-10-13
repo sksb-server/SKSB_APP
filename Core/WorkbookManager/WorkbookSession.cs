@@ -98,23 +98,30 @@ public static class WorkbookSession
             System.Diagnostics.Debug.WriteLine($"[MoveSingleSheetToEnd Error] {ex.Message}");
         }
     }
-
     /// <summary>
-    /// Checks whether the active document is a master template (.xltx / .xltm).
-    /// Safe against bracket and sheet name suffixes (e.g. "[Template.xltx]Sheet1").
+    /// Checks whether the active file is a master .xltx/.xltm template file.
+    /// Handles both plain 'Template.xltx' and qualified '[Template.xltx]Sheet1' titles.
     /// </summary>
     public static bool IsMasterTemplateFile()
     {
         try
         {
+            // Document type 1 returns '[BookName.xltx]Sheet1' or 'BookName.xltx'
             object docNameObj = XlCall.Excel(XlCall.xlfGetDocument, 1);
             string docName = docNameObj?.ToString() ?? string.Empty;
 
-            if (string.IsNullOrWhiteSpace(docName))
+            if (string.IsNullOrEmpty(docName))
                 return false;
 
-            return docName.IndexOf(".xltx", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                   docName.IndexOf(".xltm", StringComparison.OrdinalIgnoreCase) >= 0;
+            // Extract filename from bracketed document format: [FileName.xltx]SheetName
+            int openBracket = docName.IndexOf('[');
+            int closeBracket = docName.IndexOf(']');
+            string fileName = (openBracket >= 0 && closeBracket > openBracket)
+                ? docName.Substring(openBracket + 1, closeBracket - openBracket - 1)
+                : docName;
+
+            return fileName.EndsWith(".xltx", StringComparison.OrdinalIgnoreCase) ||
+                   fileName.EndsWith(".xltm", StringComparison.OrdinalIgnoreCase);
         }
         catch
         {

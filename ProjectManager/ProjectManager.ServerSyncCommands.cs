@@ -12,10 +12,21 @@ public static class ServerSyncCommands
     {
         try
         {
-            var projectList = ProjectSheetMapper.ExtractProjectRecords();
-            if (projectList == null || projectList.Count == 0) return true;
+            var (projectList, companyList) = SheetMapper.ExtractProjectRecords();
+            if (projectList == null || projectList.Count == 0)
+            {
+                return false;
+            }
 
-            string snapshotPath = Services.SaveAsync(projectList, writeToDatabase: true).GetAwaiter().GetResult();
+            if (companyList != null && companyList.Count > 0)
+            {
+                Services.SaveAsync(companyList, writeToDatabase: true).GetAwaiter().GetResult();
+            }
+
+            string snapshotPath = Services.SaveAsync(projectList, writeToDatabase: true)
+                                          .GetAwaiter()
+                                          .GetResult();
+
             return !string.IsNullOrEmpty(snapshotPath);
         }
         catch (Exception ex)
@@ -30,9 +41,11 @@ public static class ServerSyncCommands
         try
         {
             var projectList = Services.Load<List<ProjectRecord>>();
+            var companyList = Services.Load<List<CompanyRecord>>() ?? new List<CompanyRecord>();
+
             if (projectList != null && projectList.Count > 0)
             {
-                ProjectSheetMapper.PopulateWorksheet(projectList);
+                SheetMapper.PopulateWorksheet(projectList, companyList);
                 return true;
             }
             return false;
@@ -44,7 +57,6 @@ public static class ServerSyncCommands
         }
     }
 
-    // Explicitly accepts List<ProjectRecord>
     public static async Task<(bool Success, int Count, string Path)> SaveProjectsAsync(List<ProjectRecord> projectList)
     {
         if (projectList == null || projectList.Count == 0) return (false, 0, string.Empty);
@@ -53,8 +65,20 @@ public static class ServerSyncCommands
         return (!string.IsNullOrEmpty(path), projectList.Count, path);
     }
 
+    public static async Task<bool> SaveCompaniesAsync(List<CompanyRecord> companyList)
+    {
+        if (companyList == null || companyList.Count == 0) return false;
+        string path = await Services.SaveAsync(companyList, writeToDatabase: true);
+        return !string.IsNullOrEmpty(path);
+    }
+
     public static List<ProjectRecord>? FetchProjectRecords()
     {
         return Services.Load<List<ProjectRecord>>();
+    }
+
+    public static List<CompanyRecord>? FetchCompanyRecords()
+    {
+        return Services.Load<List<CompanyRecord>>();
     }
 }
