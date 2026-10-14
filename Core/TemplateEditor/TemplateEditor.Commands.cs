@@ -174,7 +174,7 @@ public static class Commands
             var lblInfo = new Label
             {
                 Text = $"Target Style: '{DropDownStyleName}'\n" +
-                       "Source list formula (e.g. =StaffNamesList, =LicenseTypesList, =LicenseClassList):",
+                       "Source list formula (e.g. =WorkerNamesList, =LicenseTypesList, =LicenseClassList):",
                 AutoSize = true,
                 Margin = new Padding(0, 0, 0, 8)
             };
@@ -350,7 +350,7 @@ public static class Commands
 
             return headerText switch
             {
-                "Staff Name" => "=StaffNamesList",
+                "Worker Name" => "=WorkerNamesList",
                 "License Type" or "License Types" => "=LicenseTypesList",
                 "License_Class" or "License Class" => "=LicenseClassList",
                 "Vehicle Type" => "=VehicleTypeList",

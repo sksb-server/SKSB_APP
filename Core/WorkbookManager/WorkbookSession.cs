@@ -12,7 +12,6 @@ public static class WorkbookSession
 
     public const string LookupsSheetName = "Lookups";
     public const string DataSheetName = "Data";
-    public const string NameLookupsSheetName = "NameLookups";
 
     /// <summary>
     /// Searches the active workbook for the first existing sheet matching a list of candidate aliases.
@@ -300,8 +299,7 @@ public static class WorkbookSession
 
                 // Protect both Lookups and Data from being wiped
                 if (sName.Equals(LookupsSheetName, StringComparison.OrdinalIgnoreCase) ||
-                    sName.Equals(DataSheetName, StringComparison.OrdinalIgnoreCase) ||
-                    sName.Equals(NameLookupsSheetName, StringComparison.OrdinalIgnoreCase))
+                    sName.Equals(DataSheetName, StringComparison.OrdinalIgnoreCase))
                 {
                     continue;
                 }

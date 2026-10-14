@@ -2,9 +2,9 @@
 
 using System;
 
-public record StaffMasterDto
+public record WorkerMasterDto
 {
-    public long StaffId { get; init; }
+    public long WorkerId { get; init; }
     public string FamilyName { get; init; } = string.Empty;
     public string MiddleName { get; init; } = string.Empty;
     public string GivenName { get; init; } = string.Empty;
@@ -17,9 +17,9 @@ public record StaffMasterDto
     public string ActiveStatus { get; init; } = string.Empty;
 }
 
-public record StaffPreferenceDto
+public record WorkerPreferenceDto
 {
-    public long StaffId { get; init; }
+    public long WorkerId { get; init; }
     public string PrimaryTeam { get; init; } = string.Empty;
     public string SecondaryTeam { get; init; } = string.Empty;
     public string PrimarySkill { get; init; } = string.Empty;
@@ -31,18 +31,18 @@ public record StaffPreferenceDto
     public long? DedicatedVehicleId { get; init; }
 }
 
-public record StaffLicenseDto
+public record WorkerLicenseDto
 {
-    public long StaffId { get; init; }
+    public long WorkerId { get; init; }
     public string LicenseType { get; init; } = string.Empty;
     public DateTime ExpiryDate { get; init; }
     public string Status { get; init; } = string.Empty;
 }
 
-public record StaffLeaveDto
+public record WorkerLeaveDto
 {
     public long LeaveId { get; init; }
-    public long StaffId { get; init; }
+    public long WorkerId { get; init; }
     public string LeaveType { get; init; } = string.Empty;
     public DateTime DateStart { get; init; }
     public DateTime DateEnd { get; init; }

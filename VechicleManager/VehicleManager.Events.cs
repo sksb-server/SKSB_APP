@@ -50,7 +50,7 @@ public class Events : IExcelAddIn
 
     public static void SyncVehicleLookupsData()
     {
-        DataToExcel.SyncData<StaffRecord, string>("StaffName", s => s.StaffDetails.Name);
+        DataToExcel.SyncData<WorkerRecord, string>("WorkerName", s => s.WorkerDetails.Name);
     }
 
     private static void HookApplicationClose()

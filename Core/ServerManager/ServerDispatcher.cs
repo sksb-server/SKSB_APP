@@ -15,38 +15,38 @@ public static class ServerDispatcher
     // -------------------------------------------------------------
     public static void Dispatch<T>(T data)
     {
-        // 1. Staff Manager
-        if (data is IEnumerable<StaffRecord> staffList)
+        // 1. Worker Manager
+        if (data is IEnumerable<WorkerRecord> workerList)
         {
-            var list = staffList.ToList();
-            SaveStaffToDb(list, isFullBatch: true);
+            var list = workerList.ToList();
+            SaveWorkersToDb(list, isFullBatch: true);
 
             var allVehicleLicenses = list.SelectMany(s => s.VehicleLicenses.Select(lic =>
             {
-                if (lic.StaffID == 0) lic.StaffID = s.StaffID;
+                if (lic.WorkerID == 0) lic.WorkerID = s.WorkerID;
                 return lic;
             })).ToList();
             SaveVehicleLicensesToDb(allVehicleLicenses);
 
             var allSkillLicenses = list.SelectMany(s => s.SkillLicenses.Select(skill =>
             {
-                if (skill.StaffID == 0) skill.StaffID = s.StaffID;
+                if (skill.WorkerID == 0) skill.WorkerID = s.WorkerID;
                 return skill;
             })).ToList();
             SaveSkillLicensesToDb(allSkillLicenses);
         }
-        else if (data is StaffRecord singleStaff)
+        else if (data is WorkerRecord singleWorker)
         {
-            SaveStaffToDb(new[] { singleStaff }, isFullBatch: false);
-            if (singleStaff.VehicleLicenses.Any())
+            SaveWorkersToDb(new[] { singleWorker }, isFullBatch: false);
+            if (singleWorker.VehicleLicenses.Any())
             {
-                singleStaff.VehicleLicenses.ForEach(lic => { if (lic.StaffID == 0) lic.StaffID = singleStaff.StaffID; });
-                SaveVehicleLicensesToDb(singleStaff.VehicleLicenses);
+                singleWorker.VehicleLicenses.ForEach(lic => { if (lic.WorkerID == 0) lic.WorkerID = singleWorker.WorkerID; });
+                SaveVehicleLicensesToDb(singleWorker.VehicleLicenses);
             }
-            if (singleStaff.SkillLicenses.Any())
+            if (singleWorker.SkillLicenses.Any())
             {
-                singleStaff.SkillLicenses.ForEach(skill => { if (skill.StaffID == 0) skill.StaffID = singleStaff.StaffID; });
-                SaveSkillLicensesToDb(singleStaff.SkillLicenses);
+                singleWorker.SkillLicenses.ForEach(skill => { if (skill.WorkerID == 0) skill.WorkerID = singleWorker.WorkerID; });
+                SaveSkillLicensesToDb(singleWorker.SkillLicenses);
             }
         }
 
@@ -102,58 +102,42 @@ public static class ServerDispatcher
         }
     }
 
-    #region Staff Database Operations
+    #region Worker Database Operations
 
-    private static void SaveStaffToDb(IEnumerable<StaffRecord> staffList, bool isFullBatch)
+    private static void SaveWorkersToDb(IEnumerable<WorkerRecord> workerList, bool isFullBatch)
     {
-        var staffItems = staffList.Where(s => s.StaffID > 0).ToList();
-        if (!staffItems.Any()) return;
+        var workerItems = workerList.Where(w => w.WorkerID > 0).ToList();
+        if (!workerItems.Any()) return;
 
-        var activeIds = staffItems.Select(s => s.StaffID).ToArray();
+        var activeIds = workerItems.Select(w => w.WorkerID).ToArray();
 
-        var masterRecords = staffItems.Select(s => new
+        var masterRecords = workerItems.Select(w => new
         {
-            StaffId = s.StaffID,
-            FamilyName = s.StaffDetails.FamilyName ?? string.Empty,
-            MiddleName = s.StaffDetails.MiddleName ?? string.Empty,
-            GivenName = s.StaffDetails.GivenName ?? string.Empty,
-            DisplayName = s.StaffDetails.Name ?? string.Empty,
-            FullName = s.StaffDetails.Name ?? string.Empty,
-            Nric = s.StaffDetails.NRIC ?? string.Empty,
-            Address = s.StaffDetails.Address ?? string.Empty,
-            Email = s.StaffDetails.Email ?? string.Empty,
-            Phone = s.StaffDetails.Phone ?? string.Empty,
-            Department = s.StaffDetails.Department.ToString(),
-            PayType = s.StaffDetails.PayType.ToString(),
-            BaseRate = s.StaffDetails.BaseRate,
-            ContractStatus = s.StaffDetails.ContractStatus.ToString()
+            WorkerId = w.WorkerID,
+            WorkerName = w.WorkerDetails.WorkerName ?? string.Empty,
+            Nric = w.WorkerDetails.NRIC, // long
+            Passport = w.WorkerDetails.Passport ?? string.Empty,
+            Phone = w.WorkerDetails.Phone ?? string.Empty,
+            ContractStatus = w.WorkerDetails.ContractStatus.ToString()
         }).ToList();
 
-        const string sqlReconcileVehicleLicenses = "DELETE FROM staff_licenses WHERE staff_id != ALL(@ActiveIds);";
-        const string sqlReconcileSkillLicenses = "DELETE FROM staff_skill_licenses WHERE staff_id != ALL(@ActiveIds);";
-        const string sqlReconcileMaster = "DELETE FROM staff_master WHERE staff_id != ALL(@ActiveIds);";
+        const string sqlReconcileVehicleLicenses = "DELETE FROM worker_licenses WHERE worker_id != ALL(@ActiveIds);";
+        const string sqlReconcileSkillLicenses = "DELETE FROM worker_skill_licenses WHERE worker_id != ALL(@ActiveIds);";
+        const string sqlReconcileMaster = "DELETE FROM worker_master WHERE worker_id != ALL(@ActiveIds);";
 
-        // Only updates columns exposed in your simplified template, preserving existing data for others
         const string sqlMasterUpsert = @"
-        INSERT INTO staff_master (
-            staff_id, family_name, middle_name, given_name, display_name, full_name,
-            nric, address, email, phone, department, pay_type, base_rate, contract_status
+        INSERT INTO worker_master (
+            worker_id, worker_name, nric, passport, phone, contract_status
         )
         VALUES (
-            @StaffId, @FamilyName, @MiddleName, @GivenName, @DisplayName, @FullName,
-            @Nric, @Address, @Email, @Phone, @Department, @PayType, @BaseRate, @ContractStatus
+            @WorkerId, @WorkerName, @Nric, @Passport, @Phone, @ContractStatus
         )
-        ON CONFLICT (staff_id) DO UPDATE SET
-            family_name     = EXCLUDED.family_name,
-            middle_name     = EXCLUDED.middle_name,
-            given_name      = EXCLUDED.given_name,
-            display_name    = EXCLUDED.display_name,
-            full_name       = EXCLUDED.full_name,
+        ON CONFLICT (worker_id) DO UPDATE SET
+            worker_name     = EXCLUDED.worker_name,
+            nric            = EXCLUDED.nric,
+            passport        = EXCLUDED.passport,
+            phone           = EXCLUDED.phone,
             contract_status = EXCLUDED.contract_status,
-            nric            = COALESCE(NULLIF(EXCLUDED.nric, ''), staff_master.nric),
-            department      = CASE WHEN EXCLUDED.department = 'Worker' AND staff_master.department != '' THEN staff_master.department ELSE EXCLUDED.department END,
-            pay_type        = CASE WHEN EXCLUDED.pay_type = 'Hourly' AND staff_master.pay_type != '' THEN staff_master.pay_type ELSE EXCLUDED.pay_type END,
-            base_rate       = CASE WHEN EXCLUDED.base_rate = 11.00 AND staff_master.base_rate > 0 THEN staff_master.base_rate ELSE EXCLUDED.base_rate END,
             updated_at      = CURRENT_TIMESTAMP;";
 
         DbService.ExecuteInTransaction((db, trans) =>
@@ -172,10 +156,10 @@ public static class ServerDispatcher
     private static void SaveVehicleLicensesToDb(IEnumerable<VehicleLicense> licenses)
     {
         var licenseItems = licenses
-            .Where(l => l.StaffID > 0 && l.LicenseClass != LicenseClass.None)
+            .Where(l => l.WorkerID > 0 && l.LicenseClass != LicenseClass.None)
             .Select(l => new
             {
-                StaffId = l.StaffID,
+                WorkerId = l.WorkerID,
                 LicenseType = l.LicenseClass.ToString(),
                 RenewDate = l.RenewDate.ToDateTime(TimeOnly.MinValue),
                 ExpiryDate = l.ExpiryDate.ToDateTime(TimeOnly.MinValue),
@@ -185,9 +169,9 @@ public static class ServerDispatcher
         if (!licenseItems.Any()) return;
 
         const string sqlLicenses = @"
-        INSERT INTO staff_licenses (staff_id, license_type, renew_date, expiry_date, status)
-        VALUES (@StaffId, @LicenseType, @RenewDate, @ExpiryDate, @Status)
-        ON CONFLICT (staff_id, license_type) DO UPDATE SET
+        INSERT INTO worker_licenses (worker_id, license_type, renew_date, expiry_date, status)
+        VALUES (@WorkerId, @LicenseType, @RenewDate, @ExpiryDate, @Status)
+        ON CONFLICT (worker_id, license_type) DO UPDATE SET
             renew_date  = EXCLUDED.renew_date,
             expiry_date = EXCLUDED.expiry_date,
             status      = EXCLUDED.status,
@@ -199,10 +183,10 @@ public static class ServerDispatcher
     private static void SaveSkillLicensesToDb(IEnumerable<SkillLicense> skillLicenses)
     {
         var skillItems = skillLicenses
-            .Where(s => s.StaffID > 0 && !string.IsNullOrWhiteSpace(s.LicenseType))
+            .Where(s => s.WorkerID > 0 && !string.IsNullOrWhiteSpace(s.LicenseType))
             .Select(s => new
             {
-                StaffId = s.StaffID,
+                WorkerId = s.WorkerID,
                 LicenseType = s.LicenseType.Trim(),
                 RenewDate = s.RenewDate.ToDateTime(TimeOnly.MinValue),
                 ExpiryDate = s.ExpiryDate.ToDateTime(TimeOnly.MinValue),
@@ -212,9 +196,9 @@ public static class ServerDispatcher
         if (!skillItems.Any()) return;
 
         const string sqlSkillLicense = @"
-        INSERT INTO staff_skill_licenses (staff_id, license_type, renew_date, expiry_date, status)
-        VALUES (@StaffId, @LicenseType, @RenewDate, @ExpiryDate, @Status)
-        ON CONFLICT (staff_id, license_type) DO UPDATE SET
+        INSERT INTO worker_skill_licenses (worker_id, license_type, renew_date, expiry_date, status)
+        VALUES (@WorkerId, @LicenseType, @RenewDate, @ExpiryDate, @Status)
+        ON CONFLICT (worker_id, license_type) DO UPDATE SET
             renew_date  = EXCLUDED.renew_date,
             expiry_date = EXCLUDED.expiry_date,
             status      = EXCLUDED.status,

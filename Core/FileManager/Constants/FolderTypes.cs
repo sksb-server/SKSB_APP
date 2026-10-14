@@ -85,6 +85,6 @@ public static class Window
 {
     public static TemplateAddInPair DailyScheduler { get; } = new TemplateAddInPair(template: "Daily_Scheduler_Template.xltx", addIn: "DailyScheduler-AddIn");
     public static TemplateAddInPair ProjectManager { get; } = new TemplateAddInPair(template: "Project_Manager_Template.xltx", addIn: "ProjectManager-AddIn");
-    public static TemplateAddInPair StaffManager { get; } = new TemplateAddInPair(template: "Staff_Manager_Template.xltx", addIn: "StaffManager-AddIn");
+    public static TemplateAddInPair WorkerManager { get; } = new TemplateAddInPair(template: "Worker_Manager_Template.xltx", addIn: "WorkerManager-AddIn");
     public static TemplateAddInPair VehicleManager { get; } = new TemplateAddInPair(template: "Vehicle_Manager_Template.xltx", addIn: "VehicleManager-AddIn");
 }

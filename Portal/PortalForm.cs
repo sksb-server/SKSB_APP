@@ -74,10 +74,10 @@ public partial class PortalForm : Form
             "Job sites, scope, priorities & timelines",
             () => PortalRouter.Launch(Window.ProjectManager));
 
-        var btnStaff = CreateModuleButton(
-            "Staff Manager",
+        var btnWorker = CreateModuleButton(
+            "Worker Manager",
             "Employee profiles, badges & privileges",
-            () => PortalRouter.Launch(Window.StaffManager));
+            () => PortalRouter.Launch(Window.WorkerManager));
 
         var btnVehicle = CreateModuleButton(
             "Vehicle Maintenance",
@@ -89,7 +89,7 @@ public partial class PortalForm : Form
         layout.Controls.Add(lblSubheader);
         layout.Controls.Add(btnScheduler);
         layout.Controls.Add(btnProject);
-        layout.Controls.Add(btnStaff);
+        layout.Controls.Add(btnWorker);
         layout.Controls.Add(btnVehicle);
 
         Controls.Add(layout);
