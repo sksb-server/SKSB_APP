@@ -2,7 +2,7 @@
 
 using System;
 using ExcelDna.Integration;
-using SKSB_App.Core.TemplateEditor.DropDown;
+using SKSB_App.Core.DropDown;
 using SKSB_App.Core.WorkbookManager;
 
 public class Events : IExcelAddIn

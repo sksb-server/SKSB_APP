@@ -587,7 +587,6 @@ public static class SheetMapper
             // -------------------------------------------------------------
             XlCall.Excel(XlCall.xlcWorkbookSelect, new object[] { targetMaster });
 
-            // Clean out previous maximum capacity to ensure no trailing ghost cells
             var clearMasterRef = new ExcelReference(1, 1000, 0, MasterColumnSpan - 1);
             clearMasterRef.SetValue(new object[1000, MasterColumnSpan]);
 
@@ -614,16 +613,14 @@ public static class SheetMapper
                     masterOutput[i, 7] = details.ContractStatus.ToString();
                 }
 
-                // Write exact used slice (Row 1 down to Row rowCount)
                 var writeMasterRef = new ExcelReference(1, rowCount, 0, MasterColumnSpan - 1);
                 writeMasterRef.SetValue(masterOutput);
             }
 
-            // 3. Dynamically shrink/expand the native Excel ListObject Table
             ResizeWorksheetTable(targetMaster, rowCount, MasterColumnSpan);
 
             // -------------------------------------------------------------
-            // 4. POPULATE VEHICLE LICENSES (Columns A to G)
+            // 3. POPULATE VEHICLE LICENSES (Columns A to G)
             // -------------------------------------------------------------
             var allVLicenses = new List<(WorkerRecord Worker, VehicleLicense Lic)>();
             foreach (var w in sortedList)
@@ -660,7 +657,7 @@ public static class SheetMapper
             ResizeWorksheetTable(targetVLic, allVLicenses.Count, VehicleLicenseColumnSpan);
 
             // -------------------------------------------------------------
-            // 5. POPULATE SKILL LICENSES (Columns A to G)
+            // 4. POPULATE SKILL LICENSES (Columns A to G)
             // -------------------------------------------------------------
             var allSLicenses = new List<(WorkerRecord Worker, SkillLicense Lic)>();
             foreach (var w in sortedList)
@@ -695,6 +692,11 @@ public static class SheetMapper
             }
 
             ResizeWorksheetTable(targetSLic, allSLicenses.Count, SkillLicenseColumnSpan);
+
+            // -------------------------------------------------------------
+            // 5. AUTOMATICALLY RE-HYDRATE SkillLicenseTypesTable (Column I)
+            // -------------------------------------------------------------
+            PopulateSkillLicenseTypesTable();
         }
         finally
         {
@@ -709,6 +711,206 @@ public static class SheetMapper
                 }
             }
             XlCall.Excel(XlCall.xlcEcho, true);
+        }
+    }
+
+    public static (bool Success, string Report) PopulateSkillLicenseTypesTable(bool showDialogIfFailed = false)
+    {
+        var sb = new StringBuilder();
+        sb.AppendLine("=== Skill License Types Sync Diagnostics ===");
+
+        var distinctTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        // 1. Database Query Test
+        try
+        {
+            var dbRecords = ServerSyncCommands.FetchSkillLicenseTypesFromDb();
+            sb.AppendLine($"[1. Database Query]: Found {dbRecords.Count} row(s) in 'lookup_skill_license_types'.");
+            foreach (var r in dbRecords)
+            {
+                if (!string.IsNullOrWhiteSpace(r.LicenseType))
+                {
+                    distinctTypes.Add(r.LicenseType.Trim());
+                    sb.AppendLine($"    • {r.LicenseType.Trim()}");
+                }
+            }
+        }
+        catch (Exception exDb)
+        {
+            sb.AppendLine($"[1. Database Query FAILED]: {exDb.Message}");
+        }
+
+        // 2. Fallback to local snapshot
+        if (distinctTypes.Count == 0)
+        {
+            try
+            {
+                var localTypes = SKSB_App.Core.FileManager.Services.Load<List<SkillLicenseType>>();
+                int localCount = localTypes?.Count ?? 0;
+                sb.AppendLine($"[2. Local Snapshot Cache]: Found {localCount} record(s).");
+                if (localTypes != null)
+                {
+                    foreach (var t in localTypes)
+                    {
+                        if (!string.IsNullOrWhiteSpace(t.LicenseType))
+                            distinctTypes.Add(t.LicenseType.Trim());
+                    }
+                }
+            }
+            catch (Exception exLoc)
+            {
+                sb.AppendLine($"[2. Local Snapshot Cache FAILED]: {exLoc.Message}");
+            }
+        }
+
+        // 3. Fallback: Existing worker records
+        if (distinctTypes.Count == 0)
+        {
+            try
+            {
+                var localWorkers = SKSB_App.Core.FileManager.Services.Load<List<WorkerRecord>>();
+                sb.AppendLine($"[3. Harvest from Workers Cache]: Loaded {localWorkers?.Count ?? 0} worker(s).");
+                if (localWorkers != null)
+                {
+                    foreach (var w in localWorkers)
+                    {
+                        if (w.SkillLicenses != null)
+                        {
+                            foreach (var sl in w.SkillLicenses)
+                            {
+                                if (!string.IsNullOrWhiteSpace(sl.LicenseType))
+                                    distinctTypes.Add(sl.LicenseType.Trim());
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception exW)
+            {
+                sb.AppendLine($"[3. Harvest from Workers FAILED]: {exW.Message}");
+            }
+        }
+
+        if (distinctTypes.Count == 0)
+        {
+            sb.AppendLine("[Result]: No skill license types found in Database, Local Cache, or Worker records.");
+            if (showDialogIfFailed)
+            {
+                MessageBox.Show(sb.ToString(), "Sync Skill Licenses - Empty", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
+            return (false, sb.ToString());
+        }
+
+        // 4. Excel Table Target Resolution
+        dynamic xlApp = ExcelDnaUtil.Application;
+        dynamic wb = xlApp.ActiveWorkbook;
+        dynamic? targetTable = null;
+        string foundSheetName = string.Empty;
+
+        try
+        {
+            foreach (dynamic ws in wb.Sheets)
+            {
+                try
+                {
+                    targetTable = ws.ListObjects["SkillLicenseTypesTable"];
+                    if (targetTable != null)
+                    {
+                        foundSheetName = ws.Name?.ToString() ?? string.Empty;
+                        break;
+                    }
+                }
+                catch { }
+            }
+
+            if (targetTable == null)
+            {
+                string sLicSheetName = WorkbookSession.ResolveSheetName(SkillLicenseSheetAliases, "Skill Licenses");
+                try
+                {
+                    dynamic ws = wb.Sheets[sLicSheetName];
+                    foreach (dynamic lo in ws.ListObjects)
+                    {
+                        string loName = lo.Name?.ToString() ?? string.Empty;
+                        if (loName.IndexOf("SkillLicenseType", StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            targetTable = lo;
+                            foundSheetName = ws.Name?.ToString() ?? string.Empty;
+                            break;
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            if (targetTable == null)
+            {
+                sb.AppendLine("[4. Excel Table]: FAILED. Table 'SkillLicenseTypesTable' could NOT be found on any worksheet.");
+                if (showDialogIfFailed)
+                {
+                    MessageBox.Show(sb.ToString(), "Sync Skill Licenses - Table Missing", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                }
+                return (false, sb.ToString());
+            }
+
+            sb.AppendLine($"[4. Excel Table]: Found table '{targetTable.Name}' on sheet '{foundSheetName}'.");
+
+            // 5. Populate and Resize Table
+            string[] sortedTypes = distinctTypes.OrderBy(x => x).ToArray();
+            int count = sortedTypes.Length;
+
+            dynamic sheet = targetTable.Parent;
+            dynamic headerRange = targetTable.HeaderRowRange;
+            int headerRow = (int)headerRange.Row;
+            int col = (int)headerRange.Column;
+
+            // Clear previous body cells
+            try
+            {
+                if (targetTable.DataBodyRange != null)
+                {
+                    targetTable.DataBodyRange.ClearContents();
+                }
+            }
+            catch (Exception exClr)
+            {
+                sb.AppendLine($"[Warning clearing body]: {exClr.Message}");
+            }
+
+            // Resize table boundary
+            dynamic newRange = sheet.Range[sheet.Cells[headerRow, col], sheet.Cells[headerRow + count, col]];
+            targetTable.Resize(newRange);
+
+            // Write values
+            object[,] matrix = new object[count, 1];
+            for (int i = 0; i < count; i++) matrix[i, 0] = sortedTypes[i];
+
+            dynamic writeRange = sheet.Range[sheet.Cells[headerRow + 1, col], sheet.Cells[headerRow + count, col]];
+            writeRange.Value2 = matrix;
+
+            sb.AppendLine($"[5. Writeback]: Successfully written {count} type(s) into {sheet.Name}!R{headerRow + 1}C{col}:R{headerRow + count}C{col}.");
+
+            // Update Name Manager definition
+            try
+            {
+                wb.Names.Add(Name: "LicenseTypesList", RefersTo: $"='{sheet.Name}'!R{headerRow + 1}C{col}:R{headerRow + count}C{col}", Visible: true);
+                sb.AppendLine("[6. Name Manager]: 'LicenseTypesList' formula registered.");
+            }
+            catch (Exception exNm)
+            {
+                sb.AppendLine($"[6. Name Manager Warning]: {exNm.Message}");
+            }
+
+            return (true, sb.ToString());
+        }
+        catch (Exception exFatal)
+        {
+            sb.AppendLine($"[FATAL Write Error]: {exFatal.Message}\n{exFatal.StackTrace}");
+            if (showDialogIfFailed)
+            {
+                MessageBox.Show(sb.ToString(), "Sync Skill Licenses - Fatal Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+            return (false, sb.ToString());
         }
     }
 
@@ -751,48 +953,65 @@ public static class SheetMapper
             dynamic xlApp = ExcelDnaUtil.Application;
             dynamic wb = xlApp.ActiveWorkbook;
 
-            // 1. Try reading from DropDown metadata on the Skill Licenses sheet (Column D / Header: License Type)
-            string sLicSheetName = WorkbookSession.ResolveSheetName(SkillLicenseSheetAliases, "Skill Licenses");
-            try
+            // 1. Direct Table Lookup by Name across sheets
+            dynamic? targetTable = null;
+            foreach (dynamic ws in wb.Sheets)
             {
-                dynamic ws = wb.Sheets[sLicSheetName];
-                // Check cell D2 metadata configuration
-                dynamic cellD2 = ws.Range["D2"];
-                var config = SKSB_App.Core.TemplateEditor.DropDown.Metadata.ReadConfig(cellD2);
-
-                if (!string.IsNullOrWhiteSpace(config.Source))
+                try
                 {
-                    dynamic? sourceVal = null;
-                    string cleanSource = config.Source.TrimStart('=');
-
-                    if (cleanSource.Contains("[") && cleanSource.Contains("]"))
-                    {
-                        try { sourceVal = xlApp.Range[cleanSource].Value2; } catch { }
-                    }
-                    if (sourceVal == null)
-                    {
-                        sourceVal = SKSB_App.Core.TemplateEditor.DropDown.Metadata.EvaluateFormulaSafely(xlApp, cleanSource);
-                    }
-
-                    PopulateSetFromObject(set, sourceVal);
+                    targetTable = ws.ListObjects["SkillLicenseTypesTable"];
+                    if (targetTable != null) break;
                 }
+                catch { }
             }
-            catch { }
 
-            // 2. Fallback: Check named ranges "SkillLicenseTypes", "LicenseTypesList", or "SkillTypes"
+            // Fallback: Check 'Skill Licenses' sheet explicitly
+            if (targetTable == null)
+            {
+                string sLicSheetName = WorkbookSession.ResolveSheetName(SkillLicenseSheetAliases, "Skill Licenses");
+                try
+                {
+                    dynamic ws = wb.Sheets[sLicSheetName];
+                    foreach (dynamic lo in ws.ListObjects)
+                    {
+                        string loName = lo.Name?.ToString() ?? string.Empty;
+                        if (loName.IndexOf("SkillLicenseType", StringComparison.OrdinalIgnoreCase) >= 0)
+                        {
+                            targetTable = lo;
+                            break;
+                        }
+                    }
+                }
+                catch { }
+            }
+
+            // Extract values directly from DataBodyRange.Value2 (Safest for COM)
+            if (targetTable != null && targetTable.DataBodyRange != null)
+            {
+                object rawBody = targetTable.DataBodyRange.Value2;
+                PopulateSetFromObject(set, rawBody);
+            }
+
+            // 2. Fallback: Excel Evaluate structured reference
             if (set.Count == 0)
             {
-                string[] possibleNames = { "SkillLicenseTypes", "LicenseTypesList", "SkillTypes", "LicenseTypeList" };
-                foreach (var name in possibleNames)
+                try
                 {
-                    try
-                    {
-                        dynamic eval = xlApp.Evaluate(name);
-                        PopulateSetFromObject(set, eval);
-                        if (set.Count > 0) break;
-                    }
-                    catch { }
+                    dynamic tableVal = xlApp.Evaluate("SkillLicenseTypesTable[Skill License Types]");
+                    PopulateSetFromObject(set, tableVal);
                 }
+                catch { }
+            }
+
+            // 3. Fallback: Name Manager =LicenseTypesList
+            if (set.Count == 0)
+            {
+                try
+                {
+                    dynamic namedVal = xlApp.Evaluate("LicenseTypesList");
+                    PopulateSetFromObject(set, namedVal);
+                }
+                catch { }
             }
         }
         catch (Exception ex)
@@ -805,6 +1024,18 @@ public static class SheetMapper
 
     private static void PopulateSetFromObject(HashSet<string> set, dynamic? obj)
     {
+        if (obj == null) return;
+
+        // If Excel returned a COM Range, extract Value2
+        try
+        {
+            if (obj.GetType().Name.Contains("ComObject") || obj.GetType().Name.Contains("Range"))
+            {
+                obj = obj.Value2;
+            }
+        }
+        catch { }
+
         if (obj is object[,] arr)
         {
             int rCount = arr.GetLength(0);
@@ -814,7 +1045,7 @@ public static class SheetMapper
                 for (int c = 1; c <= cCount; c++)
                 {
                     string val = arr[r, c]?.ToString()?.Trim() ?? string.Empty;
-                    if (!string.IsNullOrEmpty(val) && !val.StartsWith("#"))
+                    if (!string.IsNullOrEmpty(val) && !val.StartsWith("#") && !val.Equals("System.__ComObject", StringComparison.OrdinalIgnoreCase))
                         set.Add(val);
                 }
             }
@@ -824,16 +1055,123 @@ public static class SheetMapper
             foreach (var item in vec)
             {
                 string val = item?.ToString()?.Trim() ?? string.Empty;
-                if (!string.IsNullOrEmpty(val) && !val.StartsWith("#"))
+                if (!string.IsNullOrEmpty(val) && !val.StartsWith("#") && !val.Equals("System.__ComObject", StringComparison.OrdinalIgnoreCase))
                     set.Add(val);
             }
         }
-        else if (obj != null)
+        else
         {
             string single = obj.ToString()?.Trim() ?? string.Empty;
-            if (!string.IsNullOrEmpty(single) && !single.StartsWith("#"))
+            if (!string.IsNullOrEmpty(single) && !single.StartsWith("#") && !single.Equals("System.__ComObject", StringComparison.OrdinalIgnoreCase))
                 set.Add(single);
         }
+    }
+
+    public static List<SkillLicenseType> ExtractSkillLicenseTypes()
+    {
+        var distinctTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        dynamic xlApp = ExcelDnaUtil.Application;
+        dynamic wb = xlApp.ActiveWorkbook;
+
+        // 1. Locate SkillLicenseTypesTable
+        dynamic? targetTable = null;
+        foreach (dynamic ws in wb.Sheets)
+        {
+            try
+            {
+                targetTable = ws.ListObjects["SkillLicenseTypesTable"];
+                if (targetTable != null) break;
+            }
+            catch { }
+        }
+
+        // Fallback: check on 'Skill Licenses' sheet
+        if (targetTable == null)
+        {
+            string sLicSheetName = WorkbookSession.ResolveSheetName(SkillLicenseSheetAliases, "Skill Licenses");
+            try
+            {
+                dynamic ws = wb.Sheets[sLicSheetName];
+                foreach (dynamic lo in ws.ListObjects)
+                {
+                    string loName = lo.Name?.ToString() ?? string.Empty;
+                    if (loName.IndexOf("SkillLicenseType", StringComparison.OrdinalIgnoreCase) >= 0)
+                    {
+                        targetTable = lo;
+                        break;
+                    }
+                }
+            }
+            catch { }
+        }
+
+        if (targetTable != null)
+        {
+            dynamic sheet = targetTable.Parent;
+            dynamic headerRange = targetTable.HeaderRowRange;
+            int headerRow = (int)headerRange.Row;
+            int col = (int)headerRange.Column;
+
+            // CRITICAL FIX: Scan the column directly beneath the header (down to 100 rows)
+            // This captures all entries even if Excel hasn't formally expanded DataBodyRange yet!
+            try
+            {
+                dynamic scanRange = sheet.Range[sheet.Cells[headerRow + 1, col], sheet.Cells[headerRow + 100, col]];
+                object[,] colGrid = scanRange.Value2;
+
+                if (colGrid != null)
+                {
+                    int rCount = colGrid.GetLength(0);
+                    for (int r = 1; r <= rCount; r++)
+                    {
+                        string val = CleanCellString(colGrid[r, 1]);
+                        if (!string.IsNullOrWhiteSpace(val) && !val.StartsWith("#") && !val.Equals("System.__ComObject", StringComparison.OrdinalIgnoreCase))
+                        {
+                            distinctTypes.Add(val);
+                        }
+                    }
+                }
+            }
+            catch (Exception exScan)
+            {
+                System.Diagnostics.Debug.WriteLine($"[ExtractSkillLicenseTypes Column Scan Error] {exScan.Message}");
+            }
+        }
+
+        // 2. Also harvest from Column D of 'Skill Licenses' to ensure any license assigned to a worker is preserved
+        string skillSheetName = WorkbookSession.ResolveSheetName(SkillLicenseSheetAliases, "Skill Licenses");
+        try
+        {
+            dynamic ws = wb.Sheets[skillSheetName];
+            object[,] grid = ws.Range["D2:D500"].Value2;
+            if (grid != null)
+            {
+                int rCount = grid.GetLength(0);
+                for (int r = 1; r <= rCount; r++)
+                {
+                    string val = CleanCellString(grid[r, 1]);
+                    if (!string.IsNullOrWhiteSpace(val) && !val.StartsWith("#") && !val.Equals("System.__ComObject", StringComparison.OrdinalIgnoreCase))
+                    {
+                        distinctTypes.Add(val);
+                    }
+                }
+            }
+        }
+        catch { }
+
+        // Package into entities
+        var result = new List<SkillLicenseType>();
+        long id = 1;
+        foreach (var type in distinctTypes.OrderBy(x => x))
+        {
+            result.Add(new SkillLicenseType
+            {
+                TypeID = id++,
+                LicenseType = type
+            });
+        }
+
+        return result;
     }
 
     private static string CleanCellString(object? cell) =>

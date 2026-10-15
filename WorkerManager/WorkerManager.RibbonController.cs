@@ -2,9 +2,10 @@
 
 using ExcelDna.Integration;
 using ExcelDna.Integration.CustomUI;
-using SKSB_App.Core.FileManager;
-using SKSB_App.Core.Types;
 using SKSB_App.Core.DialogBoxes;
+using SKSB_App.Core.FileManager;
+using SKSB_App.Core.ServerManager;
+using SKSB_App.Core.Types;
 using System;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
@@ -17,7 +18,21 @@ public class RibbonController : ExcelRibbon
 
     public override string GetCustomUI(string ribbonId)
     {
-        return @"
+#if DEBUG
+        string debugGroupXml = @"
+                <group id='grpDebugControls' label='Debug Controls'>
+                  <toggleButton id='btnToggleOffline' 
+                                label='Simulate Server Offline' 
+                                size='large' 
+                                imageMso='AccessSetOfflineStatus' 
+                                getPressed='GetSimulateOfflinePressed'
+                                onAction='OnToggleOfflineClicked' />
+                </group>";
+#else
+        string debugGroupXml = string.Empty;
+#endif
+
+        return $@"
         <customUI xmlns='http://schemas.microsoft.com/office/2009/07/customui' onLoad='OnRibbonLoad'>
           <ribbon>
             <tabs>
@@ -46,6 +61,7 @@ public class RibbonController : ExcelRibbon
                           imageMso='ImportExcel' 
                           onAction='OnImportWorkersClicked' />
                 </group>
+                {debugGroupXml}
               </tab>
             </tabs>
           </ribbon>
@@ -74,7 +90,6 @@ public class RibbonController : ExcelRibbon
             string selectedFilePath = openFileDialog.FileName;
             string fileNameOnly = System.IO.Path.GetFileName(selectedFilePath);
 
-            // 1. Process file and gather metrics/errors
             var importResult = Importer.ImportWorkers(selectedFilePath);
 
             if (importResult.ImportedWorkers.Count == 0 && importResult.SkippedErrors.Count == 0)
@@ -89,7 +104,6 @@ public class RibbonController : ExcelRibbon
                 return;
             }
 
-            // 2. Populate Excel table on the UI macro thread
             ExcelAsyncUtil.QueueAsMacro(() =>
             {
                 if (importResult.ImportedWorkers.Count > 0)
@@ -97,7 +111,6 @@ public class RibbonController : ExcelRibbon
                     SheetMapper.PopulateWorksheet(importResult.ImportedWorkers);
                 }
 
-                // 3. Display summary dialog with 'View Skipped Errors' option
                 using var summaryDialog = new ImportResultDialog(importResult, fileNameOnly);
                 summaryDialog.ShowDialog();
             });
@@ -123,7 +136,6 @@ public class RibbonController : ExcelRibbon
                 var (success, count, path) = await ServerSyncCommands.SaveWorkerAsync(workerList);
                 if (success)
                 {
-                    // Update sheet with newly generated IDs & default values
                     ExcelAsyncUtil.QueueAsMacro(() => SheetMapper.PopulateWorksheet(workerList));
 
                     SaveNotificationDialog.ShowSuccess(
@@ -164,17 +176,33 @@ public class RibbonController : ExcelRibbon
     {
         try
         {
-            Events.SyncWorkerLookupsData();
-            MessageBox.Show(
-                "Worker lookups refreshed successfully.\n\n• Lookups: Enums managed centrally in Core\n• Data: Live vehicle plates updated in 'Data' sheet",
-                "Lookups Synced",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Information
-            );
+            Events.SyncWorkerLookupsData(isInteractive: true);
         }
         catch (Exception ex)
         {
             MessageBox.Show($"Sync failed: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
+
+#if DEBUG
+    public bool GetSimulateOfflinePressed(IRibbonControl control)
+    {
+        return ServerEnvironment.SimulateOffline;
+    }
+
+    public void OnToggleOfflineClicked(IRibbonControl control, bool pressed)
+    {
+        ServerEnvironment.SimulateOffline = pressed;
+        _ribbonUi?.InvalidateControl("btnToggleOffline");
+
+        MessageBox.Show(
+            pressed
+                ? "Server is now SIMULATED OFFLINE.\nAll database interactions will fail immediately to test offline stashing."
+                : "Server is now ONLINE.\nNormal PostgreSQL connectivity restored.",
+            "Debug Server Mode",
+            MessageBoxButtons.OK,
+            pressed ? MessageBoxIcon.Warning : MessageBoxIcon.Information
+        );
+    }
+#endif
 }

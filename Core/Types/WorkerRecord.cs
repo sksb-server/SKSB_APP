@@ -4,6 +4,13 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 
+public record SkillLicenseType
+{
+    public long TypeID { get; set; } = 0;
+    public string LicenseType { get; set; } = string.Empty;
+    public string Description { get; set; } = string.Empty;
+}
+
 public record WorkerRecord
 {
     public long WorkerID { get; set; } = 0;

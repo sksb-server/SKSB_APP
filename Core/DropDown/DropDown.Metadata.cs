@@ -12,6 +12,12 @@ public record Config
     public string Filter { get; set; } = string.Empty;
     public string SyncLeft { get; set; } = string.Empty;
     public bool IsMultiSelect { get; set; } = false;
+
+    public bool IsEmpty =>
+        string.IsNullOrWhiteSpace(Source) &&
+        string.IsNullOrWhiteSpace(Transform) &&
+        string.IsNullOrWhiteSpace(Filter) &&
+        string.IsNullOrWhiteSpace(SyncLeft);
 }
 
 public static class Metadata
@@ -62,6 +68,30 @@ public static class Metadata
     }
 
     public static Config ReadConfig(dynamic singleCell)
+    {
+        var config = ReadConfigInternal(singleCell);
+        if (!config.IsEmpty) return config;
+
+        // INHERITANCE: If row > 2 and current cell has no explicit metadata, inherit from Row 2 archetype
+        try
+        {
+            int row = singleCell.Row;
+            int col = singleCell.Column;
+            dynamic sheet = singleCell.Worksheet;
+
+            if (row > 2)
+            {
+                dynamic archetypeCell = sheet.Cells[2, col];
+                var inherited = ReadConfigInternal(archetypeCell);
+                if (!inherited.IsEmpty) return inherited;
+            }
+        }
+        catch { }
+
+        return config;
+    }
+
+    private static Config ReadConfigInternal(dynamic singleCell)
     {
         var config = new Config();
         string raw = string.Empty;

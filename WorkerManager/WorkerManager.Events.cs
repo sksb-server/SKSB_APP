@@ -1,8 +1,5 @@
 ﻿namespace SKSB_App.WorkerManager;
 
-using System;
-using System.IO;
-using System.Windows.Forms;
 using ExcelDna.Integration;
 using SKSB_App.Core.DialogBoxes;
 using SKSB_App.Core.FileManager;
@@ -12,24 +9,38 @@ using SKSB_App.Core.Services;
 using SKSB_App.Core.TemplateEditor;
 using SKSB_App.Core.Types;
 using SKSB_App.Core.WorkbookManager;
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
+using System.Text;
+using System.Windows.Forms;
 
 public class Events : IExcelAddIn
 {
     private static dynamic? _xlAppRoot;
+
+    // Delegates for COM Events
     private delegate void WorkbookBeforeCloseDelegate(dynamic wb, ref bool cancel);
+    private delegate void WorkbookBeforeSaveDelegate(dynamic wb, bool saveAsUi, ref bool cancel);
+
     private static WorkbookBeforeCloseDelegate? _beforeCloseHandler;
+    private static WorkbookBeforeSaveDelegate? _beforeSaveHandler;
+
+    private static bool _isExiting = false;
+    private static bool _isInternalSaving = false;
 
     public void AutoOpen()
     {
         ExcelAsyncUtil.QueueAsMacro(() =>
         {
             HookApplicationEvents();
-
             SyncWorkerLookupsData();
 
             double nowSerial = Convert.ToDouble(XlCall.Excel(XlCall.xlfNow));
             XlCall.Excel(XlCall.xlcOnTime, nowSerial + (1.0 / 86400.0), "DelayedAutoLoadMacro");
 
+            // Keyboard Hijack for Ctrl+S and Ctrl+Shift+S
             XlCall.Excel(XlCall.xlcOnKey, "^s", "OnHotKeySave");
             XlCall.Excel(XlCall.xlcOnKey, "^+s", "OnHotKeySave");
         });
@@ -45,36 +56,25 @@ public class Events : IExcelAddIn
         });
     }
 
-    public static void SyncWorkerLookupsData()
-    {
-        ExcelAsyncUtil.QueueAsMacro(() =>
-        {
-            try
-            {
-                DataToExcel.SyncData<VehicleRecord, string>("VehiclePlate", v => v.VehiclePlate);
-            }
-            catch (Exception ex)
-            {
-                System.Diagnostics.Debug.WriteLine($"[SyncWorkerLookupsData Error] {ex.Message}");
-            }
-        });
-    }
-
     private static void HookApplicationEvents()
     {
         try
         {
             if (_xlAppRoot != null) return;
-
             dynamic xlApp = ExcelDnaUtil.Application;
             _xlAppRoot = xlApp;
 
+            // 1. Hook Close
             _beforeCloseHandler = new WorkbookBeforeCloseDelegate(OnWorkbookBeforeClose);
             _xlAppRoot.WorkbookBeforeClose += _beforeCloseHandler;
+
+            // 2. Hook Save (Catches QAT Save Icon, File > Save, and in-cell editing Ctrl+S)
+            _beforeSaveHandler = new WorkbookBeforeSaveDelegate(OnWorkbookBeforeSave);
+            _xlAppRoot.WorkbookBeforeSave += _beforeSaveHandler;
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"[Events] Failed to hook WorkbookBeforeClose: {ex.Message}");
+            System.Diagnostics.Debug.WriteLine($"[Events] Failed to hook application events: {ex.Message}");
         }
     }
 
@@ -82,18 +82,178 @@ public class Events : IExcelAddIn
     {
         try
         {
-            if (_xlAppRoot != null && _beforeCloseHandler != null)
+            if (_xlAppRoot != null)
             {
-                _xlAppRoot.WorkbookBeforeClose -= _beforeCloseHandler;
-                _beforeCloseHandler = null;
+                if (_beforeCloseHandler != null)
+                {
+                    _xlAppRoot.WorkbookBeforeClose -= _beforeCloseHandler;
+                    _beforeCloseHandler = null;
+                }
+                if (_beforeSaveHandler != null)
+                {
+                    _xlAppRoot.WorkbookBeforeSave -= _beforeSaveHandler;
+                    _beforeSaveHandler = null;
+                }
                 _xlAppRoot = null;
             }
         }
         catch { }
     }
 
+    public static void SyncWorkerLookupsData(bool isInteractive = false)
+    {
+        ExcelAsyncUtil.QueueAsMacro(() =>
+        {
+            var summary = new StringBuilder();
+
+            try
+            {
+                // 1. Vehicle plates -> 'Data' sheet via DataToExcel
+                DataToExcel.SyncData<VehicleRecord, string>("VehiclePlate", v => v.VehiclePlate);
+                summary.AppendLine("✔ Vehicle plates synchronized to 'Data' sheet.");
+            }
+            catch (Exception exV)
+            {
+                summary.AppendLine($"✖ Vehicle plates sync failed: {exV.Message}");
+            }
+
+            // 2. Skill License Types
+            var (success, report) = SheetMapper.PopulateSkillLicenseTypesTable(showDialogIfFailed: isInteractive);
+            summary.AppendLine(success ? "✔ Skill License Types populated into table." : "✖ Skill License Types failed to populate.");
+
+            if (isInteractive)
+            {
+                MessageBox.Show(
+                    $"{summary}\n\n{report}",
+                    "Sync Lookups Diagnostic Results",
+                    MessageBoxButtons.OK,
+                    success ? MessageBoxIcon.Information : MessageBoxIcon.Warning
+                );
+            }
+        });
+    }
+
+    private static void SyncSkillLicenseTypes()
+    {
+        var distinctTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        // Fetch from PostgreSQL
+        try
+        {
+            var db = new PostgreSqlService();
+            const string sql = "SELECT DISTINCT license_type FROM worker_skill_licenses WHERE license_type IS NOT NULL AND TRIM(license_type) != '';";
+            var dbTypes = db.Query<string>(sql);
+            if (dbTypes != null)
+            {
+                foreach (var t in dbTypes)
+                {
+                    if (!string.IsNullOrWhiteSpace(t)) distinctTypes.Add(t.Trim());
+                }
+            }
+        }
+        catch { }
+
+        // Fallback to local snapshot
+        if (distinctTypes.Count == 0)
+        {
+            var workers = ServerSyncCommands.FetchWorkerRecords();
+            if (workers != null)
+            {
+                foreach (var w in workers)
+                {
+                    if (w.SkillLicenses != null)
+                    {
+                        foreach (var sl in w.SkillLicenses)
+                        {
+                            if (!string.IsNullOrWhiteSpace(sl.LicenseType))
+                                distinctTypes.Add(sl.LicenseType.Trim());
+                        }
+                    }
+                }
+            }
+        }
+
+        if (distinctTypes.Count == 0) return;
+
+        string[] sortedTypes = distinctTypes.OrderBy(x => x).ToArray();
+
+        // 1. Sync to hidden 'Data' sheet and update =LicenseTypesList
+        DataToExcel.SyncValues("LicenseTypesList", sortedTypes);
+
+        // 2. Populate 'SkillLicenseTypesTable' on the sheet
+        try
+        {
+            dynamic xlApp = ExcelDnaUtil.Application;
+            dynamic wb = xlApp.ActiveWorkbook;
+            dynamic? targetTable = null;
+
+            foreach (dynamic ws in wb.Sheets)
+            {
+                try
+                {
+                    targetTable = ws.ListObjects["SkillLicenseTypesTable"];
+                    if (targetTable != null) break;
+                }
+                catch { }
+            }
+
+            if (targetTable != null)
+            {
+                try
+                {
+                    if (targetTable.DataBodyRange != null)
+                        targetTable.DataBodyRange.Delete();
+                }
+                catch { }
+
+                int count = sortedTypes.Length;
+                object[,] matrix = new object[count, 1];
+                for (int i = 0; i < count; i++) matrix[i, 0] = sortedTypes[i];
+
+                dynamic headerCell = targetTable.HeaderRowRange.Cells[1, 1];
+                dynamic firstDataCell = headerCell.Offset[1, 0];
+                dynamic writeRange = firstDataCell.Resize[count, 1];
+                writeRange.Value2 = matrix;
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[SyncToSkillLicenseTypesTable Error] {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Intercepts native Excel Save operations:
+    /// - QAT floppy disk icon (top-left)
+    /// - File > Save / Save As
+    /// - Ctrl+S during cell edit mode
+    /// </summary>
+    private static void OnWorkbookBeforeSave(dynamic wb, bool saveAsUi, ref bool cancel)
+    {
+        // Allow native save if in Master Template Design Mode or internal operations
+        if (_isInternalSaving || WorkbookSession.IsMasterTemplateFile() || WorkbookSession.IsTemplateEditMode)
+        {
+            return;
+        }
+
+        // 1. Tell Excel to CANCEL the native file-dialog save
+        cancel = true;
+
+        // 2. Execute custom save routine on the Excel macro queue
+        ExcelAsyncUtil.QueueAsMacro(() =>
+        {
+            ExecuteUnifiedSave();
+        });
+    }
+
     private static void OnWorkbookBeforeClose(dynamic wb, ref bool cancel)
     {
+        if (_isExiting)
+        {
+            cancel = false;
+            return;
+        }
+
         try
         {
             if (WorkbookSession.IsMasterTemplateFile() || WorkbookSession.IsTemplateEditMode) return;
@@ -102,47 +262,42 @@ public class Events : IExcelAddIn
             {
                 var (workerList, validationErrors, validationWarnings) = SheetMapper.ExtractWorkerRecordsWithDiagnostics();
 
-                // 1. If errors exist or warnings need review
+                // 1. Validation check
                 if (validationErrors.Count > 0 || validationWarnings.Count > 0)
                 {
                     using var valDialog = new ValidationSummaryDialog("Worker Manager", validationErrors, validationWarnings);
                     valDialog.ShowDialog();
 
-                    // If blocking errors exist, or operator canceled: keep Excel open
                     if (validationErrors.Count > 0 || valDialog.Action != ValidationDialogAction.ProceedAnyway)
                     {
-                        cancel = true;
+                        cancel = true; // Stay in Excel to resolve issues
                         return;
                     }
                 }
 
-                // Empty template: allow clean exit
+                // If empty, allow clean exit
                 if (workerList == null || workerList.Count == 0)
                 {
+                    _isExiting = true;
                     wb.Saved = true;
+                    cancel = false;
                     return;
                 }
 
-                // 2. Attempt Silent Save
+                // 2. Commit save
                 if (ServerSyncCommands.SaveWorkerSilent(out string dbError))
                 {
-                    Services.ClearPendingOfflineSnapshot<System.Collections.Generic.List<WorkerRecord>>();
+                    Services.ClearPendingOfflineSnapshot<List<WorkerRecord>>();
 
-                    // Populate sheet before closing so Excel's file buffer contains the generated values
-                    if (workerList != null && workerList.Count > 0)
-                    {
-                        SheetMapper.PopulateWorksheet(workerList);
-                    }
+                    _isExiting = true;
+                    UnhookApplicationEvents();
+
                     wb.Saved = true;
-
-                    SaveNotificationDialog.ShowSuccess(
-                        "Worker Manager",
-                        $"Successfully saved {workerList?.Count ?? 0} worker record(s) to the server database before closing."
-                    );
+                    cancel = false; // Native Excel close proceeds unimpeded
                     return;
                 }
 
-                // 3. Database Offline / Failed
+                // 3. Server unreachable: prompt offline resolution
                 using var dialog = new ExitSyncConflictDialog(
                     "Worker Manager",
                     string.IsNullOrWhiteSpace(dbError) ? "Could not persist records to the PostgreSQL server." : dbError,
@@ -157,18 +312,17 @@ public class Events : IExcelAddIn
 
                     case ExitResolution.SaveLocallyAndQuit:
                         Services.SaveOfflineSnapshot(workerList);
-                        SaveNotificationDialog.ShowOffline(
-                            "Worker Manager",
-                            "Your worker records have been safely saved to local disk.\n\n" +
-                            "The system will automatically verify and commit them to the server when you next start."
-                        );
+
+                        _isExiting = true;
+                        UnhookApplicationEvents();
 
                         wb.Saved = true;
+                        cancel = false; // Native Excel close proceeds unimpeded
                         return;
 
                     case ExitResolution.Cancel:
                     default:
-                        cancel = true;
+                        cancel = true; // Abort close
                         return;
                 }
             }
@@ -185,10 +339,27 @@ public class Events : IExcelAddIn
     {
         if (WorkbookSession.IsMasterTemplateFile() || WorkbookSession.IsTemplateEditMode)
         {
-            XlCall.Excel(XlCall.xlcSave);
+            _isInternalSaving = true;
+            try
+            {
+                XlCall.Excel(XlCall.xlcSave);
+            }
+            finally
+            {
+                _isInternalSaving = false;
+            }
             return;
         }
 
+        ExecuteUnifiedSave();
+    }
+
+    /// <summary>
+    /// Centralized save routine shared by Ctrl+S, QAT Save icon, and File > Save.
+    /// </summary>
+    private static void ExecuteUnifiedSave()
+    {
+        // 1. Validation & Extraction
         var (workerList, validationErrors, validationWarnings) = SheetMapper.ExtractWorkerRecordsWithDiagnostics();
 
         if (validationErrors.Count > 0 || validationWarnings.Count > 0)
@@ -198,19 +369,27 @@ public class Events : IExcelAddIn
 
             if (validationErrors.Count > 0 || valDialog.Action != ValidationDialogAction.ProceedAnyway)
             {
-                return;
+                return; // User canceled or blocking errors present
             }
         }
 
+        // 2. Commit to Database and Local Storage
         if (ServerSyncCommands.SaveWorkerSilent(out string dbErr))
         {
-            Services.ClearPendingOfflineSnapshot<System.Collections.Generic.List<WorkerRecord>>();
+            Services.ClearPendingOfflineSnapshot<List<WorkerRecord>>();
 
-            // Immediately reflect applied defaults and IDs onto Excel tables
             if (workerList != null && workerList.Count > 0)
             {
                 SheetMapper.PopulateWorksheet(workerList);
             }
+
+            // Mark workbook as saved so Excel knows changes are safely persisted
+            try
+            {
+                dynamic xlApp = ExcelDnaUtil.Application;
+                xlApp.ActiveWorkbook.Saved = true;
+            }
+            catch { }
 
             int count = workerList?.Count ?? 0;
             SaveNotificationDialog.ShowSuccess(
@@ -238,9 +417,11 @@ public class Events : IExcelAddIn
                 return;
             }
 
-            if (Services.HasPendingOfflineSnapshot<System.Collections.Generic.List<WorkerRecord>>())
+            SyncWorkerLookupsData();
+
+            if (Services.HasPendingOfflineSnapshot<List<WorkerRecord>>())
             {
-                var pendingRecords = Services.LoadPendingOfflineSnapshot<System.Collections.Generic.List<WorkerRecord>>();
+                var pendingRecords = Services.LoadPendingOfflineSnapshot<List<WorkerRecord>>();
 
                 bool isValidPayload = pendingRecords != null &&
                                       pendingRecords.Count > 0 &&
@@ -254,7 +435,7 @@ public class Events : IExcelAddIn
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Warning
                     );
-                    Services.ClearPendingOfflineSnapshot<System.Collections.Generic.List<WorkerRecord>>();
+                    Services.ClearPendingOfflineSnapshot<List<WorkerRecord>>();
                 }
                 else
                 {
@@ -263,7 +444,6 @@ public class Events : IExcelAddIn
                     );
 
                     DateTime? serverLastUpdate = Services.GetServerLatestTimestamp("worker_master");
-
                     bool canCommit = true;
 
                     if (serverLastUpdate.HasValue && serverLastUpdate.Value > localOfflineTime)
@@ -291,7 +471,7 @@ public class Events : IExcelAddIn
                                                                     .GetResult();
                         if (success)
                         {
-                            Services.ClearPendingOfflineSnapshot<System.Collections.Generic.List<WorkerRecord>>();
+                            Services.ClearPendingOfflineSnapshot<List<WorkerRecord>>();
                             SheetMapper.PopulateWorksheet(pendingRecords!);
                             WorkbookSession.ShowStatusConfirmation($"Committed {count} offline worker records to server.");
                             return;
@@ -299,7 +479,7 @@ public class Events : IExcelAddIn
                     }
                     else
                     {
-                        Services.ClearPendingOfflineSnapshot<System.Collections.Generic.List<WorkerRecord>>();
+                        Services.ClearPendingOfflineSnapshot<List<WorkerRecord>>();
                     }
                 }
             }

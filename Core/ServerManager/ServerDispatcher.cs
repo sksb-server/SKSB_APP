@@ -100,6 +100,14 @@ public static class ServerDispatcher
         {
             SaveSkillLicensesToDb(skillLicenses);
         }
+        else if (data is IEnumerable<SkillLicenseType> skillTypes)
+        {
+            SaveSkillLicenseTypesToDb(skillTypes);
+        }
+        else if (data is SkillLicenseType singleSkillType)
+        {
+            SaveSkillLicenseTypesToDb(new[] { singleSkillType });
+        }
     }
 
     #region Worker Database Operations
@@ -211,6 +219,27 @@ public static class ServerDispatcher
             updated_at  = CURRENT_TIMESTAMP;";
 
         DbService.ExecuteTransaction(sqlSkillLicense, skillItems);
+    }
+
+    private static void SaveSkillLicenseTypesToDb(IEnumerable<SkillLicenseType> skillTypes)
+    {
+        var payload = skillTypes
+            .Where(t => !string.IsNullOrWhiteSpace(t.LicenseType))
+            .Select(t => new
+            {
+                LicenseType = t.LicenseType.Trim(),
+                Description = t.Description ?? string.Empty
+            }).ToList();
+
+        if (!payload.Any()) return;
+
+        const string sql = @"
+            INSERT INTO lookup_skill_license_types (license_type, description)
+            VALUES (@LicenseType, @Description)
+            ON CONFLICT (license_type) DO UPDATE 
+            SET description = EXCLUDED.description;";
+
+        DbService.ExecuteTransaction(sql, payload);
     }
 
     #endregion

@@ -3,9 +3,39 @@
 using System;
 using System.Collections.Generic;
 using System.Data;
-using System.Threading.Tasks;
 using Dapper;
 using Npgsql;
+
+public static class ServerEnvironment
+{
+#if DEBUG
+    // Default is strictly FALSE. Only the Ribbon button can turn this on.
+    private static bool _simulateOffline = false;
+#else
+    private static readonly bool _simulateOffline = false;
+#endif
+
+    public static bool SimulateOffline
+    {
+        get => _simulateOffline;
+        set
+        {
+#if DEBUG
+            _simulateOffline = value;
+#else
+            throw new InvalidOperationException("Offline simulation is disabled in Release builds.");
+#endif
+        }
+    }
+
+    public static void GuardConnection()
+    {
+        if (SimulateOffline)
+        {
+            throw new TimeoutException("[Simulated Offline Mode Active] Connection to PostgreSQL server blocked by user switch.");
+        }
+    }
+}
 
 public class PostgreSqlService
 {
@@ -13,12 +43,15 @@ public class PostgreSqlService
 
     public PostgreSqlService(string connectionString = null)
     {
-        // Centralised connection string fallback
         _connectionString = connectionString ??
             "Host=192.168.0.20;Port=5432;Database=sksb_db;Username=sksb_server;Password=sksb7811;";
     }
 
-    private NpgsqlConnection CreateConnection() => new NpgsqlConnection(_connectionString);
+    private NpgsqlConnection CreateConnection()
+    {
+        ServerEnvironment.GuardConnection();
+        return new NpgsqlConnection(_connectionString);
+    }
 
     public IEnumerable<T> Query<T>(string sql, object param = null)
     {

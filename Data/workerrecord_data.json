@@ -1729,6 +1729,14 @@
         "RenewDate": "2026-10-15",
         "ExpiryDate": "2027-10-15",
         "LicenseStatus": "Valid"
+      },
+      {
+        "LicenseID": 9,
+        "WorkerID": 101,
+        "LicenseClass": "B",
+        "RenewDate": "2026-10-14",
+        "ExpiryDate": "2027-10-14",
+        "LicenseStatus": "Valid"
       }
     ],
     "SkillLicenses": [],
