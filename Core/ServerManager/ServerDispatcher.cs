@@ -19,7 +19,7 @@ public static class ServerDispatcher
         if (data is IEnumerable<WorkerRecord> workerList)
         {
             var list = workerList.ToList();
-            SaveWorkersToDb(list, isFullBatch: true);
+            SaveWorkerToDb(list, isFullBatch: true);
 
             var allVehicleLicenses = list.SelectMany(s => s.VehicleLicenses.Select(lic =>
             {
@@ -37,7 +37,7 @@ public static class ServerDispatcher
         }
         else if (data is WorkerRecord singleWorker)
         {
-            SaveWorkersToDb(new[] { singleWorker }, isFullBatch: false);
+            SaveWorkerToDb(new[] { singleWorker }, isFullBatch: false);
             if (singleWorker.VehicleLicenses.Any())
             {
                 singleWorker.VehicleLicenses.ForEach(lic => { if (lic.WorkerID == 0) lic.WorkerID = singleWorker.WorkerID; });
@@ -104,7 +104,7 @@ public static class ServerDispatcher
 
     #region Worker Database Operations
 
-    private static void SaveWorkersToDb(IEnumerable<WorkerRecord> workerList, bool isFullBatch)
+    private static void SaveWorkerToDb(IEnumerable<WorkerRecord> workerList, bool isFullBatch)
     {
         var workerItems = workerList.Where(w => w.WorkerID > 0).ToList();
         if (!workerItems.Any()) return;
@@ -115,9 +115,13 @@ public static class ServerDispatcher
         {
             WorkerId = w.WorkerID,
             WorkerName = w.WorkerDetails.WorkerName ?? string.Empty,
-            Nric = w.WorkerDetails.NRIC, // long
+            Nric = w.WorkerDetails.NRIC,
             Passport = w.WorkerDetails.Passport ?? string.Empty,
             Phone = w.WorkerDetails.Phone ?? string.Empty,
+            JoinDate = w.WorkerDetails.JoinDate.ToDateTime(TimeOnly.MinValue),
+            ResignDate = w.WorkerDetails.ResignDate.HasValue
+                ? (DateTime?)w.WorkerDetails.ResignDate.Value.ToDateTime(TimeOnly.MinValue)
+                : null,
             ContractStatus = w.WorkerDetails.ContractStatus.ToString()
         }).ToList();
 
@@ -126,19 +130,21 @@ public static class ServerDispatcher
         const string sqlReconcileMaster = "DELETE FROM worker_master WHERE worker_id != ALL(@ActiveIds);";
 
         const string sqlMasterUpsert = @"
-        INSERT INTO worker_master (
-            worker_id, worker_name, nric, passport, phone, contract_status
-        )
-        VALUES (
-            @WorkerId, @WorkerName, @Nric, @Passport, @Phone, @ContractStatus
-        )
-        ON CONFLICT (worker_id) DO UPDATE SET
-            worker_name     = EXCLUDED.worker_name,
-            nric            = EXCLUDED.nric,
-            passport        = EXCLUDED.passport,
-            phone           = EXCLUDED.phone,
-            contract_status = EXCLUDED.contract_status,
-            updated_at      = CURRENT_TIMESTAMP;";
+    INSERT INTO worker_master (
+        worker_id, worker_name, nric, passport, phone, join_date, resign_date, contract_status
+    )
+    VALUES (
+        @WorkerId, @WorkerName, @Nric, @Passport, @Phone, @JoinDate, @ResignDate, @ContractStatus
+    )
+    ON CONFLICT (worker_id) DO UPDATE SET
+        worker_name     = EXCLUDED.worker_name,
+        nric            = EXCLUDED.nric,
+        passport        = EXCLUDED.passport,
+        phone           = EXCLUDED.phone,
+        join_date       = EXCLUDED.join_date,
+        resign_date     = EXCLUDED.resign_date,
+        contract_status = EXCLUDED.contract_status,
+        updated_at      = CURRENT_TIMESTAMP;";
 
         DbService.ExecuteInTransaction((db, trans) =>
         {

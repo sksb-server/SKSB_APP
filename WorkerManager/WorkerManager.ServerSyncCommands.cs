@@ -8,24 +8,31 @@ using SKSB_App.Core.Types;
 
 public static class ServerSyncCommands
 {
-    public static bool SaveWorkerSilent()
+    public static bool SaveWorkerSilent(out string errorMessage)
     {
+        errorMessage = string.Empty;
         try
         {
-            var workerList = SheetMapper.ExtractWorkerRecords();
-            if (workerList == null || workerList.Count == 0)
+            var (workerList, errors, _) = SheetMapper.ExtractWorkerRecordsWithDiagnostics();
+
+            // Critical errors strictly block saving
+            if (errors.Count > 0)
             {
+                errorMessage = $"{errors.Count} critical error(s) must be resolved.";
                 return false;
             }
 
-            string snapshotPath = Services.SaveAsync(workerList, writeToDatabase: true)
-                                          .GetAwaiter()
-                                          .GetResult();
+            if (workerList == null || workerList.Count == 0)
+            {
+                return true;
+            }
 
+            string snapshotPath = Services.Save(workerList, writeToDatabase: true);
             return !string.IsNullOrEmpty(snapshotPath);
         }
         catch (Exception ex)
         {
+            errorMessage = ex.Message;
             System.Diagnostics.Debug.WriteLine($"[ServerSyncCommands] Silent Save Error: {ex.Message}");
             return false;
         }
@@ -57,6 +64,9 @@ public static class ServerSyncCommands
         string path = await Services.SaveAsync(workerList, writeToDatabase: true);
         return (!string.IsNullOrEmpty(path), workerList.Count, path);
     }
+
+    public static Task<(bool Success, int Count, string Path)> SaveWorkersAsync(List<WorkerRecord> workerList)
+        => SaveWorkerAsync(workerList);
 
     public static List<WorkerRecord>? FetchWorkerRecords()
     {

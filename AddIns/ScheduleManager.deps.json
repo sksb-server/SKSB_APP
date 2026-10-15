@@ -6,13 +6,13 @@
   "compilationOptions": {},
   "targets": {
     ".NETCoreApp,Version=v8.0": {
-      "StaffManager/1.0.0": {
+      "ScheduleManager/1.0.0": {
         "dependencies": {
           "Core": "1.0.0",
           "ExcelDna.AddIn": "1.9.0"
         },
         "runtime": {
-          "StaffManager.dll": {}
+          "ScheduleManager.dll": {}
         }
       },
       "Dapper/2.1.35": {
@@ -82,7 +82,7 @@
     }
   },
   "libraries": {
-    "StaffManager/1.0.0": {
+    "ScheduleManager/1.0.0": {
       "type": "project",
       "serviceable": false,
       "sha512": ""

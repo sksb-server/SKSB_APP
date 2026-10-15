@@ -83,8 +83,23 @@ public static class Folder
 
 public static class Window
 {
-    public static TemplateAddInPair DailyScheduler { get; } = new TemplateAddInPair(template: "Daily_Scheduler_Template.xltx", addIn: "DailyScheduler-AddIn");
-    public static TemplateAddInPair ProjectManager { get; } = new TemplateAddInPair(template: "Project_Manager_Template.xltx", addIn: "ProjectManager-AddIn");
-    public static TemplateAddInPair WorkerManager { get; } = new TemplateAddInPair(template: "Worker_Manager_Template.xltx", addIn: "WorkerManager-AddIn");
-    public static TemplateAddInPair VehicleManager { get; } = new TemplateAddInPair(template: "Vehicle_Manager_Template.xltx", addIn: "VehicleManager-AddIn");
+    // Define with new or unified project names
+    public static TemplateAddInPair DailyScheduler { get; } = CreateDefault("DailyScheduler");
+    public static TemplateAddInPair WorkerManager { get; } = CreateDefault("WorkerManager");
+    public static TemplateAddInPair ProjectManager { get; } = CreateDefault("ProjectManager");
+    public static TemplateAddInPair VehicleManager { get; } = CreateDefault("VehicleManager");
+
+    /// <summary>
+    /// Dynamically constructs the template and add-in filenames from the base module name.
+    /// Example: "WorkerManager" -> Template: "Worker_Manager_Template.xltx", AddIn: "WorkerManager-AddIn"
+    /// </summary>
+    public static TemplateAddInPair CreateDefault(string moduleName)
+    {
+        // Converts PascalCase to Snake_Case (e.g. WorkerManager -> Worker_Manager)
+        string snake = System.Text.RegularExpressions.Regex.Replace(moduleName, "([a-z])([A-Z])", "$1_$2");
+        return new TemplateAddInPair(
+            template: $"{snake}_Template.xltx",
+            addIn: $"{moduleName}-AddIn"
+        );
+    }
 }

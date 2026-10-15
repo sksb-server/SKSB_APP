@@ -3,7 +3,6 @@
 using System;
 using System.Globalization;
 using System.Linq;
-using System.Text;
 using System.Text.RegularExpressions;
 
 public static class ERPHelper
@@ -15,22 +14,17 @@ public static class ERPHelper
         "d/M/yyyy",
         "yyyy/MM/dd",
         "dd-MM-yyyy",
-        "d-M-yyyy"
+        "d-M-yyyy",
+        "M/d/yyyy",
+        "MM/dd/yyyy"
     };
 
-    /// <summary>
-    /// Normalizes header strings by stripping whitespace, underscores, dots, and hyphens to allow tolerant lookups.
-    /// Example: "Emp_Code", "emp code", or "EmpCode" all normalize to "EMPCODE".
-    /// </summary>
     public static string NormalizeHeader(string header)
     {
         if (string.IsNullOrWhiteSpace(header)) return string.Empty;
         return Regex.Replace(header.Trim(), @"[\s_\-\.]+", string.Empty).ToUpperInvariant();
     }
 
-    /// <summary>
-    /// Splits a delimited string line while respecting quoted values containing delimiters or escaped quotes.
-    /// </summary>
     public static string[] SplitDelimitedLine(string line, char delimiter = ',')
     {
         if (string.IsNullOrEmpty(line)) return Array.Empty<string>();
@@ -41,10 +35,6 @@ public static class ERPHelper
                     .ToArray();
     }
 
-    /// <summary>
-    /// Escapes an individual cell value for delimited outputs (e.g., CSV).
-    /// Encloses values in quotes if they contain delimiters, quotes, or newline characters.
-    /// </summary>
     public static string EscapeDelimitedCell(object? value, char delimiter = ',')
     {
         if (value is null) return string.Empty;
@@ -67,14 +57,35 @@ public static class ERPHelper
         return stringVal;
     }
 
+    /// <summary>
+    /// Intelligently parses dates from string text, SQL Payroll hash masks, or Excel OADate serial numbers.
+    /// </summary>
     public static DateOnly? ParseDateOnly(string value)
     {
         if (string.IsNullOrWhiteSpace(value)) return null;
 
-        if (DateOnly.TryParseExact(value.Trim(), DateFormats, CultureInfo.InvariantCulture, DateTimeStyles.None, out var date))
+        // 1. Strip hash symbols '#' and trim spaces
+        string cleaned = value.Replace("#", string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(cleaned)) return null;
+
+        // 2. Check if the value is an Excel numeric OADate serial (e.g. "43160" or "43160.5")
+        if (double.TryParse(cleaned, NumberStyles.Any, CultureInfo.InvariantCulture, out double oaDate) && oaDate > 30000 && oaDate < 80000)
+        {
+            return DateOnly.FromDateTime(DateTime.FromOADate(oaDate));
+        }
+
+        // 3. Match explicit standard formats
+        if (DateOnly.TryParseExact(cleaned, DateFormats, CultureInfo.InvariantCulture, DateTimeStyles.None, out var date))
             return date;
 
-        return DateOnly.TryParse(value.Trim(), out date) ? date : null;
+        // 4. Standard fallback parse
+        if (DateOnly.TryParse(cleaned, CultureInfo.InvariantCulture, DateTimeStyles.None, out date))
+            return date;
+
+        if (DateTime.TryParse(cleaned, out var dt))
+            return DateOnly.FromDateTime(dt);
+
+        return null;
     }
 
     public static decimal ParseDecimal(string value, decimal defaultValue = 0.00m)
@@ -88,7 +99,8 @@ public static class ERPHelper
     public static long ParseLong(string value, long defaultValue = 0)
     {
         if (string.IsNullOrWhiteSpace(value)) return defaultValue;
-        return long.TryParse(value.Trim(), NumberStyles.Any, CultureInfo.InvariantCulture, out long res)
+        string clean = Regex.Replace(value.Trim(), @"[^\d\-]", string.Empty);
+        return long.TryParse(clean, NumberStyles.Any, CultureInfo.InvariantCulture, out long res)
             ? res
             : defaultValue;
     }

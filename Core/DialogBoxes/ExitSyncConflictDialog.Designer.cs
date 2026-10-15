@@ -1,4 +1,4 @@
-﻿namespace SKSB_App.Core.FileManager
+﻿namespace SKSB_App.Core.DialogBoxes
 {
     partial class ExitSyncConflictDialog
     {

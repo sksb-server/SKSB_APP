@@ -4,6 +4,7 @@ using System;
 using System.IO;
 using System.Windows.Forms;
 using ExcelDna.Integration;
+using SKSB_App.Core.DialogBoxes;
 using SKSB_App.Core.FileManager;
 using SKSB_App.Core.FileManager.Constants;
 using SKSB_App.Core.ServerManager;
@@ -60,7 +61,7 @@ public class Events : IExcelAddIn
     {
         // Spawns 'Data' sheet and registers defined names
         DataToExcel.SyncData<WorkerRecord, long>("WorkerID", s => s.WorkerID);
-        DataToExcel.SyncData<WorkerRecord, string>("WorkerName", s => s.WorkerDetails.Name);
+        DataToExcel.SyncData<WorkerRecord, string>("WorkerName", s => s.WorkerDetails.WorkerName);
         DataToExcel.SyncData<VehicleRecord, string>("VehiclePlate", v => v.VehiclePlate);
         DataToExcel.SyncData<ProjectRecord, string>("ProjectID", p => p.ProjectID);
     }

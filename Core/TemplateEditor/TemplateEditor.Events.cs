@@ -2,6 +2,7 @@
 
 using System;
 using ExcelDna.Integration;
+using SKSB_App.Core.TemplateEditor.DropDown;
 using SKSB_App.Core.WorkbookManager;
 
 public class Events : IExcelAddIn
@@ -9,9 +10,11 @@ public class Events : IExcelAddIn
     private static dynamic? _xlAppRoot;
     private delegate void SheetDoubleClickDelegate(dynamic sh, dynamic target, ref bool cancel);
     private delegate void SheetSelectionChangeDelegate(dynamic sh, dynamic target);
+    private delegate void SheetChangeDelegate(dynamic sh, dynamic target);
 
     private static SheetDoubleClickDelegate? _doubleClickHandler;
     private static SheetSelectionChangeDelegate? _selectionHandler;
+    private static SheetChangeDelegate? _changeHandler;
 
     public void AutoOpen()
     {
@@ -19,14 +22,12 @@ public class Events : IExcelAddIn
         {
             HookEvents();
 
-            // 1. Hook window switch / open events
             try
             {
                 XlCall.Excel(XlCall.xlcOnWindow, Type.Missing, "OnWindowActivatedMacro");
             }
             catch { }
 
-            // 2. Delayed cold-boot timer (allows Excel window to initialize fully)
             try
             {
                 double nowSerial = Convert.ToDouble(XlCall.Excel(XlCall.xlfNow));
@@ -38,6 +39,7 @@ public class Events : IExcelAddIn
 
     public void AutoClose()
     {
+        Arrow.HideAll();
         UnhookEvents();
         try
         {
@@ -92,6 +94,9 @@ public class Events : IExcelAddIn
 
             _selectionHandler = new SheetSelectionChangeDelegate(OnSheetSelectionChange);
             _xlAppRoot.SheetSelectionChange += _selectionHandler;
+
+            _changeHandler = new SheetChangeDelegate(OnSheetChange);
+            _xlAppRoot.SheetChange += _changeHandler;
         }
         catch (Exception ex)
         {
@@ -115,6 +120,11 @@ public class Events : IExcelAddIn
                     _xlAppRoot.SheetSelectionChange -= _selectionHandler;
                     _selectionHandler = null;
                 }
+                if (_changeHandler != null)
+                {
+                    _xlAppRoot.SheetChange -= _changeHandler;
+                    _changeHandler = null;
+                }
                 _xlAppRoot = null;
             }
         }
@@ -125,13 +135,46 @@ public class Events : IExcelAddIn
     {
         try
         {
-            if (target == null) return;
-            if (target.Cells.Count > 100) return;
+            if (target == null || target.Cells.Count > 1)
+            {
+                Arrow.HideAll();
+                return;
+            }
 
             dynamic singleCell = target.Cells[1, 1];
             if (Commands.IsCustomDropdownCell(singleCell))
             {
-                Commands.EnsureDropdownValidationAttached(singleCell);
+                if (!WorkbookSession.IsTemplateEditMode)
+                {
+                    Arrow.ShowArrowForCell(singleCell);
+                }
+                else
+                {
+                    Arrow.HideAll();
+                }
+            }
+            else
+            {
+                Arrow.HideAll();
+            }
+        }
+        catch
+        {
+            Arrow.HideAll();
+        }
+    }
+
+    private static void OnSheetChange(dynamic sh, dynamic target)
+    {
+        try
+        {
+            // Fires as soon as typing completes/commits in the cell
+            if (target != null && target.Cells.Count == 1)
+            {
+                if (Commands.IsCustomDropdownCell(target) && !WorkbookSession.IsTemplateEditMode)
+                {
+                    Arrow.ShowArrowForCell(target);
+                }
             }
         }
         catch { }
@@ -144,16 +187,18 @@ public class Events : IExcelAddIn
             if (!Commands.IsCustomDropdownCell(target))
                 return;
 
-            cancel = true;
-
-            // Uses current state determined either by auto-detection or the Ribbon toggle
             if (WorkbookSession.IsTemplateEditMode)
             {
+                cancel = true; // Open template configurator
+                Arrow.HideAll();
                 Commands.InspectAndEditCell(target);
             }
             else
             {
-                Commands.ShowChecklistForActiveCell(target);
+                // In Operational Mode:
+                // Hide the arrow so it doesn't obstruct the user while typing in cell!
+                Arrow.HideAll();
+                // cancel remains false so in-cell text edit begins naturally
             }
         }
         catch (Exception ex)

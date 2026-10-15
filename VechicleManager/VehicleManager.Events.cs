@@ -1,6 +1,7 @@
 ﻿namespace SKSB_App.VehicleManager;
 
 using ExcelDna.Integration;
+using SKSB_App.Core.DialogBoxes;
 using SKSB_App.Core.FileManager;
 using SKSB_App.Core.FileManager.Constants;
 using SKSB_App.Core.TemplateEditor;
@@ -50,7 +51,7 @@ public class Events : IExcelAddIn
 
     public static void SyncVehicleLookupsData()
     {
-        DataToExcel.SyncData<WorkerRecord, string>("WorkerName", s => s.WorkerDetails.Name);
+        DataToExcel.SyncData<WorkerRecord, string>("WorkerName", s => s.WorkerDetails.WorkerName);
     }
 
     private static void HookApplicationClose()

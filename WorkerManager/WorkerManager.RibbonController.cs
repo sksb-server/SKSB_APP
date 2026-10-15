@@ -2,8 +2,9 @@
 
 using ExcelDna.Integration;
 using ExcelDna.Integration.CustomUI;
+using SKSB_App.Core.FileManager;
 using SKSB_App.Core.Types;
-using SKSB_App.WorkerManager;
+using SKSB_App.Core.DialogBoxes;
 using System;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
@@ -57,7 +58,6 @@ public class RibbonController : ExcelRibbon
     {
         try
         {
-            // 1. Spawns Windows File Picker dialog
             using var openFileDialog = new OpenFileDialog
             {
                 Title = "Select SQL Payroll Export File (Employee.xlsx)",
@@ -72,15 +72,16 @@ public class RibbonController : ExcelRibbon
                 return;
 
             string selectedFilePath = openFileDialog.FileName;
+            string fileNameOnly = System.IO.Path.GetFileName(selectedFilePath);
 
-            // 2. Parse and filter workers using ERPBridge
-            var workers = Importer.ImportWorkers(selectedFilePath);
+            // 1. Process file and gather metrics/errors
+            var importResult = Importer.ImportWorkers(selectedFilePath);
 
-            if (workers.Count == 0)
+            if (importResult.ImportedWorkers.Count == 0 && importResult.SkippedErrors.Count == 0)
             {
                 MessageBox.Show(
-                    "No valid operational workers were found in the selected file.\n\n" +
-                    "Ensure the file contains the Code, Name, Handphone, and Department columns.",
+                    "No operational project workers were found in the selected file.\n\n" +
+                    "Ensure the file contains the Code, Name, Handphone/Mobile, and Department columns.",
                     "Import Results",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Warning
@@ -88,23 +89,75 @@ public class RibbonController : ExcelRibbon
                 return;
             }
 
-            // 3. Auto-populate into the active Excel worksheet table via Excel-DNA macro queue
+            // 2. Populate Excel table on the UI macro thread
             ExcelAsyncUtil.QueueAsMacro(() =>
             {
-                SheetMapper.PopulateWorksheet(workers);
-                MessageBox.Show(
-                    $"Successfully imported and populated {workers.Count} active worker(s) from:\n{selectedFilePath}\n\n" +
-                    "Review the table entries and click 'Save to System' when ready to sync.",
-                    "SQL Payroll Import Success",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Information
-                );
+                if (importResult.ImportedWorkers.Count > 0)
+                {
+                    SheetMapper.PopulateWorksheet(importResult.ImportedWorkers);
+                }
+
+                // 3. Display summary dialog with 'View Skipped Errors' option
+                using var summaryDialog = new ImportResultDialog(importResult, fileNameOnly);
+                summaryDialog.ShowDialog();
             });
         }
         catch (Exception ex)
         {
             MessageBox.Show($"Import failed: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
+    }
+
+    public void OnSaveClicked(IRibbonControl control)
+    {
+        List<WorkerRecord> workerList = SheetMapper.ExtractWorkerRecords();
+        if (workerList == null || workerList.Count == 0)
+        {
+            return;
+        }
+
+        Task.Run(async () =>
+        {
+            try
+            {
+                var (success, count, path) = await ServerSyncCommands.SaveWorkerAsync(workerList);
+                if (success)
+                {
+                    // Update sheet with newly generated IDs & default values
+                    ExcelAsyncUtil.QueueAsMacro(() => SheetMapper.PopulateWorksheet(workerList));
+
+                    SaveNotificationDialog.ShowSuccess(
+                        "Worker Manager",
+                        $"Successfully saved {count} worker record(s).\n\n• Storage: {path}\n• All auto-generated IDs and default dates have been applied to your sheets."
+                    );
+                }
+                else
+                {
+                    SaveNotificationDialog.ShowError(
+                        "Worker Manager",
+                        "Failed to persist workers to PostgreSQL or local storage."
+                    );
+                }
+            }
+            catch (Exception ex)
+            {
+                SaveNotificationDialog.ShowError("Worker Manager", $"Save Error: {ex.Message}");
+            }
+        });
+    }
+
+    public void OnLoadClicked(IRibbonControl control)
+    {
+        var records = ServerSyncCommands.FetchWorkerRecords();
+        if (records == null || records.Count == 0)
+        {
+            MessageBox.Show("No worker records found in storage.", "Load Workers", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        ExcelAsyncUtil.QueueAsMacro(() =>
+            SheetMapper.PopulateWorksheet(records)
+        );
     }
 
     public void OnSyncLookupsClicked(IRibbonControl control)
@@ -123,57 +176,5 @@ public class RibbonController : ExcelRibbon
         {
             MessageBox.Show($"Sync failed: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
-    }
-
-    public void OnSaveClicked(IRibbonControl control)
-    {
-        var workerList = SheetMapper.ExtractWorkerRecords();
-        if (workerList == null || workerList.Count == 0) return;
-
-        Task.Run(async () =>
-        {
-            try
-            {
-                var (success, count, path) = await ServerSyncCommands.SaveWorkerAsync(workerList);
-                if (success)
-                {
-                    MessageBox.Show(
-                        $"Successfully saved {count} worker record(s).\n\n• Storage: {path}",
-                        "Save Success",
-                        MessageBoxButtons.OK,
-                        MessageBoxIcon.Information
-                    );
-                }
-                else
-                {
-                    MessageBox.Show(
-                        "Failed to persist workers to PostgreSQL or local storage.",
-                        "Persistence Error",
-                        MessageBoxButtons.OK,
-                        MessageBoxIcon.Warning
-                    );
-                }
-            }
-            catch (Exception ex)
-            {
-                MessageBox.Show($"Save Error: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-        });
-    }
-
-    public void OnLoadClicked(IRibbonControl control)
-    {
-        var records = ServerSyncCommands.FetchWorkerRecords();
-        if (records == null || records.Count == 0)
-        {
-            MessageBox.Show("No worker records found in storage.", "Load Workers", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            return;
-        }
-
-        ExcelAsyncUtil.QueueAsMacro(() =>
-        {
-            SheetMapper.PopulateWorksheet(records);
-            MessageBox.Show($"Successfully loaded {records.Count} worker record(s).", "Load Success", MessageBoxButtons.OK, MessageBoxIcon.Information);
-        });
     }
 }
