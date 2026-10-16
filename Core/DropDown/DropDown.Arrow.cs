@@ -7,7 +7,7 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using ExcelDna.Integration;
-using SKSB_App.Core.ExcelManager;
+using SKSB_App.Core.ExcelBitrateManager;
 
 public static class Arrow
 {

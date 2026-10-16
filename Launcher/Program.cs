@@ -1,6 +1,6 @@
 ﻿using Microsoft.Win32;
-using SKSB_App.Core.ExcelManager;
-using SKSB_App.Core.FileManager.Constants;
+using SKSB_App.Core.ExcelBitrateManager;
+using SKSB_App.Core.FileManager.Structure;
 using System;
 using System.Diagnostics;
 using System.IO;

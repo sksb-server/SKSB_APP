@@ -5,7 +5,7 @@ using System.Collections.Generic;
 using System.Linq;
 using ExcelDna.Integration;
 using SKSB_App.Core.FileManager;
-using SKSB_App.Core.WorkbookManager;
+using SKSB_App.Core.WorkbookHelper;
 
 public static class DataToExcel
 {
@@ -18,7 +18,7 @@ public static class DataToExcel
     /// </summary>
     public static void SyncData<TEntity, TProp>(string namePrefix, Func<TEntity, TProp> propertySelector)
     {
-        var entities = Services.Load<List<TEntity>>();
+        var entities = OfflineSaveServices.Load<List<TEntity>>();
         if (entities == null || entities.Count == 0) return;
 
         string[] values = entities
@@ -126,7 +126,7 @@ public static class DataToExcel
                 MoveDataSheetToEnd();
 
                 // 9. Hide 'Data' sheet if NOT in Template Edit Mode
-                if (!WorkbookSession.IsTemplateEditMode)
+                if (!SheetOps.IsTemplateEditMode)
                 {
                     try
                     {

@@ -4,7 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using ExcelDna.Integration;
-using SKSB_App.Core.WorkbookManager;
+using SKSB_App.Core.WorkbookHelper;
 
 public static class ServerLookups
 {

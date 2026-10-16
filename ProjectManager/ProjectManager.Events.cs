@@ -2,12 +2,12 @@
 
 using ExcelDna.Integration;
 using SKSB_App.Core.FileManager;
-using SKSB_App.Core.FileManager.Constants;
+using SKSB_App.Core.FileManager.Structure;
 using SKSB_App.Core.TemplateEditor;
 using SKSB_App.Core.ServerManager;
 using SKSB_App.Core.Services;
 using SKSB_App.Core.Types;
-using SKSB_App.Core.WorkbookManager;
+using SKSB_App.Core.WorkbookHelper;
 using SKSB_App.Core.DialogBoxes;
 using System;
 using System.Collections.Generic;
@@ -99,13 +99,13 @@ public class Events : IExcelAddIn
                 if (saved)
                 {
                     // Success: Clear any offline stash if it existed
-                    Services.ClearPendingOfflineSnapshot<List<ProjectRecord>>();
+                    OfflineSaveServices.ClearPendingOfflineSnapshot<List<ProjectRecord>>();
                     wb.Saved = true;
                     return;
                 }
 
                 // Failed: Show 3-way conflict dialog
-                using var dialog = new ExitSyncConflictDialog(
+                using var dialog = new ExitSyncConflict(
                     "Project Manager",
                     "Could not persist records to the PostgreSQL server (connection timeout or schema conflict)."
                 );
@@ -120,7 +120,7 @@ public class Events : IExcelAddIn
                         var (currentProjects, _) = SheetMapper.ExtractProjectRecords();
                         if (currentProjects != null && currentProjects.Count > 0)
                         {
-                            Services.SaveOfflineSnapshot(currentProjects);
+                            OfflineSaveServices.SaveOfflineSnapshot(currentProjects);
                             MessageBox.Show(
                                 "Your project records have been safely saved to local disk.\n\n" +
                                 "The system will automatically detect this file and prompt to commit it to the server when you next start.",
@@ -160,14 +160,14 @@ public class Events : IExcelAddIn
             // -------------------------------------------------------------
             // STARTUP RECONCILIATION: Check for pending offline file
             // -------------------------------------------------------------
-            if (Services.HasPendingOfflineSnapshot<List<ProjectRecord>>())
+            if (OfflineSaveServices.HasPendingOfflineSnapshot<List<ProjectRecord>>())
             {
-                var pendingRecords = Services.LoadPendingOfflineSnapshot<List<ProjectRecord>>();
+                var pendingRecords = OfflineSaveServices.LoadPendingOfflineSnapshot<List<ProjectRecord>>();
                 DateTime localOfflineTime = File.GetLastWriteTime(
                     Folder.Data.GetFilePath("List`1_PendingUpload.json")
                 );
 
-                DateTime? serverLastUpdate = Services.GetServerLatestTimestamp("project_master");
+                DateTime? serverLastUpdate = OfflineSaveServices.GetServerLatestTimestamp("project_master");
                 bool canCommit = true;
 
                 if (serverLastUpdate.HasValue && serverLastUpdate.Value > localOfflineTime)
@@ -195,7 +195,7 @@ public class Events : IExcelAddIn
                                                                 .GetResult();
                     if (success)
                     {
-                        Services.ClearPendingOfflineSnapshot<List<ProjectRecord>>();
+                        OfflineSaveServices.ClearPendingOfflineSnapshot<List<ProjectRecord>>();
                         var companies = ServerSyncCommands.FetchCompanyRecords() ?? new List<CompanyRecord>();
                         SheetMapper.PopulateWorksheet(pendingRecords, companies);
                         WorkbookSession.ShowStatusConfirmation($"Committed {count} offline project records to server.");
@@ -204,7 +204,7 @@ public class Events : IExcelAddIn
                 }
                 else
                 {
-                    Services.ClearPendingOfflineSnapshot<List<ProjectRecord>>();
+                    OfflineSaveServices.ClearPendingOfflineSnapshot<List<ProjectRecord>>();
                 }
             }
 
@@ -232,7 +232,7 @@ public class Events : IExcelAddIn
         bool success = ServerSyncCommands.SaveProjectsSilent();
         if (success)
         {
-            Services.ClearPendingOfflineSnapshot<List<ProjectRecord>>();
+            OfflineSaveServices.ClearPendingOfflineSnapshot<List<ProjectRecord>>();
             MessageBox.Show("Save completed successfully.", "SKSB Project Manager", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
     }

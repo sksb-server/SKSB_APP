@@ -7,7 +7,7 @@ using System.Text;
 using System.Windows.Forms;
 using ExcelDna.Integration;
 using SKSB_App.Core.Types;
-using SKSB_App.Core.WorkbookManager;
+using SKSB_App.Core.WorkbookHelper;
 
 public static class SheetMapper
 {
@@ -112,7 +112,7 @@ public static class SheetMapper
         }
 
         // -------------------------------------------------------------
-        // PRE-SAVE VALIDATION GATEWAY: Halt persistence if data is dirty
+        // PRE-SAVE VALIDATION GATEWAY: Halt WorkbookHelper if data is dirty
         // -------------------------------------------------------------
         if (validationErrors.Count > 0)
         {

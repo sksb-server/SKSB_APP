@@ -1,6 +1,6 @@
 ﻿namespace SKSB_App.Core.DialogBoxes
 {
-    partial class ExitSyncConflictDialog
+    partial class ValidationSummary
     {
         /// <summary>
         /// Required designer variable.

@@ -4,9 +4,9 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-using SKSB_App.Core.ExcelManager;
+using SKSB_App.Core.ExcelBitrateManager;
 
-namespace SKSB_App.Core.FileManager.Constants;
+namespace SKSB_App.Core.FileManager.Structure;
 
 public sealed class AppFolder
 {

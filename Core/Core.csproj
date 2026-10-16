@@ -33,4 +33,8 @@
 	  <Folder Include="Diagnostics\" />
 	</ItemGroup>
 
+	<ItemGroup>
+	  <Compile Update="DialogBoxes\DialogBoxes.ImportResult.cs" />
+	</ItemGroup>
+
 </Project>

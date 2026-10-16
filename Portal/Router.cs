@@ -5,8 +5,8 @@ using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
-using SKSB_App.Core.ExcelManager;
-using SKSB_App.Core.FileManager.Constants;
+using SKSB_App.Core.ExcelBitrateManager;
+using SKSB_App.Core.FileManager.Structure;
 
 public static class PortalRouter
 {

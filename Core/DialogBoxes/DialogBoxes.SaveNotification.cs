@@ -12,9 +12,9 @@ public enum SaveNotificationType
     Offline
 }
 
-public partial class SaveNotificationDialog : Form
+public partial class SaveNotification : Form
 {
-    public SaveNotificationDialog(string moduleName, string message, SaveNotificationType type = SaveNotificationType.Success)
+    public SaveNotification(string moduleName, string message, SaveNotificationType type = SaveNotificationType.Success)
     {
         Text = $"{moduleName} - Save Status";
         StartPosition = FormStartPosition.CenterScreen;
@@ -143,19 +143,19 @@ public partial class SaveNotificationDialog : Form
     /// </summary>
     public static void ShowSuccess(string moduleName, string message = "All records have been safely synchronized to the system.")
     {
-        using var dlg = new SaveNotificationDialog(moduleName, message, SaveNotificationType.Success);
+        using var dlg = new SaveNotification(moduleName, message, SaveNotificationType.Success);
         dlg.ShowDialog();
     }
 
     public static void ShowOffline(string moduleName, string message)
     {
-        using var dlg = new SaveNotificationDialog(moduleName, message, SaveNotificationType.Offline);
+        using var dlg = new SaveNotification(moduleName, message, SaveNotificationType.Offline);
         dlg.ShowDialog();
     }
 
     public static void ShowError(string moduleName, string message)
     {
-        using var dlg = new SaveNotificationDialog(moduleName, message, SaveNotificationType.Error);
+        using var dlg = new SaveNotification(moduleName, message, SaveNotificationType.Error);
         dlg.ShowDialog();
     }
 }

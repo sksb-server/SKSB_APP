@@ -20,10 +20,10 @@ public static class ServerSyncCommands
 
             if (companyList != null && companyList.Count > 0)
             {
-                Services.SaveAsync(companyList, writeToDatabase: true).GetAwaiter().GetResult();
+                OfflineSaveServices.SaveAsync(companyList, writeToDatabase: true).GetAwaiter().GetResult();
             }
 
-            string snapshotPath = Services.SaveAsync(projectList, writeToDatabase: true)
+            string snapshotPath = OfflineSaveServices.SaveAsync(projectList, writeToDatabase: true)
                                           .GetAwaiter()
                                           .GetResult();
 
@@ -40,8 +40,8 @@ public static class ServerSyncCommands
     {
         try
         {
-            var projectList = Services.Load<List<ProjectRecord>>();
-            var companyList = Services.Load<List<CompanyRecord>>() ?? new List<CompanyRecord>();
+            var projectList = OfflineSaveServices.Load<List<ProjectRecord>>();
+            var companyList = OfflineSaveServices.Load<List<CompanyRecord>>() ?? new List<CompanyRecord>();
 
             if (projectList != null && projectList.Count > 0)
             {
@@ -61,24 +61,24 @@ public static class ServerSyncCommands
     {
         if (projectList == null || projectList.Count == 0) return (false, 0, string.Empty);
 
-        string path = await Services.SaveAsync(projectList, writeToDatabase: true);
+        string path = await OfflineSaveServices.SaveAsync(projectList, writeToDatabase: true);
         return (!string.IsNullOrEmpty(path), projectList.Count, path);
     }
 
     public static async Task<bool> SaveCompaniesAsync(List<CompanyRecord> companyList)
     {
         if (companyList == null || companyList.Count == 0) return false;
-        string path = await Services.SaveAsync(companyList, writeToDatabase: true);
+        string path = await OfflineSaveServices.SaveAsync(companyList, writeToDatabase: true);
         return !string.IsNullOrEmpty(path);
     }
 
     public static List<ProjectRecord>? FetchProjectRecords()
     {
-        return Services.Load<List<ProjectRecord>>();
+        return OfflineSaveServices.Load<List<ProjectRecord>>();
     }
 
     public static List<CompanyRecord>? FetchCompanyRecords()
     {
-        return Services.Load<List<CompanyRecord>>();
+        return OfflineSaveServices.Load<List<CompanyRecord>>();
     }
 }

@@ -5,10 +5,10 @@ using System.IO;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Threading.Tasks;
-using SKSB_App.Core.FileManager.Constants;
+using SKSB_App.Core.FileManager.Structure;
 using SKSB_App.Core.ServerManager;
 
-public static class Services
+public static class OfflineSaveServices
 {
     private static readonly JsonSerializerOptions JsonOptions = new()
     {

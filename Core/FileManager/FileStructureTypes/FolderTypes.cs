@@ -1,4 +1,4 @@
-﻿namespace SKSB_App.Core.FileManager.Constants;
+﻿namespace SKSB_App.Core.FileManager.Structure;
 
 using System;
 using System.IO;

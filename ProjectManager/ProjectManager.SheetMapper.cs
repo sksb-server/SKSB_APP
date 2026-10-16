@@ -8,7 +8,7 @@ using System.Text;
 using System.Windows.Forms;
 using ExcelDna.Integration;
 using SKSB_App.Core.Types;
-using SKSB_App.Core.WorkbookManager;
+using SKSB_App.Core.WorkbookHelper;
 
 public static class SheetMapper
 {

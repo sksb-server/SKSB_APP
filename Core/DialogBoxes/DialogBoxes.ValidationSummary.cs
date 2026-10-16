@@ -13,11 +13,11 @@ public enum ValidationDialogAction
     DebugQuitAnyway
 }
 
-public partial class ValidationSummaryDialog : Form
+public partial class ValidationSummary : Form
 {
     public ValidationDialogAction Action { get; private set; } = ValidationDialogAction.Cancel;
 
-    public ValidationSummaryDialog(string moduleName, List<string> errors, List<string> warnings)
+    public ValidationSummary(string moduleName, List<string> errors, List<string> warnings)
     {
         Text = $"{moduleName} - Data Integrity Check";
         StartPosition = FormStartPosition.CenterScreen;

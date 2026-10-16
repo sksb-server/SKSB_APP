@@ -1,15 +1,14 @@
 ﻿namespace SKSB_App.WorkerManager;
 
+using System;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Windows.Forms;
 using ExcelDna.Integration;
 using ExcelDna.Integration.CustomUI;
 using SKSB_App.Core.DialogBoxes;
-using SKSB_App.Core.FileManager;
 using SKSB_App.Core.ServerManager;
-using SKSB_App.Core.Types;
-using System;
-using System.Runtime.InteropServices;
-using System.Threading.Tasks;
-using System.Windows.Forms;
+using SKSB_App.Core.WorkbookHelper;
 
 [ComVisible(true)]
 public class RibbonController : ExcelRibbon
@@ -88,7 +87,7 @@ public class RibbonController : ExcelRibbon
                 return;
 
             string selectedFilePath = openFileDialog.FileName;
-            string fileNameOnly = System.IO.Path.GetFileName(selectedFilePath);
+            string fileNameOnly = Path.GetFileName(selectedFilePath);
 
             var importResult = Importer.ImportWorkers(selectedFilePath);
 
@@ -111,7 +110,7 @@ public class RibbonController : ExcelRibbon
                     SheetMapper.PopulateWorksheet(importResult.ImportedWorkers);
                 }
 
-                using var summaryDialog = new ImportResultDialog(importResult, fileNameOnly);
+                using var summaryDialog = new GenericImportResult(importResult.ToGenericReport(), fileNameOnly);
                 summaryDialog.ShowDialog();
             });
         }
@@ -125,7 +124,7 @@ public class RibbonController : ExcelRibbon
     {
         ExcelAsyncUtil.QueueAsMacro(() =>
         {
-            Events.ExecuteUnifiedSave();
+            GenericHookEvents.Save(Events.WorkerSyncDescriptor);
         });
     }
 
@@ -155,25 +154,13 @@ public class RibbonController : ExcelRibbon
         }
     }
 
+    // Inside WorkerManager/RibbonController.cs:
+
 #if DEBUG
     public bool GetSimulateOfflinePressed(IRibbonControl control)
-    {
-        return ServerEnvironment.SimulateOffline;
-    }
+        => GenericHookEvents.IsSimulatedOffline();
 
     public void OnToggleOfflineClicked(IRibbonControl control, bool pressed)
-    {
-        ServerEnvironment.SimulateOffline = pressed;
-        _ribbonUi?.InvalidateControl("btnToggleOffline");
-
-        MessageBox.Show(
-            pressed
-                ? "Server is now SIMULATED OFFLINE.\nAll database interactions will fail immediately to test offline stashing."
-                : "Server is now ONLINE.\nNormal PostgreSQL connectivity restored.",
-            "Debug Server Mode",
-            MessageBoxButtons.OK,
-            pressed ? MessageBoxIcon.Warning : MessageBoxIcon.Information
-        );
-    }
+        => GenericHookEvents.ToggleSimulatedOffline(_ribbonUi, control.Id, pressed);
 #endif
 }

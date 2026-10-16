@@ -5,7 +5,7 @@ using ExcelDna.Integration.CustomUI;
 using SKSB_App.Core.FileManager;
 using SKSB_App.Core.Services;
 using SKSB_App.Core.Types;
-using SKSB_App.Core.WorkbookManager;
+using SKSB_App.Core.WorkbookHelper;
 using System;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
@@ -104,7 +104,7 @@ public class RibbonController : ExcelRibbon
             return; // Pre-save validation failed or no data
         }
 
-        // 2. BACKGROUND WORKER: Offload serialization and PostgreSQL persistence
+        // 2. BACKGROUND WORKER: Offload serialization and PostgreSQL WorkbookHelper
         Task.Run(async () =>
         {
             try
@@ -112,7 +112,7 @@ public class RibbonController : ExcelRibbon
                 var (success, path) = await ServerSyncCommands.SaveScheduleAsync(schedule);
                 if (success)
                 {
-                    Services.ClearPendingOfflineSnapshot<ScheduleRecord>();
+                    OfflineSaveServices.ClearPendingOfflineSnapshot<ScheduleRecord>();
                     MessageBox.Show(
                         $"Successfully saved schedule for {schedule.DailyScheduleDate:yyyy-MM-dd}.\n\n• Storage: {path}",
                         "Save Success",
@@ -124,7 +124,7 @@ public class RibbonController : ExcelRibbon
                 {
                     MessageBox.Show(
                         "Failed to persist schedule to database or local storage.",
-                        "Persistence Error",
+                        "WorkbookHelper Error",
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Warning
                     );

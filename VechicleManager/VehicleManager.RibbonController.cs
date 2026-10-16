@@ -21,7 +21,7 @@ public class VehicleManagerRibbon : ExcelRibbon
           <ribbon>
             <tabs>
               <tab id='tabVehicleManager' label='Vehicle Manager'>
-                <group id='grpVehiclePersistence' label='Fleet Database Sync'>
+                <group id='grpVehicleWorkbookHelper' label='Fleet Database Sync'>
                   <button id='btnSaveVehicles' 
                           label='Save to System' 
                           size='large' 
@@ -73,7 +73,7 @@ public class VehicleManagerRibbon : ExcelRibbon
             return;
         }
 
-        // 2. BACKGROUND WORKER: Offload disk serialization and PostgreSQL persistence
+        // 2. BACKGROUND WORKER: Offload disk serialization and PostgreSQL WorkbookHelper
         Task.Run(async () =>
         {
             try
@@ -92,7 +92,7 @@ public class VehicleManagerRibbon : ExcelRibbon
                 {
                     MessageBox.Show(
                         "Failed to persist vehicles to PostgreSQL or local storage.",
-                        "Persistence Error",
+                        "WorkbookHelper Error",
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Warning
                     );

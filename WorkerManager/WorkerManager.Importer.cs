@@ -2,24 +2,29 @@
 
 using System;
 using System.Collections.Generic;
-using System.Linq;
+using SKSB_App.Core.DialogBoxes;
 using SKSB_App.Core.ErpBridge;
 using SKSB_App.Core.Types;
-
-public class WorkerSkippedEntry
-{
-    public int ExcelRowNumber { get; set; }
-    public string RawCode { get; set; } = string.Empty;
-    public string Name { get; set; } = string.Empty;
-    public string Reason { get; set; } = string.Empty;
-}
 
 public class WorkerImportResult
 {
     public List<WorkerRecord> ImportedWorkers { get; set; } = new();
-    public List<WorkerSkippedEntry> SkippedErrors { get; set; } = new();
+    public List<ImportSkippedRecord> SkippedErrors { get; set; } = new();
     public int OfficeFilteredCount { get; set; } = 0;
     public int TotalRowsProcessed { get; set; } = 0;
+
+    /// <summary>
+    /// Projects this domain result into the Core Generic Report.
+    /// </summary>
+    public ImportSummaryReport ToGenericReport() => new()
+    {
+        SourceSystemName = "SQL Payroll",
+        EntityLabel = "worker(s)",
+        SuccessfullyImportedCount = ImportedWorkers.Count,
+        FilteredExclusionCount = OfficeFilteredCount,
+        FilterRuleDescription = "Only synced personnel where Department = 'PROJECT' (Office / Admin staff excluded).",
+        SkippedErrors = SkippedErrors
+    };
 }
 
 public static class Importer
@@ -32,7 +37,7 @@ public static class Importer
         for (int r = 0; r < doc.Rows.Count; r++)
         {
             var row = doc.Rows[r];
-            int excelRowNum = r + 2; // Row 1 is header, data begins on Row 2
+            int excelRowNum = r + 2;
             result.TotalRowsProcessed++;
 
             string dept = row.GetString("Department");
@@ -47,47 +52,44 @@ public static class Importer
                     dept.Equals("MANAGEMENT", StringComparison.OrdinalIgnoreCase))
                 {
                     result.OfficeFilteredCount++;
-                    continue; // Expected exclusion, not an error
+                    continue;
                 }
             }
 
             // 2. Validate Worker ID / Code
             if (string.IsNullOrWhiteSpace(rawCode))
             {
-                result.SkippedErrors.Add(new WorkerSkippedEntry
+                result.SkippedErrors.Add(new ImportSkippedRecord
                 {
                     ExcelRowNumber = excelRowNum,
-                    RawCode = "[Empty]",
-                    Name = name,
+                    Identifier = "[Empty]",
+                    NameOrTitle = name,
                     Reason = "Missing Worker Code / ID."
                 });
                 continue;
             }
 
             long workerId = row.GetLong("Code");
-            if (workerId <= 0)
+            if (workerId <= 0 && (!long.TryParse(rawCode, out workerId) || workerId <= 0))
             {
-                if (!long.TryParse(rawCode, out workerId) || workerId <= 0)
+                result.SkippedErrors.Add(new ImportSkippedRecord
                 {
-                    result.SkippedErrors.Add(new WorkerSkippedEntry
-                    {
-                        ExcelRowNumber = excelRowNum,
-                        RawCode = rawCode,
-                        Name = name,
-                        Reason = $"Invalid non-numeric Worker Code '{rawCode}'."
-                    });
-                    continue;
-                }
+                    ExcelRowNumber = excelRowNum,
+                    Identifier = rawCode,
+                    NameOrTitle = name,
+                    Reason = $"Invalid non-numeric Worker Code '{rawCode}'."
+                });
+                continue;
             }
 
             // 3. Validate Name
             if (string.IsNullOrWhiteSpace(name))
             {
-                result.SkippedErrors.Add(new WorkerSkippedEntry
+                result.SkippedErrors.Add(new ImportSkippedRecord
                 {
                     ExcelRowNumber = excelRowNum,
-                    RawCode = rawCode,
-                    Name = "[Empty]",
+                    Identifier = rawCode,
+                    NameOrTitle = "[Empty]",
                     Reason = $"Worker ID {workerId} has no name specified."
                 });
                 continue;
@@ -113,7 +115,6 @@ public static class Importer
             if (string.IsNullOrWhiteSpace(phone)) phone = row.GetString("Handphone");
             if (string.IsNullOrWhiteSpace(phone)) phone = row.GetString("Phone");
 
-            // 5. Employment & Resignation Dates
             DateOnly joinDate = row.GetDateOnly("Join Date")
                 ?? row.GetDateOnly("JoinDate")
                 ?? DateOnly.FromDateTime(DateTime.Today);

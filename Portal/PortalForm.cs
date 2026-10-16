@@ -1,6 +1,6 @@
 ﻿namespace SKSB_App.Portal;
 
-using SKSB_App.Core.FileManager.Constants;
+using SKSB_App.Core.FileManager.Structure;
 using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;

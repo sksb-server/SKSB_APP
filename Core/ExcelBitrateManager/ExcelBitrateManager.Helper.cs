@@ -6,7 +6,7 @@ using System.Threading.Tasks;
 using System.Windows.Forms;
 using Microsoft.Win32;
 
-namespace SKSB_App.Core.ExcelManager;
+namespace SKSB_App.Core.ExcelBitrateManager;
 
 public enum Bitness
 {

@@ -3,12 +3,12 @@
 using ExcelDna.Integration;
 using SKSB_App.Core.DialogBoxes;
 using SKSB_App.Core.FileManager;
-using SKSB_App.Core.FileManager.Constants;
+using SKSB_App.Core.FileManager.Structure;
 using SKSB_App.Core.TemplateEditor;
 using SKSB_App.Core.ServerManager;
 using SKSB_App.Core.Services;
 using SKSB_App.Core.Types;
-using SKSB_App.Core.WorkbookManager;
+using SKSB_App.Core.WorkbookHelper;
 using System;
 using System.Collections.Generic;
 using System.IO;
@@ -94,13 +94,13 @@ public class Events : IExcelAddIn
                 if (saved)
                 {
                     // Success: Clear any offline stash if it existed
-                    Services.ClearPendingOfflineSnapshot<List<VehicleRecord>>();
+                    OfflineSaveServices.ClearPendingOfflineSnapshot<List<VehicleRecord>>();
                     wb.Saved = true;
                     return;
                 }
 
                 // Failed: Show 3-way conflict dialog
-                using var dialog = new ExitSyncConflictDialog(
+                using var dialog = new ExitSyncConflict(
                     "Vehicle Manager",
                     "Could not persist records to the PostgreSQL server (connection timeout or schema conflict)."
                 );
@@ -117,7 +117,7 @@ public class Events : IExcelAddIn
                         var currentRecords = SheetMapper.ExtractVehicleRecords();
                         if (currentRecords != null && currentRecords.Count > 0)
                         {
-                            Services.SaveOfflineSnapshot(currentRecords);
+                            OfflineSaveServices.SaveOfflineSnapshot(currentRecords);
                             MessageBox.Show(
                                 "Your records have been safely saved to local disk.\n\n" +
                                 "The system will automatically detect this file and prompt to commit it to the server when you next start.",
@@ -159,15 +159,15 @@ public class Events : IExcelAddIn
             // -------------------------------------------------------------
             // STARTUP RECONCILIATION: Check for pending offline file
             // -------------------------------------------------------------
-            if (Services.HasPendingOfflineSnapshot<List<VehicleRecord>>())
+            if (OfflineSaveServices.HasPendingOfflineSnapshot<List<VehicleRecord>>())
             {
-                var pendingRecords = Services.LoadPendingOfflineSnapshot<List<VehicleRecord>>();
+                var pendingRecords = OfflineSaveServices.LoadPendingOfflineSnapshot<List<VehicleRecord>>();
                 DateTime localOfflineTime = File.GetLastWriteTime(
                     Folder.Data.GetFilePath("List`1_PendingUpload.json")
                 );
 
                 // Check server's latest timestamp
-                DateTime? serverLastUpdate = Services.GetServerLatestTimestamp("vehicle_master");
+                DateTime? serverLastUpdate = OfflineSaveServices.GetServerLatestTimestamp("vehicle_master");
 
                 bool canCommit = true;
 
@@ -198,7 +198,7 @@ public class Events : IExcelAddIn
                                                                  .GetResult();
                     if (success)
                     {
-                        Services.ClearPendingOfflineSnapshot<List<VehicleRecord>>();
+                        OfflineSaveServices.ClearPendingOfflineSnapshot<List<VehicleRecord>>();
                         SheetMapper.PopulateWorksheet(pendingRecords);
                         WorkbookSession.ShowStatusConfirmation($"Committed {count} offline records to server.");
                         return;
@@ -207,7 +207,7 @@ public class Events : IExcelAddIn
                 else
                 {
                     // User chose 'No': Clear pending offline file and fall through to regular server load
-                    Services.ClearPendingOfflineSnapshot<List<VehicleRecord>>();
+                    OfflineSaveServices.ClearPendingOfflineSnapshot<List<VehicleRecord>>();
                 }
             }
 
@@ -235,7 +235,7 @@ public class Events : IExcelAddIn
         bool success = ServerSyncCommands.SaveVehiclesSilent();
         if (success)
         {
-            Services.ClearPendingOfflineSnapshot<List<VehicleRecord>>();
+            OfflineSaveServices.ClearPendingOfflineSnapshot<List<VehicleRecord>>();
             MessageBox.Show("Save completed successfully.", "SKSB Vehicle Manager", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
     }

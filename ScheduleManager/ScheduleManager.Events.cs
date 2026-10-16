@@ -6,12 +6,12 @@ using System.Windows.Forms;
 using ExcelDna.Integration;
 using SKSB_App.Core.DialogBoxes;
 using SKSB_App.Core.FileManager;
-using SKSB_App.Core.FileManager.Constants;
+using SKSB_App.Core.FileManager.Structure;
 using SKSB_App.Core.ServerManager;
 using SKSB_App.Core.Services;
 using SKSB_App.Core.TemplateEditor;
 using SKSB_App.Core.Types;
-using SKSB_App.Core.WorkbookManager;
+using SKSB_App.Core.WorkbookHelper;
 
 public class Events : IExcelAddIn
 {
@@ -108,13 +108,13 @@ public class Events : IExcelAddIn
 
                 if (saved)
                 {
-                    Services.ClearPendingOfflineSnapshot<ScheduleRecord>();
+                    OfflineSaveServices.ClearPendingOfflineSnapshot<ScheduleRecord>();
                     wb.Saved = true;
                     return;
                 }
 
                 // Failed: Show 3-way conflict dialog
-                using var dialog = new ExitSyncConflictDialog(
+                using var dialog = new ExitSyncConflict(
                     "Schedule Manager",
                     $"Could not persist the schedule for {RibbonController.CurrentScheduleDate:yyyy-MM-dd} to the PostgreSQL server."
                 );
@@ -129,7 +129,7 @@ public class Events : IExcelAddIn
                         var currentSchedule = SheetMapper.ExtractScheduleRecord(RibbonController.CurrentScheduleDate);
                         if (currentSchedule != null)
                         {
-                            Services.SaveOfflineSnapshot(currentSchedule);
+                            OfflineSaveServices.SaveOfflineSnapshot(currentSchedule);
                             MessageBox.Show(
                                 $"Schedule for {RibbonController.CurrentScheduleDate:yyyy-MM-dd} saved locally to offline staging.",
                                 "Saved Offline",
@@ -167,14 +167,14 @@ public class Events : IExcelAddIn
             // -------------------------------------------------------------
             // STARTUP RECONCILIATION: Check for pending offline file
             // -------------------------------------------------------------
-            if (Services.HasPendingOfflineSnapshot<ScheduleRecord>())
+            if (OfflineSaveServices.HasPendingOfflineSnapshot<ScheduleRecord>())
             {
-                var pendingSchedule = Services.LoadPendingOfflineSnapshot<ScheduleRecord>();
+                var pendingSchedule = OfflineSaveServices.LoadPendingOfflineSnapshot<ScheduleRecord>();
                 DateTime localOfflineTime = File.GetLastWriteTime(
                     Folder.Data.GetFilePath("ScheduleRecord_PendingUpload.json")
                 );
 
-                DateTime? serverLastUpdate = Services.GetServerLatestTimestamp("daily_schedule");
+                DateTime? serverLastUpdate = OfflineSaveServices.GetServerLatestTimestamp("daily_schedule");
                 bool canCommit = true;
 
                 if (serverLastUpdate.HasValue && serverLastUpdate.Value > localOfflineTime)
@@ -200,7 +200,7 @@ public class Events : IExcelAddIn
                                                          .GetResult();
                     if (success)
                     {
-                        Services.ClearPendingOfflineSnapshot<ScheduleRecord>();
+                        OfflineSaveServices.ClearPendingOfflineSnapshot<ScheduleRecord>();
                         RibbonController.SetScheduleDate(pendingSchedule.DailyScheduleDate);
                         SheetMapper.PopulateScheduleSheets(pendingSchedule);
                         WorkbookSession.ShowStatusConfirmation($"Committed offline schedule for {pendingSchedule.DailyScheduleDate} to server.");
@@ -209,7 +209,7 @@ public class Events : IExcelAddIn
                 }
                 else
                 {
-                    Services.ClearPendingOfflineSnapshot<ScheduleRecord>();
+                    OfflineSaveServices.ClearPendingOfflineSnapshot<ScheduleRecord>();
                 }
             }
 
@@ -237,7 +237,7 @@ public class Events : IExcelAddIn
         bool success = ServerSyncCommands.SaveScheduleSilent(RibbonController.CurrentScheduleDate);
         if (success)
         {
-            Services.ClearPendingOfflineSnapshot<ScheduleRecord>();
+            OfflineSaveServices.ClearPendingOfflineSnapshot<ScheduleRecord>();
             MessageBox.Show(
                 $"Schedule for {RibbonController.CurrentScheduleDate:yyyy-MM-dd} saved successfully.",
                 "SKSB Schedule Manager",

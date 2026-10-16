@@ -3,7 +3,7 @@
 using ExcelDna.Integration;
 using SKSB_App.Core.DialogBoxes;
 using SKSB_App.Core.Types;
-using SKSB_App.Core.WorkbookManager;
+using SKSB_App.Core.WorkbookHelper;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -20,10 +20,6 @@ public static class SheetMapper
     private static readonly string[] VehicleLicenseSheetAliases = { "Vehicle Licenses", "Vehicle_Licenses", "Worker_License", "Staff_License" };
     private static readonly string[] SkillLicenseSheetAliases = { "Skill Licenses", "Skill_Licenses", "Worker_Skill", "Staff_Skill" };
 
-    /// <summary>
-    /// Performs full extraction and returns records alongside separated lists of Errors and Warnings.
-    /// Does not pop up any dialogs directly.
-    /// </summary>
     public static (List<WorkerRecord> Records, List<string> Errors, List<string> Warnings) ExtractWorkerRecordsWithDiagnostics()
     {
         var result = new List<WorkerRecord>();
@@ -36,9 +32,9 @@ public static class SheetMapper
 
         var allowedLicenseTypes = FetchAllowedSkillLicenseTypes();
 
-        string masterSheetName = WorkbookSession.ResolveSheetName(MasterSheetAliases, "All Workers");
-        string vLicSheetName = WorkbookSession.ResolveSheetName(VehicleLicenseSheetAliases, "Vehicle Licenses");
-        string sLicSheetName = WorkbookSession.ResolveSheetName(SkillLicenseSheetAliases, "Skill Licenses");
+        string masterSheetName = SheetOps.ResolveSheetName(MasterSheetAliases, "All Workers");
+        string vLicSheetName = SheetOps.ResolveSheetName(VehicleLicenseSheetAliases, "Vehicle Licenses");
+        string sLicSheetName = SheetOps.ResolveSheetName(SkillLicenseSheetAliases, "Skill Licenses");
 
         // -------------------------------------------------------------
         // 1. ALL WORKERS (Columns A to H)
@@ -52,13 +48,12 @@ public static class SheetMapper
             for (int r = 1; r <= rows; r++)
             {
                 int excelRow = r + 1;
-                string rawIdStr = CleanCellString(masterGrid[r, 1]);
-                string workerName = CleanCellString(masterGrid[r, 2]);
-                string rawNric = CleanCellString(masterGrid[r, 3]);
-                string passport = CleanCellString(masterGrid[r, 4]);
-                string phone = CleanCellString(masterGrid[r, 5]);
+                string rawIdStr = DataFormatting.CleanString(masterGrid[r, 1]);
+                string workerName = DataFormatting.CleanString(masterGrid[r, 2]);
+                string rawNric = DataFormatting.CleanString(masterGrid[r, 3]);
+                string passport = DataFormatting.CleanString(masterGrid[r, 4]);
+                string phone = DataFormatting.CleanString(masterGrid[r, 5]);
 
-                // Completely empty row: skip
                 if (string.IsNullOrWhiteSpace(rawIdStr) &&
                     string.IsNullOrWhiteSpace(workerName) &&
                     string.IsNullOrWhiteSpace(rawNric) &&
@@ -70,14 +65,12 @@ public static class SheetMapper
 
                 bool hasRowError = false;
 
-                // Rule 1: Worker Name exists but Worker ID is missing
                 if (string.IsNullOrWhiteSpace(rawIdStr) && !string.IsNullOrWhiteSpace(workerName))
                 {
                     validationErrors.Add($"• Row {excelRow} [{masterSheetName}]: Worker '{workerName}' is missing a Worker ID.");
                     hasRowError = true;
                 }
 
-                // Rule 2: Invalid or non-numeric Worker ID
                 long workerId = 0;
                 if (!string.IsNullOrWhiteSpace(rawIdStr))
                 {
@@ -88,14 +81,12 @@ public static class SheetMapper
                     }
                 }
 
-                // Rule 3: Worker ID exists but Worker Name is missing
                 if (string.IsNullOrWhiteSpace(workerName))
                 {
                     validationErrors.Add($"• Row {excelRow} [{masterSheetName}]: Worker ID {(workerId > 0 ? workerId.ToString() : rawIdStr)} has no Worker Name specified.");
                     hasRowError = true;
                 }
 
-                // Rule 4: Duplicate Worker ID check
                 if (workerId > 0 && workerLookup.TryGetValue(workerId, out var existingWorker))
                 {
                     if (!existingWorker.WorkerDetails.WorkerName.Equals(workerName, StringComparison.OrdinalIgnoreCase))
@@ -109,7 +100,6 @@ public static class SheetMapper
                     hasRowError = true;
                 }
 
-                // Identification warnings
                 long nric = 0;
                 if (!string.IsNullOrWhiteSpace(rawNric))
                 {
@@ -125,11 +115,11 @@ public static class SheetMapper
                     validationWarnings.Add($"• Row {excelRow} [{masterSheetName}]: Worker ID {workerId} ('{workerName}') has neither an NRIC nor a Passport recorded.");
                 }
 
-                DateOnly joinDate = ParseExcelDate(masterGrid[r, 6]);
+                DateOnly joinDate = DataFormatting.ParseDate(masterGrid[r, 6]);
                 if (joinDate == default) joinDate = DateOnly.FromDateTime(DateTime.Today);
 
                 DateOnly? resignDate = null;
-                DateOnly parsedResign = ParseExcelDate(masterGrid[r, 7]);
+                DateOnly parsedResign = DataFormatting.ParseDate(masterGrid[r, 7]);
                 if (parsedResign != default)
                 {
                     if (parsedResign < joinDate)
@@ -140,7 +130,7 @@ public static class SheetMapper
                     resignDate = parsedResign;
                 }
 
-                string statusStr = CleanCellString(masterGrid[r, 8]);
+                string statusStr = DataFormatting.CleanString(masterGrid[r, 8]);
                 ContractStatus status = Enum.TryParse(statusStr, true, out ContractStatus parsedStatus)
                     ? parsedStatus
                     : ContractStatus.Active;
@@ -176,7 +166,7 @@ public static class SheetMapper
         }
 
         // -------------------------------------------------------------
-        // PRE-CALCULATE MAXIMUM EXISTING LICENSE IDS FOR AUTO-INCREMENT
+        // PRE-CALCULATE MAXIMUM EXISTING LICENSE IDS
         // -------------------------------------------------------------
         long maxVehicleLicId = 0;
         long maxSkillLicId = 0;
@@ -222,12 +212,11 @@ public static class SheetMapper
             for (int r = 1; r <= rows; r++)
             {
                 int excelRow = r + 1;
-                string rawLicIdStr = CleanCellString(vLicGrid[r, 1]);
-                string rawWorkerIdStr = CleanCellString(vLicGrid[r, 2]);
-                string rawWorkerName = CleanCellString(vLicGrid[r, 3]);
-                string licClassStr = CleanCellString(vLicGrid[r, 4]);
+                string rawLicIdStr = DataFormatting.CleanString(vLicGrid[r, 1]);
+                string rawWorkerIdStr = DataFormatting.CleanString(vLicGrid[r, 2]);
+                string rawWorkerName = DataFormatting.CleanString(vLicGrid[r, 3]);
+                string licClassStr = DataFormatting.CleanString(vLicGrid[r, 4]);
 
-                // Completely empty row: skip
                 if (string.IsNullOrWhiteSpace(rawLicIdStr) &&
                     string.IsNullOrWhiteSpace(rawWorkerIdStr) &&
                     string.IsNullOrWhiteSpace(rawWorkerName) &&
@@ -239,7 +228,6 @@ public static class SheetMapper
                 bool hasRowError = false;
                 var rowWarnings = new List<string>();
 
-                // A. License ID Check & Auto-Fill
                 long licId = 0;
                 if (string.IsNullOrWhiteSpace(rawLicIdStr) || !long.TryParse(rawLicIdStr, out licId) || licId <= 0)
                 {
@@ -257,7 +245,6 @@ public static class SheetMapper
                     }
                 }
 
-                // B. Worker ID Check
                 long workerId = 0;
                 WorkerRecord? targetWorker = null;
                 if (string.IsNullOrWhiteSpace(rawWorkerIdStr) || !long.TryParse(rawWorkerIdStr, out workerId) || workerId <= 0)
@@ -271,7 +258,6 @@ public static class SheetMapper
                     hasRowError = true;
                 }
 
-                // C. Worker Name Mismatch Check
                 if (targetWorker != null && !string.IsNullOrWhiteSpace(rawWorkerName))
                 {
                     string expectedName = targetWorker.WorkerDetails.WorkerName;
@@ -284,7 +270,6 @@ public static class SheetMapper
                     }
                 }
 
-                // D. License Class Check
                 LicenseClass licClass = LicenseClass.None;
                 if (string.IsNullOrWhiteSpace(licClassStr) || !Enum.TryParse(licClassStr, true, out licClass) || licClass == LicenseClass.None)
                 {
@@ -292,10 +277,9 @@ public static class SheetMapper
                     hasRowError = true;
                 }
 
-                // E. Date Defaults (Always runs regardless of errors)
-                DateOnly parsedRenew = ParseExcelDate(vLicGrid[r, 5]);
-                DateOnly parsedExpiry = ParseExcelDate(vLicGrid[r, 6]);
-                string statusStr = CleanCellString(vLicGrid[r, 7]);
+                DateOnly parsedRenew = DataFormatting.ParseDate(vLicGrid[r, 5]);
+                DateOnly parsedExpiry = DataFormatting.ParseDate(vLicGrid[r, 6]);
+                string statusStr = DataFormatting.CleanString(vLicGrid[r, 7]);
 
                 DateOnly renewDate;
                 DateOnly expiryDate;
@@ -333,7 +317,6 @@ public static class SheetMapper
                     hasRowError = true;
                 }
 
-                // F. Status Defaults
                 LicenseStatus licStatus;
                 if (!string.IsNullOrWhiteSpace(statusStr) && Enum.TryParse(statusStr, true, out LicenseStatus parsedStatus))
                 {
@@ -381,12 +364,11 @@ public static class SheetMapper
             for (int r = 1; r <= rows; r++)
             {
                 int excelRow = r + 1;
-                string rawLicIdStr = CleanCellString(sLicGrid[r, 1]);
-                string rawWorkerIdStr = CleanCellString(sLicGrid[r, 2]);
-                string rawWorkerName = CleanCellString(sLicGrid[r, 3]);
-                string skillType = CleanCellString(sLicGrid[r, 4]);
+                string rawLicIdStr = DataFormatting.CleanString(sLicGrid[r, 1]);
+                string rawWorkerIdStr = DataFormatting.CleanString(sLicGrid[r, 2]);
+                string rawWorkerName = DataFormatting.CleanString(sLicGrid[r, 3]);
+                string skillType = DataFormatting.CleanString(sLicGrid[r, 4]);
 
-                // Skip completely blank rows
                 if (string.IsNullOrWhiteSpace(rawLicIdStr) &&
                     string.IsNullOrWhiteSpace(rawWorkerIdStr) &&
                     string.IsNullOrWhiteSpace(rawWorkerName) &&
@@ -398,7 +380,6 @@ public static class SheetMapper
                 bool hasRowError = false;
                 var rowWarnings = new List<string>();
 
-                // A. License ID Check & Auto-Fill
                 long licId = 0;
                 if (string.IsNullOrWhiteSpace(rawLicIdStr) || !long.TryParse(rawLicIdStr, out licId) || licId <= 0)
                 {
@@ -416,7 +397,6 @@ public static class SheetMapper
                     }
                 }
 
-                // B. Worker ID Check
                 long workerId = 0;
                 WorkerRecord? targetWorker = null;
                 if (string.IsNullOrWhiteSpace(rawWorkerIdStr) || !long.TryParse(rawWorkerIdStr, out workerId) || workerId <= 0)
@@ -430,7 +410,6 @@ public static class SheetMapper
                     hasRowError = true;
                 }
 
-                // C. Worker Name Check
                 if (targetWorker != null && !string.IsNullOrWhiteSpace(rawWorkerName))
                 {
                     string expectedName = targetWorker.WorkerDetails.WorkerName;
@@ -443,7 +422,6 @@ public static class SheetMapper
                     }
                 }
 
-                // D. License Type Check
                 if (string.IsNullOrWhiteSpace(skillType))
                 {
                     validationErrors.Add($"• Row {excelRow} [{sLicSheetName}]: License ID {licId} has no License Type specified.");
@@ -455,10 +433,9 @@ public static class SheetMapper
                     hasRowError = true;
                 }
 
-                // E. Date Defaults (Always runs regardless of errors)
-                DateOnly parsedRenew = ParseExcelDate(sLicGrid[r, 5]);
-                DateOnly parsedExpiry = ParseExcelDate(sLicGrid[r, 6]);
-                string statusStr = CleanCellString(sLicGrid[r, 7]);
+                DateOnly parsedRenew = DataFormatting.ParseDate(sLicGrid[r, 5]);
+                DateOnly parsedExpiry = DataFormatting.ParseDate(sLicGrid[r, 6]);
+                string statusStr = DataFormatting.CleanString(sLicGrid[r, 7]);
 
                 DateOnly renewDate;
                 DateOnly expiryDate;
@@ -496,7 +473,6 @@ public static class SheetMapper
                     hasRowError = true;
                 }
 
-                // F. Status Defaults
                 LicenseStatus licStatus;
                 if (!string.IsNullOrWhiteSpace(statusStr) && Enum.TryParse(statusStr, true, out LicenseStatus parsedStatus))
                 {
@@ -535,20 +511,15 @@ public static class SheetMapper
         return (result, validationErrors, validationWarnings);
     }
 
-    /// <summary>
-    /// Extraction for Ribbon usage: Presents the ValidationSummaryDialog if errors or warnings exist.
-    /// Returns empty list if canceled or if blocking errors exist.
-    /// </summary>
     public static List<WorkerRecord> ExtractWorkerRecords()
     {
         var (records, errors, warnings) = ExtractWorkerRecordsWithDiagnostics();
 
         if (errors.Count > 0 || warnings.Count > 0)
         {
-            using var dlg = new ValidationSummaryDialog("Worker Manager", errors, warnings);
+            using var dlg = new ValidationSummary("Worker Manager", errors, warnings);
             dlg.ShowDialog();
 
-            // If there were blocking errors, or user chose Cancel, abort the save
             if (errors.Count > 0 || dlg.Action != ValidationDialogAction.ProceedAnyway)
             {
                 return new List<WorkerRecord>();
@@ -562,17 +533,14 @@ public static class SheetMapper
     {
         if (workerList == null) return;
 
-        // -----------------------------------------------------------------
-        // 1. SORT: Active & Suspended on Top, Resigned at the Bottom
-        // -----------------------------------------------------------------
         var sortedList = workerList
             .OrderBy(w => w.WorkerDetails.ContractStatus == ContractStatus.Resigned ? 1 : 0)
             .ThenBy(w => w.WorkerID)
             .ToList();
 
-        string targetMaster = WorkbookSession.ResolveSheetName(MasterSheetAliases, "All Workers");
-        string targetVLic = WorkbookSession.ResolveSheetName(VehicleLicenseSheetAliases, "Vehicle Licenses");
-        string targetSLic = WorkbookSession.ResolveSheetName(SkillLicenseSheetAliases, "Skill Licenses");
+        string targetMaster = SheetOps.ResolveSheetName(MasterSheetAliases, "All Workers");
+        string targetVLic = SheetOps.ResolveSheetName(VehicleLicenseSheetAliases, "Vehicle Licenses");
+        string targetSLic = SheetOps.ResolveSheetName(SkillLicenseSheetAliases, "Skill Licenses");
 
         object initialActiveSheet = XlCall.Excel(XlCall.xlfGetDocument, 1);
 
@@ -582,18 +550,14 @@ public static class SheetMapper
 
             int rowCount = sortedList.Count;
 
-            // -------------------------------------------------------------
-            // 2. POPULATE & RESIZE ALL WORKERS (Columns A to H)
-            // -------------------------------------------------------------
+            // 1. ALL WORKERS
             XlCall.Excel(XlCall.xlcWorkbookSelect, new object[] { targetMaster });
-
             var clearMasterRef = new ExcelReference(1, 1000, 0, MasterColumnSpan - 1);
             clearMasterRef.SetValue(new object[1000, MasterColumnSpan]);
 
             if (rowCount > 0)
             {
                 object[,] masterOutput = new object[rowCount, MasterColumnSpan];
-
                 for (int i = 0; i < rowCount; i++)
                 {
                     var w = sortedList[i];
@@ -604,12 +568,10 @@ public static class SheetMapper
                     masterOutput[i, 2] = details.NRIC > 0 ? (object)details.NRIC : string.Empty;
                     masterOutput[i, 3] = details.Passport;
                     masterOutput[i, 4] = details.Phone;
-
                     masterOutput[i, 5] = details.JoinDate.ToDateTime(TimeOnly.MinValue).ToOADate();
                     masterOutput[i, 6] = details.ResignDate.HasValue
                         ? (object)details.ResignDate.Value.ToDateTime(TimeOnly.MinValue).ToOADate()
                         : string.Empty;
-
                     masterOutput[i, 7] = details.ContractStatus.ToString();
                 }
 
@@ -617,11 +579,9 @@ public static class SheetMapper
                 writeMasterRef.SetValue(masterOutput);
             }
 
-            ResizeWorksheetTable(targetMaster, rowCount, MasterColumnSpan);
+            DataFormatting.ResizeTable(targetMaster, rowCount, MasterColumnSpan);
 
-            // -------------------------------------------------------------
-            // 3. POPULATE VEHICLE LICENSES (Columns A to G)
-            // -------------------------------------------------------------
+            // 2. VEHICLE LICENSES
             var allVLicenses = new List<(WorkerRecord Worker, VehicleLicense Lic)>();
             foreach (var w in sortedList)
             {
@@ -654,11 +614,9 @@ public static class SheetMapper
                 writeVRef.SetValue(vOutput);
             }
 
-            ResizeWorksheetTable(targetVLic, allVLicenses.Count, VehicleLicenseColumnSpan);
+            DataFormatting.ResizeTable(targetVLic, allVLicenses.Count, VehicleLicenseColumnSpan);
 
-            // -------------------------------------------------------------
-            // 4. POPULATE SKILL LICENSES (Columns A to G)
-            // -------------------------------------------------------------
+            // 3. SKILL LICENSES
             var allSLicenses = new List<(WorkerRecord Worker, SkillLicense Lic)>();
             foreach (var w in sortedList)
             {
@@ -691,11 +649,8 @@ public static class SheetMapper
                 writeSRef.SetValue(sOutput);
             }
 
-            ResizeWorksheetTable(targetSLic, allSLicenses.Count, SkillLicenseColumnSpan);
+            DataFormatting.ResizeTable(targetSLic, allSLicenses.Count, SkillLicenseColumnSpan);
 
-            // -------------------------------------------------------------
-            // 5. AUTOMATICALLY RE-HYDRATE SkillLicenseTypesTable (Column I)
-            // -------------------------------------------------------------
             PopulateSkillLicenseTypesTable();
         }
         finally
@@ -721,7 +676,6 @@ public static class SheetMapper
 
         var distinctTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        // 1. Database Query Test
         try
         {
             var dbRecords = ServerSyncCommands.FetchSkillLicenseTypesFromDb();
@@ -740,12 +694,14 @@ public static class SheetMapper
             sb.AppendLine($"[1. Database Query FAILED]: {exDb.Message}");
         }
 
+        // Inside WorkerManager/SheetMapper.cs -> PopulateSkillLicenseTypesTable:
+
         // 2. Fallback to local snapshot
         if (distinctTypes.Count == 0)
         {
             try
             {
-                var localTypes = SKSB_App.Core.FileManager.Services.Load<List<SkillLicenseType>>();
+                var localTypes = SKSB_App.Core.FileManager.OfflineSaveServices.Load<List<SkillLicenseType>>();
                 int localCount = localTypes?.Count ?? 0;
                 sb.AppendLine($"[2. Local Snapshot Cache]: Found {localCount} record(s).");
                 if (localTypes != null)
@@ -768,7 +724,7 @@ public static class SheetMapper
         {
             try
             {
-                var localWorkers = SKSB_App.Core.FileManager.Services.Load<List<WorkerRecord>>();
+                var localWorkers = SKSB_App.Core.FileManager.OfflineSaveServices.Load<List<WorkerRecord>>();
                 sb.AppendLine($"[3. Harvest from Workers Cache]: Loaded {localWorkers?.Count ?? 0} worker(s).");
                 if (localWorkers != null)
                 {
@@ -801,7 +757,6 @@ public static class SheetMapper
             return (false, sb.ToString());
         }
 
-        // 4. Excel Table Target Resolution
         dynamic xlApp = ExcelDnaUtil.Application;
         dynamic wb = xlApp.ActiveWorkbook;
         dynamic? targetTable = null;
@@ -825,7 +780,7 @@ public static class SheetMapper
 
             if (targetTable == null)
             {
-                string sLicSheetName = WorkbookSession.ResolveSheetName(SkillLicenseSheetAliases, "Skill Licenses");
+                string sLicSheetName = SheetOps.ResolveSheetName(SkillLicenseSheetAliases, "Skill Licenses");
                 try
                 {
                     dynamic ws = wb.Sheets[sLicSheetName];
@@ -855,7 +810,6 @@ public static class SheetMapper
 
             sb.AppendLine($"[4. Excel Table]: Found table '{targetTable.Name}' on sheet '{foundSheetName}'.");
 
-            // 5. Populate and Resize Table
             string[] sortedTypes = distinctTypes.OrderBy(x => x).ToArray();
             int count = sortedTypes.Length;
 
@@ -864,7 +818,6 @@ public static class SheetMapper
             int headerRow = (int)headerRange.Row;
             int col = (int)headerRange.Column;
 
-            // Clear previous body cells
             try
             {
                 if (targetTable.DataBodyRange != null)
@@ -877,11 +830,9 @@ public static class SheetMapper
                 sb.AppendLine($"[Warning clearing body]: {exClr.Message}");
             }
 
-            // Resize table boundary
             dynamic newRange = sheet.Range[sheet.Cells[headerRow, col], sheet.Cells[headerRow + count, col]];
             targetTable.Resize(newRange);
 
-            // Write values
             object[,] matrix = new object[count, 1];
             for (int i = 0; i < count; i++) matrix[i, 0] = sortedTypes[i];
 
@@ -890,7 +841,6 @@ public static class SheetMapper
 
             sb.AppendLine($"[5. Writeback]: Successfully written {count} type(s) into {sheet.Name}!R{headerRow + 1}C{col}:R{headerRow + count}C{col}.");
 
-            // Update Name Manager definition
             try
             {
                 wb.Names.Add(Name: "LicenseTypesList", RefersTo: $"='{sheet.Name}'!R{headerRow + 1}C{col}:R{headerRow + count}C{col}", Visible: true);
@@ -914,37 +864,6 @@ public static class SheetMapper
         }
     }
 
-    /// <summary>
-    /// Adjusts the ListObject (Excel Table) boundary to fit the exact row and column count.
-    /// If count is 0, shrinks the table down to a single blank template row.
-    /// </summary>
-    private static void ResizeWorksheetTable(string sheetName, int dataRowCount, int columnSpan)
-    {
-        try
-        {
-            dynamic xlApp = ExcelDnaUtil.Application;
-            dynamic ws = xlApp.ActiveWorkbook.Sheets[sheetName];
-            if (ws == null || ws.ListObjects.Count == 0) return;
-
-            dynamic table = ws.ListObjects[1]; // First table on the worksheet
-
-            int headerRow = table.HeaderRowRange.Row;
-            int startCol = table.HeaderRowRange.Column;
-            int endCol = startCol + columnSpan - 1;
-
-            // An Excel table must contain at least 1 data row beneath headers
-            int effectiveDataRows = Math.Max(1, dataRowCount);
-            int endRow = headerRow + effectiveDataRows;
-
-            dynamic newRange = ws.Range[ws.Cells[headerRow, startCol], ws.Cells[endRow, endCol]];
-            table.Resize(newRange);
-        }
-        catch (Exception ex)
-        {
-            System.Diagnostics.Debug.WriteLine($"[ResizeWorksheetTable Warning] Could not resize table on '{sheetName}': {ex.Message}");
-        }
-    }
-
     private static HashSet<string> FetchAllowedSkillLicenseTypes()
     {
         var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -953,7 +872,6 @@ public static class SheetMapper
             dynamic xlApp = ExcelDnaUtil.Application;
             dynamic wb = xlApp.ActiveWorkbook;
 
-            // 1. Direct Table Lookup by Name across sheets
             dynamic? targetTable = null;
             foreach (dynamic ws in wb.Sheets)
             {
@@ -965,10 +883,9 @@ public static class SheetMapper
                 catch { }
             }
 
-            // Fallback: Check 'Skill Licenses' sheet explicitly
             if (targetTable == null)
             {
-                string sLicSheetName = WorkbookSession.ResolveSheetName(SkillLicenseSheetAliases, "Skill Licenses");
+                string sLicSheetName = SheetOps.ResolveSheetName(SkillLicenseSheetAliases, "Skill Licenses");
                 try
                 {
                     dynamic ws = wb.Sheets[sLicSheetName];
@@ -985,14 +902,12 @@ public static class SheetMapper
                 catch { }
             }
 
-            // Extract values directly from DataBodyRange.Value2 (Safest for COM)
             if (targetTable != null && targetTable.DataBodyRange != null)
             {
                 object rawBody = targetTable.DataBodyRange.Value2;
                 PopulateSetFromObject(set, rawBody);
             }
 
-            // 2. Fallback: Excel Evaluate structured reference
             if (set.Count == 0)
             {
                 try
@@ -1003,7 +918,6 @@ public static class SheetMapper
                 catch { }
             }
 
-            // 3. Fallback: Name Manager =LicenseTypesList
             if (set.Count == 0)
             {
                 try
@@ -1014,10 +928,7 @@ public static class SheetMapper
                 catch { }
             }
         }
-        catch (Exception ex)
-        {
-            System.Diagnostics.Debug.WriteLine($"[FetchAllowedSkillLicenseTypes Warning] {ex.Message}");
-        }
+        catch { }
 
         return set;
     }
@@ -1026,7 +937,6 @@ public static class SheetMapper
     {
         if (obj == null) return;
 
-        // If Excel returned a COM Range, extract Value2
         try
         {
             if (obj.GetType().Name.Contains("ComObject") || obj.GetType().Name.Contains("Range"))
@@ -1073,7 +983,6 @@ public static class SheetMapper
         dynamic xlApp = ExcelDnaUtil.Application;
         dynamic wb = xlApp.ActiveWorkbook;
 
-        // 1. Locate SkillLicenseTypesTable
         dynamic? targetTable = null;
         foreach (dynamic ws in wb.Sheets)
         {
@@ -1085,10 +994,9 @@ public static class SheetMapper
             catch { }
         }
 
-        // Fallback: check on 'Skill Licenses' sheet
         if (targetTable == null)
         {
-            string sLicSheetName = WorkbookSession.ResolveSheetName(SkillLicenseSheetAliases, "Skill Licenses");
+            string sLicSheetName = SheetOps.ResolveSheetName(SkillLicenseSheetAliases, "Skill Licenses");
             try
             {
                 dynamic ws = wb.Sheets[sLicSheetName];
@@ -1112,8 +1020,6 @@ public static class SheetMapper
             int headerRow = (int)headerRange.Row;
             int col = (int)headerRange.Column;
 
-            // CRITICAL FIX: Scan the column directly beneath the header (down to 100 rows)
-            // This captures all entries even if Excel hasn't formally expanded DataBodyRange yet!
             try
             {
                 dynamic scanRange = sheet.Range[sheet.Cells[headerRow + 1, col], sheet.Cells[headerRow + 100, col]];
@@ -1124,7 +1030,7 @@ public static class SheetMapper
                     int rCount = colGrid.GetLength(0);
                     for (int r = 1; r <= rCount; r++)
                     {
-                        string val = CleanCellString(colGrid[r, 1]);
+                        string val = DataFormatting.CleanString(colGrid[r, 1]);
                         if (!string.IsNullOrWhiteSpace(val) && !val.StartsWith("#") && !val.Equals("System.__ComObject", StringComparison.OrdinalIgnoreCase))
                         {
                             distinctTypes.Add(val);
@@ -1132,14 +1038,10 @@ public static class SheetMapper
                     }
                 }
             }
-            catch (Exception exScan)
-            {
-                System.Diagnostics.Debug.WriteLine($"[ExtractSkillLicenseTypes Column Scan Error] {exScan.Message}");
-            }
+            catch { }
         }
 
-        // 2. Also harvest from Column D of 'Skill Licenses' to ensure any license assigned to a worker is preserved
-        string skillSheetName = WorkbookSession.ResolveSheetName(SkillLicenseSheetAliases, "Skill Licenses");
+        string skillSheetName = SheetOps.ResolveSheetName(SkillLicenseSheetAliases, "Skill Licenses");
         try
         {
             dynamic ws = wb.Sheets[skillSheetName];
@@ -1149,7 +1051,7 @@ public static class SheetMapper
                 int rCount = grid.GetLength(0);
                 for (int r = 1; r <= rCount; r++)
                 {
-                    string val = CleanCellString(grid[r, 1]);
+                    string val = DataFormatting.CleanString(grid[r, 1]);
                     if (!string.IsNullOrWhiteSpace(val) && !val.StartsWith("#") && !val.Equals("System.__ComObject", StringComparison.OrdinalIgnoreCase))
                     {
                         distinctTypes.Add(val);
@@ -1159,7 +1061,6 @@ public static class SheetMapper
         }
         catch { }
 
-        // Package into entities
         var result = new List<SkillLicenseType>();
         long id = 1;
         foreach (var type in distinctTypes.OrderBy(x => x))
@@ -1172,17 +1073,5 @@ public static class SheetMapper
         }
 
         return result;
-    }
-
-    private static string CleanCellString(object? cell) =>
-        (cell == null || cell is ExcelEmpty || cell is ExcelMissing || cell is ExcelError)
-            ? string.Empty
-            : cell.ToString()?.Trim() ?? string.Empty;
-
-    private static DateOnly ParseExcelDate(object? cell)
-    {
-        if (cell is double d) return DateOnly.FromDateTime(DateTime.FromOADate(d));
-        if (DateTime.TryParse(CleanCellString(cell), out DateTime dt)) return DateOnly.FromDateTime(dt);
-        return default;
     }
 }

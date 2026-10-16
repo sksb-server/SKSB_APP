@@ -17,7 +17,7 @@ public static class ServerSyncCommands
                 return false;
             }
 
-            string snapshotPath = Services.SaveAsync(schedule, writeToDatabase: true)
+            string snapshotPath = OfflineSaveServices.SaveAsync(schedule, writeToDatabase: true)
                                           .GetAwaiter()
                                           .GetResult();
 
@@ -34,7 +34,7 @@ public static class ServerSyncCommands
     {
         try
         {
-            var schedule = Services.Load<ScheduleRecord>();
+            var schedule = OfflineSaveServices.Load<ScheduleRecord>();
             if (schedule != null && schedule.DailyScheduleDate == scheduleDate)
             {
                 SheetMapper.PopulateScheduleSheets(schedule);
@@ -53,13 +53,13 @@ public static class ServerSyncCommands
     {
         if (schedule == null) return (false, string.Empty);
 
-        string path = await Services.SaveAsync(schedule, writeToDatabase: true);
+        string path = await OfflineSaveServices.SaveAsync(schedule, writeToDatabase: true);
         return (!string.IsNullOrEmpty(path), path);
     }
 
     public static ScheduleRecord? FetchSchedule(DateOnly scheduleDate)
     {
-        var record = Services.Load<ScheduleRecord>();
+        var record = OfflineSaveServices.Load<ScheduleRecord>();
         return record?.DailyScheduleDate == scheduleDate ? record : null;
     }
 }

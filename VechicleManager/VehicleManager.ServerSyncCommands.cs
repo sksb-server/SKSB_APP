@@ -19,7 +19,7 @@ public static class ServerSyncCommands
                 return false;
             }
 
-            string snapshotPath = Services.SaveAsync(vehicleList, writeToDatabase: true)
+            string snapshotPath = OfflineSaveServices.SaveAsync(vehicleList, writeToDatabase: true)
                                           .GetAwaiter()
                                           .GetResult();
 
@@ -36,7 +36,7 @@ public static class ServerSyncCommands
     {
         try
         {
-            var vehicleList = Services.Load<List<VehicleRecord>>();
+            var vehicleList = OfflineSaveServices.Load<List<VehicleRecord>>();
             if (vehicleList != null && vehicleList.Count > 0)
             {
                 SheetMapper.PopulateWorksheet(vehicleList);
@@ -55,12 +55,12 @@ public static class ServerSyncCommands
     {
         if (vehicleList == null || vehicleList.Count == 0) return (false, 0, string.Empty);
 
-        string path = await Services.SaveAsync(vehicleList, writeToDatabase: true);
+        string path = await OfflineSaveServices.SaveAsync(vehicleList, writeToDatabase: true);
         return (!string.IsNullOrEmpty(path), vehicleList.Count, path);
     }
 
     public static List<VehicleRecord>? FetchVehicleRecords()
     {
-        return Services.Load<List<VehicleRecord>>();
+        return OfflineSaveServices.Load<List<VehicleRecord>>();
     }
 }

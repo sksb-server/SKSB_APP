@@ -21,7 +21,7 @@ public class RibbonController : ExcelRibbon
           <ribbon>
             <tabs>
               <tab id='tabProjectManager' label='Project Manager'>
-                <group id='grpProjectPersistence' label='Project Database Sync'>
+                <group id='grpProjectWorkbookHelper' label='Project Database Sync'>
                   <button id='btnSaveProjects' 
                           label='Save to System' 
                           size='large' 
@@ -73,7 +73,7 @@ public class RibbonController : ExcelRibbon
             return;
         }
 
-        // 2. BACKGROUND WORKER: Offload disk serialization and PostgreSQL persistence
+        // 2. BACKGROUND WORKER: Offload disk serialization and PostgreSQL WorkbookHelper
         Task.Run(async () =>
         {
             try
@@ -98,7 +98,7 @@ public class RibbonController : ExcelRibbon
                 {
                     MessageBox.Show(
                         "Failed to persist projects to PostgreSQL or local storage.",
-                        "Persistence Error",
+                        "WorkbookHelper Error",
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Warning
                     );

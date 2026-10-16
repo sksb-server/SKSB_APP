@@ -28,7 +28,7 @@ public static class ServerSyncCommands
             var skillTypes = SheetMapper.ExtractSkillLicenseTypes();
             if (skillTypes.Count > 0)
             {
-                Services.Save(skillTypes, writeToDatabase: true);
+                OfflineSaveServices.Save(skillTypes, writeToDatabase: true);
             }
 
             if (workerList == null || workerList.Count == 0)
@@ -37,7 +37,7 @@ public static class ServerSyncCommands
             }
 
             // 3. Persist worker records
-            string snapshotPath = Services.Save(workerList, writeToDatabase: true);
+            string snapshotPath = OfflineSaveServices.Save(workerList, writeToDatabase: true);
             return !string.IsNullOrEmpty(snapshotPath);
         }
         catch (Exception ex)
@@ -75,10 +75,10 @@ public static class ServerSyncCommands
         var skillTypes = SheetMapper.ExtractSkillLicenseTypes();
         if (skillTypes.Count > 0)
         {
-            await Services.SaveAsync(skillTypes, writeToDatabase: true);
+            await OfflineSaveServices.SaveAsync(skillTypes, writeToDatabase: true);
         }
 
-        string path = await Services.SaveAsync(workerList, writeToDatabase: true);
+        string path = await OfflineSaveServices.SaveAsync(workerList, writeToDatabase: true);
         return (!string.IsNullOrEmpty(path), workerList.Count, path);
     }
 
@@ -181,6 +181,6 @@ public static class ServerSyncCommands
             System.Diagnostics.Debug.WriteLine($"[FetchWorkerRecords DB Fallback] {ex.Message}");
         }
 
-        return Services.Load<List<WorkerRecord>>();
+        return OfflineSaveServices.Load<List<WorkerRecord>>();
     }
 }

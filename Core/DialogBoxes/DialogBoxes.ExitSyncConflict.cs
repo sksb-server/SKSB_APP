@@ -12,11 +12,11 @@ public enum ExitResolution
     Cancel
 }
 
-public partial class ExitSyncConflictDialog : Form
+public partial class ExitSyncConflict : Form
 {
     public ExitResolution Resolution { get; private set; } = ExitResolution.Cancel;
 
-    public ExitSyncConflictDialog(string moduleName, string errorMessage, bool allowSaveOffline = true, bool isClosing = true)
+    public ExitSyncConflict(string moduleName, string errorMessage, bool allowSaveOffline = true, bool isClosing = true)
     {
         Text = $"{moduleName} - Synchronization Alert";
         StartPosition = FormStartPosition.CenterScreen;
