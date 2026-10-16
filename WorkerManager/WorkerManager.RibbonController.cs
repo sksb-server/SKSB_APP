@@ -123,38 +123,9 @@ public class RibbonController : ExcelRibbon
 
     public void OnSaveClicked(IRibbonControl control)
     {
-        List<WorkerRecord> workerList = SheetMapper.ExtractWorkerRecords();
-        if (workerList == null || workerList.Count == 0)
+        ExcelAsyncUtil.QueueAsMacro(() =>
         {
-            return;
-        }
-
-        Task.Run(async () =>
-        {
-            try
-            {
-                var (success, count, path) = await ServerSyncCommands.SaveWorkerAsync(workerList);
-                if (success)
-                {
-                    ExcelAsyncUtil.QueueAsMacro(() => SheetMapper.PopulateWorksheet(workerList));
-
-                    SaveNotificationDialog.ShowSuccess(
-                        "Worker Manager",
-                        $"Successfully saved {count} worker record(s).\n\n• Storage: {path}\n• All auto-generated IDs and default dates have been applied to your sheets."
-                    );
-                }
-                else
-                {
-                    SaveNotificationDialog.ShowError(
-                        "Worker Manager",
-                        "Failed to persist workers to PostgreSQL or local storage."
-                    );
-                }
-            }
-            catch (Exception ex)
-            {
-                SaveNotificationDialog.ShowError("Worker Manager", $"Save Error: {ex.Message}");
-            }
+            Events.ExecuteUnifiedSave();
         });
     }
 

@@ -12,7 +12,16 @@
       "ResignDate": null,
       "ContractStatus": "Active"
     },
-    "VehicleLicenses": [],
+    "VehicleLicenses": [
+      {
+        "LicenseID": 86,
+        "WorkerID": 1,
+        "LicenseClass": "D",
+        "RenewDate": "2026-10-15",
+        "ExpiryDate": "2027-10-15",
+        "LicenseStatus": "Valid"
+      }
+    ],
     "SkillLicenses": [],
     "OverallStatus": "Active"
   },
@@ -47,7 +56,16 @@
       "ContractStatus": "Active"
     },
     "VehicleLicenses": [],
-    "SkillLicenses": [],
+    "SkillLicenses": [
+      {
+        "LicenseID": 39,
+        "WorkerID": 3,
+        "LicenseType": "Hero",
+        "RenewDate": "2026-10-14",
+        "ExpiryDate": "2027-10-14",
+        "LicenseStatus": "Valid"
+      }
+    ],
     "OverallStatus": "Active"
   },
   {
@@ -165,7 +183,16 @@
       "ResignDate": null,
       "ContractStatus": "Active"
     },
-    "VehicleLicenses": [],
+    "VehicleLicenses": [
+      {
+        "LicenseID": 78,
+        "WorkerID": 10,
+        "LicenseClass": "B",
+        "RenewDate": "2026-10-14",
+        "ExpiryDate": "2027-10-14",
+        "LicenseStatus": "Valid"
+      }
+    ],
     "SkillLicenses": [],
     "OverallStatus": "Active"
   },

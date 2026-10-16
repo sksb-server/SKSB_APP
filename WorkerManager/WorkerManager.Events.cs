@@ -50,6 +50,7 @@ public class Events : IExcelAddIn
     {
         ExcelAsyncUtil.QueueAsMacro(() =>
         {
+            SKSB_App.Core.DropDown.Arrow.Teardown();
             UnhookApplicationEvents();
             XlCall.Excel(XlCall.xlcOnKey, "^s");
             XlCall.Excel(XlCall.xlcOnKey, "^+s");
@@ -262,20 +263,49 @@ public class Events : IExcelAddIn
             {
                 var (workerList, validationErrors, validationWarnings) = SheetMapper.ExtractWorkerRecordsWithDiagnostics();
 
-                // 1. Validation check
+                // -------------------------------------------------------------
+                // 1. DATA VALIDATION CHECK
+                // -------------------------------------------------------------
                 if (validationErrors.Count > 0 || validationWarnings.Count > 0)
                 {
                     using var valDialog = new ValidationSummaryDialog("Worker Manager", validationErrors, validationWarnings);
                     valDialog.ShowDialog();
 
-                    if (validationErrors.Count > 0 || valDialog.Action != ValidationDialogAction.ProceedAnyway)
+                    if (validationErrors.Count > 0)
                     {
-                        cancel = true; // Stay in Excel to resolve issues
+#if DEBUG
+                        // DEBUG MODE OVERRIDE: Allow developer to bypass blocking errors and quit without saving
+                        var debugChoice = MessageBox.Show(
+                            $"[DEBUG MODE CLOSE OVERRIDE]\n\n" +
+                            $"{validationErrors.Count} critical validation error(s) were found.\n\n" +
+                            "Would you like to FORCE QUIT anyway without saving?\n" +
+                            "• Yes: Discard all changes and close Excel immediately.\n" +
+                            "• No: Cancel closing and stay in Excel to fix the errors.",
+                            "Debug Force Quit",
+                            MessageBoxButtons.YesNo,
+                            MessageBoxIcon.Warning
+                        );
+
+                        if (debugChoice == DialogResult.Yes)
+                        {
+                            _isExiting = true;
+                            UnhookApplicationEvents();
+                            wb.Saved = true; // Tell Excel all changes are discarded/handled
+                            cancel = false;  // Allow native close to exit cleanly
+                            return;
+                        }
+#endif
+                        cancel = true; // Stay in Excel in Release mode (or if developer clicks 'No')
+                        return;
+                    }
+                    else if (valDialog.Action != ValidationDialogAction.ProceedAnyway)
+                    {
+                        cancel = true;
                         return;
                     }
                 }
 
-                // If empty, allow clean exit
+                // If completely empty, allow clean exit
                 if (workerList == null || workerList.Count == 0)
                 {
                     _isExiting = true;
@@ -284,7 +314,9 @@ public class Events : IExcelAddIn
                     return;
                 }
 
-                // 2. Commit save
+                // -------------------------------------------------------------
+                // 2. ATTEMPT SILENT SERVER SAVE
+                // -------------------------------------------------------------
                 if (ServerSyncCommands.SaveWorkerSilent(out string dbError))
                 {
                     Services.ClearPendingOfflineSnapshot<List<WorkerRecord>>();
@@ -293,15 +325,18 @@ public class Events : IExcelAddIn
                     UnhookApplicationEvents();
 
                     wb.Saved = true;
-                    cancel = false; // Native Excel close proceeds unimpeded
+                    cancel = false;
                     return;
                 }
 
-                // 3. Server unreachable: prompt offline resolution
+                // -------------------------------------------------------------
+                // 3. SERVER OFFLINE / UNREACHABLE
+                // -------------------------------------------------------------
                 using var dialog = new ExitSyncConflictDialog(
                     "Worker Manager",
                     string.IsNullOrWhiteSpace(dbError) ? "Could not persist records to the PostgreSQL server." : dbError,
-                    allowSaveOffline: true
+                    allowSaveOffline: true,
+                    isClosing: true
                 );
                 dialog.ShowDialog();
 
@@ -317,12 +352,12 @@ public class Events : IExcelAddIn
                         UnhookApplicationEvents();
 
                         wb.Saved = true;
-                        cancel = false; // Native Excel close proceeds unimpeded
+                        cancel = false;
                         return;
 
                     case ExitResolution.Cancel:
                     default:
-                        cancel = true; // Abort close
+                        cancel = true;
                         return;
                 }
             }
@@ -355,54 +390,90 @@ public class Events : IExcelAddIn
     }
 
     /// <summary>
-    /// Centralized save routine shared by Ctrl+S, QAT Save icon, and File > Save.
+    /// Centralized save routine shared by Ctrl+S, QAT Save icon, and Ribbon Save button.
     /// </summary>
-    private static void ExecuteUnifiedSave()
+    public static void ExecuteUnifiedSave()
     {
-        // 1. Validation & Extraction
-        var (workerList, validationErrors, validationWarnings) = SheetMapper.ExtractWorkerRecordsWithDiagnostics();
-
-        if (validationErrors.Count > 0 || validationWarnings.Count > 0)
+        while (true)
         {
-            using var valDialog = new ValidationSummaryDialog("Worker Manager", validationErrors, validationWarnings);
-            valDialog.ShowDialog();
+            // 1. Validation & Extraction
+            var (workerList, validationErrors, validationWarnings) = SheetMapper.ExtractWorkerRecordsWithDiagnostics();
 
-            if (validationErrors.Count > 0 || valDialog.Action != ValidationDialogAction.ProceedAnyway)
+            if (validationErrors.Count > 0 || validationWarnings.Count > 0)
             {
-                return; // User canceled or blocking errors present
-            }
-        }
+                using var valDialog = new ValidationSummaryDialog("Worker Manager", validationErrors, validationWarnings);
+                valDialog.ShowDialog();
 
-        // 2. Commit to Database and Local Storage
-        if (ServerSyncCommands.SaveWorkerSilent(out string dbErr))
-        {
-            Services.ClearPendingOfflineSnapshot<List<WorkerRecord>>();
-
-            if (workerList != null && workerList.Count > 0)
-            {
-                SheetMapper.PopulateWorksheet(workerList);
+                if (validationErrors.Count > 0 || valDialog.Action != ValidationDialogAction.ProceedAnyway)
+                {
+                    return; // Blocking errors present or user cancelled
+                }
             }
 
-            // Mark workbook as saved so Excel knows changes are safely persisted
-            try
+            // 2. Attempt Database Save
+            if (ServerSyncCommands.SaveWorkerSilent(out string dbErr))
             {
-                dynamic xlApp = ExcelDnaUtil.Application;
-                xlApp.ActiveWorkbook.Saved = true;
-            }
-            catch { }
+                Services.ClearPendingOfflineSnapshot<List<WorkerRecord>>();
 
-            int count = workerList?.Count ?? 0;
-            SaveNotificationDialog.ShowSuccess(
+                if (workerList != null && workerList.Count > 0)
+                {
+                    SheetMapper.PopulateWorksheet(workerList);
+                }
+
+                try
+                {
+                    dynamic xlApp = ExcelDnaUtil.Application;
+                    xlApp.ActiveWorkbook.Saved = true;
+                }
+                catch { }
+
+                int count = workerList?.Count ?? 0;
+                SaveNotificationDialog.ShowSuccess(
+                    "Worker Manager",
+                    $"Save completed successfully. {count} record(s) persisted to the database.\n\nAll default dates, statuses, and auto-generated IDs have been refreshed on your sheets."
+                );
+                return;
+            }
+
+            // 3. Server Unreachable: Display Offline Stash Dialog
+            using var conflictDialog = new ExitSyncConflictDialog(
                 "Worker Manager",
-                $"Save completed successfully. {count} record(s) persisted to the database.\n\nAll default dates, statuses, and auto-generated IDs have been refreshed on your sheets."
+                string.IsNullOrWhiteSpace(dbErr) ? "Could not establish a connection to PostgreSQL." : dbErr,
+                allowSaveOffline: true,
+                isClosing: false // Indicates this is an in-session save, not an exit
             );
-        }
-        else
-        {
-            SaveNotificationDialog.ShowError(
-                "Worker Manager",
-                $"Failed to persist records to the server database:\n\n{dbErr}"
-            );
+            conflictDialog.ShowDialog();
+
+            switch (conflictDialog.Resolution)
+            {
+                case ExitResolution.Retry:
+                    continue;
+
+                case ExitResolution.SaveLocallyAndQuit:
+                    Services.SaveOfflineSnapshot(workerList);
+
+                    if (workerList != null && workerList.Count > 0)
+                    {
+                        SheetMapper.PopulateWorksheet(workerList);
+                    }
+
+                    try
+                    {
+                        dynamic xlApp = ExcelDnaUtil.Application;
+                        xlApp.ActiveWorkbook.Saved = true;
+                    }
+                    catch { }
+
+                    SaveNotificationDialog.ShowOffline(
+                        "Worker Manager",
+                        $"Saved {workerList?.Count ?? 0} record(s) to local offline storage.\n\nWhen the server is back online, your offline changes will automatically synchronize."
+                    );
+                    return;
+
+                case ExitResolution.Cancel:
+                default:
+                    return;
+            }
         }
     }
 
@@ -417,8 +488,11 @@ public class Events : IExcelAddIn
                 return;
             }
 
+            // 1. Sync Lookups first so dropdowns and validation tables are fresh
             SyncWorkerLookupsData();
 
+            // 2. Check for Pending Offline Snapshot
+            string pendingFilePath = Folder.Data.GetFilePath("List`1_PendingUpload.json");
             if (Services.HasPendingOfflineSnapshot<List<WorkerRecord>>())
             {
                 var pendingRecords = Services.LoadPendingOfflineSnapshot<List<WorkerRecord>>();
@@ -439,51 +513,96 @@ public class Events : IExcelAddIn
                 }
                 else
                 {
-                    DateTime localOfflineTime = File.GetLastWriteTime(
-                        Folder.Data.GetFilePath("List`1_PendingUpload.json")
-                    );
-
+                    DateTime localOfflineTime = File.GetLastWriteTime(pendingFilePath);
                     DateTime? serverLastUpdate = Services.GetServerLatestTimestamp("worker_master");
+
                     bool canCommit = true;
 
+                    // -------------------------------------------------------------
+                    // CONFLICT DETECTED: SERVER IS NEWER THAN LOCAL OFFLINE SAVE
+                    // -------------------------------------------------------------
                     if (serverLastUpdate.HasValue && serverLastUpdate.Value > localOfflineTime)
                     {
-                        var conflictChoice = MessageBox.Show(
-                            $"[Synchronization Conflict Detected]\n\n" +
-                            $"• Your offline saved file: {localOfflineTime:yyyy-MM-dd HH:mm:ss}\n" +
-                            $"• Newer server version:  {serverLastUpdate.Value:yyyy-MM-dd HH:mm:ss}\n\n" +
-                            "The server was updated after your offline save.\n\n" +
-                            "Do you still want to COMMIT your offline changes to the server?\n" +
-                            "• Yes: Overwrite server records with your local offline version.\n" +
-                            "• No: Discard local offline changes and load the latest server copy.",
-                            "Data Version Conflict",
+                        var serverRecords = ServerSyncCommands.FetchWorkerRecords() ?? new List<WorkerRecord>();
+
+                        // Build a visual comparison preview
+                        var diffSb = new System.Text.StringBuilder();
+                        diffSb.AppendLine("=== DATA VERSION CONFLICT DETECTED ===");
+                        diffSb.AppendLine("The server was modified after your last offline save.\n");
+                        diffSb.AppendLine($"• Your Local Offline Save: {localOfflineTime:yyyy-MM-dd HH:mm:ss} ({pendingRecords.Count} workers)");
+                        diffSb.AppendLine($"• Current Server Copy:    {serverLastUpdate.Value:yyyy-MM-dd HH:mm:ss} ({serverRecords.Count} workers)\n");
+                        diffSb.AppendLine("Summary of Differences:");
+
+                        var serverIdMap = serverRecords.ToDictionary(s => s.WorkerID);
+                        int newLocalCount = 0;
+                        int modifiedCount = 0;
+
+                        foreach (var local in pendingRecords)
+                        {
+                            if (!serverIdMap.TryGetValue(local.WorkerID, out var srv))
+                            {
+                                newLocalCount++;
+                            }
+                            else if (!local.WorkerDetails.WorkerName.Equals(srv.WorkerDetails.WorkerName, StringComparison.OrdinalIgnoreCase) ||
+                                     local.SkillLicenses.Count != srv.SkillLicenses.Count)
+                            {
+                                modifiedCount++;
+                            }
+                        }
+
+                        diffSb.AppendLine($"  - New workers in your offline file: {newLocalCount}");
+                        diffSb.AppendLine($"  - Modified workers in your offline file: {modifiedCount}\n");
+                        diffSb.AppendLine("Would you like to OVERWRITE the server with your local offline version?");
+                        diffSb.AppendLine("• Yes: Overwrite server database with your local offline records.");
+                        diffSb.AppendLine("• No:  Discard your offline file and load the latest server copy.");
+
+                        var dialogChoice = MessageBox.Show(
+                            diffSb.ToString(),
+                            "Synchronization Conflict Preview",
                             MessageBoxButtons.YesNo,
                             MessageBoxIcon.Question
                         );
 
-                        canCommit = (conflictChoice == DialogResult.Yes);
+                        canCommit = (dialogChoice == DialogResult.Yes);
                     }
 
                     if (canCommit)
                     {
-                        var (success, count, _) = ServerSyncCommands.SaveWorkerAsync(pendingRecords!)
-                                                                    .GetAwaiter()
-                                                                    .GetResult();
+                        var (success, count, path) = ServerSyncCommands.SaveWorkerAsync(pendingRecords!)
+                                                                        .GetAwaiter()
+                                                                        .GetResult();
                         if (success)
                         {
                             Services.ClearPendingOfflineSnapshot<List<WorkerRecord>>();
                             SheetMapper.PopulateWorksheet(pendingRecords!);
-                            WorkbookSession.ShowStatusConfirmation($"Committed {count} offline worker records to server.");
+
+                            SaveNotificationDialog.ShowSuccess(
+                                "Worker Manager",
+                                $"Offline changes uploaded successfully!\n\n• Committed {count} worker record(s) to PostgreSQL server.\n• Local pending upload stash has been cleared."
+                            );
                             return;
+                        }
+                        else
+                        {
+                            SaveNotificationDialog.ShowError(
+                                "Worker Manager",
+                                "Failed to upload offline changes to the server database. Records remain in offline storage."
+                            );
                         }
                     }
                     else
                     {
+                        // User chose to discard local offline changes
                         Services.ClearPendingOfflineSnapshot<List<WorkerRecord>>();
+                        SaveNotificationDialog.ShowSuccess(
+                            "Worker Manager",
+                            "Local offline stash discarded. Loading current version from server..."
+                        );
                     }
                 }
             }
 
+            // 3. Load latest copy from server
             if (ServerSyncCommands.LoadWorkerSilent())
             {
                 WorkbookSession.ShowStatusConfirmation("Worker records loaded from server.");

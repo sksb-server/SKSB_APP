@@ -1,13 +1,13 @@
 ﻿using Microsoft.Win32;
+using SKSB_App.Core.ExcelManager;
+using SKSB_App.Core.FileManager.Constants;
 using System;
 using System.Diagnostics;
 using System.IO;
 using System.Text.Json;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
-
-using SKSB_App.Core.ExcelManager;
-using SKSB_App.Core.FileManager.Constants;
 
 namespace SKSB_App.Launcher;
 
@@ -18,20 +18,25 @@ static class Program
     private static readonly string AddInsFolder = Folder.AddIns.GetPath();
     private static readonly string VersionFilePath = Path.Combine(RootPath, "version.json");
 
+    private const string LauncherMutexName = "Global\\SKSB_App_Launcher_SingleInstance_Mutex";
+
     [STAThread]
     static void Main()
     {
+        // Prevent multiple background executions of Launcher.exe
+        using var mutex = new Mutex(true, LauncherMutexName, out bool isInitialInstance);
+        if (!isInitialInstance)
+        {
+            return; // Exit silently; launcher is already running
+        }
+
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
 
         try
         {
             EnsureDirectoryStructure();
-
-            // Run provision/update lifecycle
             SyncAppVersion().GetAwaiter().GetResult();
-
-            // All checks complete; launch Portal
             LaunchOperationsPortal();
         }
         catch (Exception ex)

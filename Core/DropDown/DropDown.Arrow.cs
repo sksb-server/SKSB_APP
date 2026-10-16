@@ -176,6 +176,24 @@ public static class Arrow
         _arrowHost.Controls.Add(_arrowButton);
     }
 
+    public static void Teardown()
+    {
+        try
+        {
+            HideAll();
+            if (_arrowHost != null && !_arrowHost.IsDisposed)
+            {
+                _arrowHost.Dispose();
+                _arrowHost = null;
+            }
+            if (_popupHost != null && !_popupHost.IsDisposed)
+            {
+                _popupHost.Dispose();
+                _popupHost = null;
+            }
+        }
+        catch { }
+    }
     private static void InitializePopupHost()
     {
         _popupHost = new PopupHostForm
@@ -206,6 +224,16 @@ public static class Arrow
         _popupHost.Deactivate += (_, _) => DismissAndReturnFocus();
     }
 
+    private static void HookExcelEvents(dynamic xlApp)
+    {
+        try
+        {
+            // Hide the floating arrow whenever Excel loses window focus or switches active sheets/windows
+            xlApp.WindowDeactivate += new Action<dynamic, dynamic>((wb, wn) => HideAll());
+            xlApp.SheetDeactivate += new Action<dynamic>(ws => HideAll());
+        }
+        catch { }
+    }
     private static void OnListBoxDrawItem(object? sender, DrawItemEventArgs e)
     {
         if (e.Index < 0 || e.Index >= _listBox!.Items.Count) return;
@@ -239,8 +267,16 @@ public static class Arrow
     {
         try
         {
-            _activeCell = cell.Cells[1, 1];
             dynamic xlApp = ExcelDnaUtil.Application;
+
+            // Safety check: if Excel window is minimized or not active, hide arrow
+            if (xlApp.WindowState == -4140 /* xlMinimized */)
+            {
+                HideAll();
+                return;
+            }
+
+            _activeCell = cell.Cells[1, 1];
             dynamic window = xlApp.ActiveWindow;
 
             IntPtr excelHwnd = GetExcelHwnd(xlApp);

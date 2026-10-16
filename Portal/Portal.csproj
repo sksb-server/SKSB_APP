@@ -43,4 +43,9 @@
 		<Message Importance="high" Text="[Portal Deploy] Successfully deployed Portal.exe to $(DocsAppFolder)" />
 	</Target>
 
+	<Target Name="KillExistingExcelAndPortalOnBuild" BeforeTargets="BeforeBuild">
+		<Exec Command="taskkill /f /fi &quot;IMAGENAME eq excel.exe&quot; 2&gt;nul || exit 0" IgnoreExitCode="true" />
+		<Exec Command="taskkill /f /fi &quot;IMAGENAME eq Portal.exe&quot; 2&gt;nul || exit 0" IgnoreExitCode="true" />
+	</Target>
+
 </Project>
