@@ -39,7 +39,16 @@
       "ContractStatus": "Active"
     },
     "VehicleLicenses": [],
-    "SkillLicenses": [],
+    "SkillLicenses": [
+      {
+        "LicenseID": 54,
+        "WorkerID": 2,
+        "LicenseType": "Hero",
+        "RenewDate": "2026-10-14",
+        "ExpiryDate": "2027-10-14",
+        "LicenseStatus": "Valid"
+      }
+    ],
     "OverallStatus": "Active"
   },
   {

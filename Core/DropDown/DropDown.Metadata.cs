@@ -75,8 +75,8 @@ public static class Metadata
         // INHERITANCE: If row > 2 and current cell has no explicit metadata, inherit from Row 2 archetype
         try
         {
-            int row = singleCell.Row;
-            int col = singleCell.Column;
+            int row = (int)singleCell.Row;
+            int col = (int)singleCell.Column;
             dynamic sheet = singleCell.Worksheet;
 
             if (row > 2)
@@ -102,7 +102,9 @@ public static class Metadata
             if (!string.IsNullOrEmpty(key))
             {
                 dynamic wb = singleCell.Worksheet.Parent;
-                dynamic nameObj = wb.Names.Item(key);
+                dynamic nameObj = null;
+                try { nameObj = wb.Names.Item(key); } catch { }
+
                 if (nameObj != null)
                 {
                     string refersTo = nameObj.RefersTo?.ToString() ?? string.Empty;
@@ -119,11 +121,12 @@ public static class Metadata
         }
         catch { }
 
+        // Fallback to Excel Data Validation formula if no custom Name metadata exists
         if (string.IsNullOrWhiteSpace(raw))
         {
             try
             {
-                if (singleCell.Validation != null && singleCell.Validation.Type == 3)
+                if (singleCell.Validation != null && singleCell.Validation.Type == 3) // 3 = xlValidateList
                 {
                     raw = singleCell.Validation.Formula1 ?? string.Empty;
                     config.IsMultiSelect = !singleCell.Validation.ShowError;

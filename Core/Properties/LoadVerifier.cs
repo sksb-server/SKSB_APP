@@ -5,6 +5,7 @@ namespace SKSB_App.Core.Diagnostics
 {
     public class LoadVerifier : IExcelAddIn
     {
+#if DEBUG
         public void AutoOpen()
         {
             MessageBox.Show("Excel-DNA has successfully hooked into Excel process!\n\nxlAutoOpen executed.",
@@ -14,5 +15,6 @@ namespace SKSB_App.Core.Diagnostics
         public void AutoClose()
         {
         }
+#endif
     }
 }

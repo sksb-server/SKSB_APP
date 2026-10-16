@@ -391,8 +391,9 @@ public static class Arrow
             var config = Metadata.ReadConfig(singleCell);
             dynamic xlApp = ExcelDnaUtil.Application;
             dynamic sheet = singleCell.Worksheet;
-            int row = singleCell.Row;
-            int col = singleCell.Column;
+            string sheetName = sheet.Name?.ToString() ?? "Unknown";
+            int row = (int)singleCell.Row;
+            int col = (int)singleCell.Column;
 
             string inCellText = string.Empty;
             try
@@ -408,27 +409,61 @@ public static class Arrow
             try { leftVal = sheet.Cells[row, col - 1].Value2?.ToString()?.Trim() ?? string.Empty; } catch { }
             try { rightVal = sheet.Cells[row, col + 1].Value2?.ToString()?.Trim() ?? string.Empty; } catch { }
 
+#if DEBUG
+            var diagSb = new System.Text.StringBuilder();
+            diagSb.AppendLine($"=== DROPDOWN DIAGNOSTICS ===");
+            diagSb.AppendLine($"Sheet: '{sheetName}' | Cell: R{row}C{col} ({singleCell.Address})");
+            diagSb.AppendLine($"In-Cell Text: '{inCellText}'");
+            diagSb.AppendLine($"Left (Col {col - 1}): '{leftVal}' | Right (Col {col + 1}): '{rightVal}'");
+            diagSb.AppendLine();
+            diagSb.AppendLine($"--- CONFIG LOADED ---");
+            diagSb.AppendLine($"Source:     {config.Source}");
+            diagSb.AppendLine($"Transform:  {config.Transform}");
+            diagSb.AppendLine($"Filter:     {config.Filter}");
+            diagSb.AppendLine($"SyncLeft:   {config.SyncLeft}");
+            diagSb.AppendLine();
+#endif
+
             var baseItems = new List<string>();
 
             // 1. Generic Source Evaluation
             if (!string.IsNullOrWhiteSpace(config.Source))
             {
                 dynamic? rawSource = null;
-                if (config.Source.Contains("[") && config.Source.Contains("]"))
+                string cleanSource = config.Source.Trim();
+                if (cleanSource.StartsWith("=", StringComparison.Ordinal))
+                    cleanSource = cleanSource.Substring(1).Trim();
+
+                if (cleanSource.Contains("[") && cleanSource.Contains("]"))
                 {
-                    try
-                    {
-                        string cleanRef = config.Source.TrimStart('=');
-                        rawSource = xlApp.Range[cleanRef].Value2;
-                    }
-                    catch { }
+                    try { rawSource = xlApp.Range[cleanSource]; } catch { }
                 }
 
                 if (rawSource == null)
                 {
-                    rawSource = Metadata.EvaluateFormulaSafely(xlApp, config.Source);
+                    try { rawSource = xlApp.Evaluate(cleanSource); } catch { }
                 }
 
+#if DEBUG
+                diagSb.AppendLine($"--- SOURCE EVALUATION ---");
+                diagSb.AppendLine($"RawSource Type: {(rawSource == null ? "NULL" : rawSource.GetType().FullName)}");
+#endif
+
+                if (rawSource != null)
+                {
+                    try
+                    {
+                        object val2 = rawSource.Value2;
+                        if (val2 != null) rawSource = val2;
+                    }
+                    catch { }
+                }
+
+#if DEBUG
+                diagSb.AppendLine($"After Value2 Unwrap: {(rawSource == null ? "NULL" : rawSource.GetType().FullName)}");
+#endif
+
+                // D. Extract items: handles 2D matrices, 1D vectors, collections, and scalars
                 if (rawSource is object[,] matrix)
                 {
                     int rCount = matrix.GetLength(0);
@@ -438,7 +473,8 @@ public static class Arrow
                         for (int c = 1; c <= cCount; c++)
                         {
                             string val = matrix[r, c]?.ToString()?.Trim() ?? string.Empty;
-                            if (!string.IsNullOrEmpty(val) && !val.StartsWith("#"))
+                            bool isComError = long.TryParse(val, out long errNum) && errNum < -2000000000;
+                            if (!string.IsNullOrEmpty(val) && !val.StartsWith("#") && !isComError && !val.Equals("System.__ComObject", StringComparison.OrdinalIgnoreCase))
                                 baseItems.Add(val);
                         }
                     }
@@ -448,21 +484,36 @@ public static class Arrow
                     foreach (var item in vector)
                     {
                         string val = item?.ToString()?.Trim() ?? string.Empty;
-                        if (!string.IsNullOrEmpty(val) && !val.StartsWith("#"))
+                        bool isComError = long.TryParse(val, out long errNum) && errNum < -2000000000;
+                        if (!string.IsNullOrEmpty(val) && !val.StartsWith("#") && !isComError && !val.Equals("System.__ComObject", StringComparison.OrdinalIgnoreCase))
                             baseItems.Add(val);
                     }
                 }
-                else if (rawSource is string s && !string.IsNullOrWhiteSpace(s))
+                else if (rawSource != null)
                 {
-                    baseItems.Add(s.Trim());
+                    string s = rawSource.ToString()?.Trim() ?? string.Empty;
+                    bool isComError = long.TryParse(s, out long errNum) && errNum < -2000000000;
+
+                    // Discard Excel COM error codes like -2146826265
+                    if (!string.IsNullOrWhiteSpace(s) && !s.StartsWith("#") && !isComError && !s.Equals("System.__ComObject", StringComparison.OrdinalIgnoreCase))
+                    {
+                        baseItems.Add(s);
+                    }
                 }
+
+#if DEBUG
+                diagSb.AppendLine($"Base Items Count: {baseItems.Count}");
+                diagSb.AppendLine();
+#endif
             }
 
             // 2. Generic Pipeline: Transform & Filter
             var processedItems = new List<DropdownItem>();
+            int debugItemCounter = 0;
 
             foreach (string rawItem in baseItems)
             {
+                debugItemCounter++;
                 string safeItem = rawItem.Replace("\"", "\"\"");
                 bool isNumeric = double.TryParse(rawItem, out _);
                 string itemToken = isNumeric ? rawItem : $"\"{safeItem}\"";
@@ -471,36 +522,43 @@ public static class Arrow
 
                 // Stage 2: Transform Item Display Name
                 string displayLabel = rawItem;
+                string transformFormulaUsed = "NONE";
+                string transformRawResult = "N/A";
+
                 if (!string.IsNullOrWhiteSpace(config.Transform))
                 {
-                    string preparedTransform = config.Transform
+                    transformFormulaUsed = config.Transform
                         .Replace("@item", itemToken)
                         .Replace("@left", leftToken)
                         .Replace("@right", rightToken);
 
-                    object? transformed = Metadata.EvaluateFormulaSafely(xlApp, preparedTransform);
+                    object? transformed = Metadata.EvaluateFormulaSafely(xlApp, transformFormulaUsed);
+                    transformRawResult = transformed?.ToString() ?? "NULL";
 
                     if (transformed != null && !(transformed is ExcelError))
                     {
                         string outStr = transformed.ToString()?.Trim() ?? string.Empty;
-                        if (!string.IsNullOrEmpty(outStr) && !outStr.StartsWith("#"))
-                            displayLabel = outStr;
+                        displayLabel = outStr;
                     }
                 }
 
                 // Stage 3: Evaluate Filter
                 bool isValid = true;
+                string filterFormulaUsed = "NONE";
+                string filterRawResult = "N/A";
+
                 if (!string.IsNullOrWhiteSpace(config.Filter))
                 {
                     string safeDisplay = displayLabel.Replace("\"", "\"\"");
 
-                    string preparedFilter = config.Filter
+                    filterFormulaUsed = config.Filter
                         .Replace("@item", itemToken)
                         .Replace("@display", $"\"{safeDisplay}\"")
                         .Replace("@left", leftToken)
                         .Replace("@right", rightToken);
 
-                    object? filterResult = Metadata.EvaluateFormulaSafely(xlApp, preparedFilter);
+                    object? filterResult = Metadata.EvaluateFormulaSafely(xlApp, filterFormulaUsed);
+                    filterRawResult = filterResult?.ToString() ?? "NULL";
 
                     if (filterResult is bool b)
                     {
@@ -517,6 +575,18 @@ public static class Arrow
                     }
                 }
 
+#if DEBUG
+                if (debugItemCounter <= 5 || displayLabel.Contains("-2146826265") || rawItem.Contains("-2146826265"))
+                {
+                    diagSb.AppendLine($"[Item #{debugItemCounter}] Raw: '{rawItem}'");
+                    diagSb.AppendLine($"  Transform: {transformFormulaUsed}");
+                    diagSb.AppendLine($"  -> Transformed Display: '{displayLabel}' (Raw Obj: {transformRawResult})");
+                    diagSb.AppendLine($"  Filter: {filterFormulaUsed}");
+                    diagSb.AppendLine($"  -> Filter Result: '{filterRawResult}' => IsValid: {isValid}");
+                    diagSb.AppendLine();
+                }
+#endif
+
                 processedItems.Add(new DropdownItem
                 {
                     Display = displayLabel,
@@ -524,6 +594,11 @@ public static class Arrow
                     IsValid = isValid
                 });
             }
+
+#if DEBUG
+            // Display diagnostics box before opening popup
+            MessageBox.Show(diagSb.ToString(), $"Debug Diagnostics - {sheetName} R{row}C{col}", MessageBoxButtons.OK, MessageBoxIcon.Information);
+#endif
 
             // 3. Selection Commit & Sync Writeback
             _onItemSelected = (chosenDisplay) =>
@@ -533,7 +608,6 @@ public static class Arrow
 
                 singleCell.Value2 = targetItem.Display;
 
-                // Sync Writeback (Field 4)
                 if (!string.IsNullOrWhiteSpace(config.SyncLeft) && !string.IsNullOrEmpty(targetItem.Raw))
                 {
                     bool isNum = double.TryParse(targetItem.Raw, out _);
@@ -590,7 +664,7 @@ public static class Arrow
                 }
             };
 
-            // 4. Populate ListBox with Hierarchical Sorting
+            // 4. Populate ListBox
             _listBox!.Items.Clear();
             if (processedItems.Count > 0)
             {
@@ -673,7 +747,7 @@ public static class Arrow
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"[Arrow.PopulateAndOpenMenu Error] {ex.Message}");
+            MessageBox.Show($"[Arrow Error]\n{ex.Message}\n\n{ex.StackTrace}", "PopulateAndOpenMenu Exception", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 

@@ -271,31 +271,22 @@ public class Events : IExcelAddIn
                     using var valDialog = new ValidationSummaryDialog("Worker Manager", validationErrors, validationWarnings);
                     valDialog.ShowDialog();
 
+#if DEBUG
+                    // If developer chose to quit directly from the validation dialog:
+                    if (valDialog.Action == ValidationDialogAction.DebugQuitAnyway)
+                    {
+                        _isExiting = true;
+                        UnhookApplicationEvents();
+                        wb.Saved = true; // Tell Excel all changes are discarded/handled
+                        cancel = false;  // Allow native close to exit cleanly
+                        return;          // EXIT IMMEDIATELY - never reaches save dialog!
+                    }
+#endif
+
                     if (validationErrors.Count > 0)
                     {
-#if DEBUG
-                        // DEBUG MODE OVERRIDE: Allow developer to bypass blocking errors and quit without saving
-                        var debugChoice = MessageBox.Show(
-                            $"[DEBUG MODE CLOSE OVERRIDE]\n\n" +
-                            $"{validationErrors.Count} critical validation error(s) were found.\n\n" +
-                            "Would you like to FORCE QUIT anyway without saving?\n" +
-                            "• Yes: Discard all changes and close Excel immediately.\n" +
-                            "• No: Cancel closing and stay in Excel to fix the errors.",
-                            "Debug Force Quit",
-                            MessageBoxButtons.YesNo,
-                            MessageBoxIcon.Warning
-                        );
-
-                        if (debugChoice == DialogResult.Yes)
-                        {
-                            _isExiting = true;
-                            UnhookApplicationEvents();
-                            wb.Saved = true; // Tell Excel all changes are discarded/handled
-                            cancel = false;  // Allow native close to exit cleanly
-                            return;
-                        }
-#endif
-                        cancel = true; // Stay in Excel in Release mode (or if developer clicks 'No')
+                        // In Release mode, critical errors strictly cancel close and keep user in Excel
+                        cancel = true;
                         return;
                     }
                     else if (valDialog.Action != ValidationDialogAction.ProceedAnyway)
@@ -315,7 +306,7 @@ public class Events : IExcelAddIn
                 }
 
                 // -------------------------------------------------------------
-                // 2. ATTEMPT SILENT SERVER SAVE
+                // 2. ATTEMPT SILENT SERVER SAVE (Only reached if validation passed or proceeded)
                 // -------------------------------------------------------------
                 if (ServerSyncCommands.SaveWorkerSilent(out string dbError))
                 {
@@ -330,7 +321,7 @@ public class Events : IExcelAddIn
                 }
 
                 // -------------------------------------------------------------
-                // 3. SERVER OFFLINE / UNREACHABLE
+                // 3. SERVER OFFLINE / UNREACHABLE (Save Dialog)
                 // -------------------------------------------------------------
                 using var dialog = new ExitSyncConflictDialog(
                     "Worker Manager",
