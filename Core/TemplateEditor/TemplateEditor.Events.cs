@@ -1,9 +1,10 @@
 ﻿namespace SKSB_App.Core.TemplateEditor;
 
-using System;
 using ExcelDna.Integration;
 using SKSB_App.Core.DropDown;
+using SKSB_App.Core.Services;
 using SKSB_App.Core.WorkbookHelper;
+using System;
 
 public class Events : IExcelAddIn
 {
@@ -53,8 +54,13 @@ public class Events : IExcelAddIn
     {
         try
         {
-            if (WorkbookSession.EvaluateTemplateMode(showHeadsUp: true))
+            // NEW (using what you already have):
+            bool isTemplate = SheetOps.IsMasterTemplateFile();
+            SheetOps.IsTemplateEditMode = isTemplate;
+            if (isTemplate)
             {
+                SheetOps.SetAuxiliarySheetsVisibility(visible: true);
+                TypesToExcel.SyncAllCoreEnums();
                 RibbonController.RefreshRibbonUI();
             }
         }
@@ -69,8 +75,13 @@ public class Events : IExcelAddIn
     {
         try
         {
-            if (WorkbookSession.EvaluateTemplateMode(showHeadsUp: false))
+            // NEW (using what you already have):
+            bool isTemplate = SheetOps.IsMasterTemplateFile();
+            SheetOps.IsTemplateEditMode = isTemplate;
+            if (isTemplate)
             {
+                SheetOps.SetAuxiliarySheetsVisibility(visible: true);
+                TypesToExcel.SyncAllCoreEnums();
                 RibbonController.RefreshRibbonUI();
             }
         }
@@ -144,7 +155,7 @@ public class Events : IExcelAddIn
             dynamic singleCell = target.Cells[1, 1];
             if (Commands.IsCustomDropdownCell(singleCell))
             {
-                if (!WorkbookSession.IsTemplateEditMode)
+                if (!SheetOps.IsTemplateEditMode)
                 {
                     Arrow.ShowArrowForCell(singleCell);
                 }
@@ -168,10 +179,9 @@ public class Events : IExcelAddIn
     {
         try
         {
-            // Fires as soon as typing completes/commits in the cell
             if (target != null && target.Cells.Count == 1)
             {
-                if (Commands.IsCustomDropdownCell(target) && !WorkbookSession.IsTemplateEditMode)
+                if (Commands.IsCustomDropdownCell(target) && !SheetOps.IsTemplateEditMode)
                 {
                     Arrow.ShowArrowForCell(target);
                 }
@@ -187,7 +197,7 @@ public class Events : IExcelAddIn
             if (!Commands.IsCustomDropdownCell(target))
                 return;
 
-            if (WorkbookSession.IsTemplateEditMode)
+            if (SheetOps.IsTemplateEditMode)
             {
                 cancel = true; // Open template configurator
                 Arrow.HideAll();
@@ -195,10 +205,8 @@ public class Events : IExcelAddIn
             }
             else
             {
-                // In Operational Mode:
-                // Hide the arrow so it doesn't obstruct the user while typing in cell!
+                // In Operational Mode: hide the arrow to type cleanly
                 Arrow.HideAll();
-                // cancel remains false so in-cell text edit begins naturally
             }
         }
         catch (Exception ex)

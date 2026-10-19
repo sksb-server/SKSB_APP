@@ -10,6 +10,8 @@ using SKSB_App.Core.WorkbookHelper;
 
 public static class TypesToExcel
 {
+    private const string TargetSheet = SheetOps.LookupsSheetName;
+
     /// <summary>
     /// Auto-targets and synchronises ALL public Enums found in Core and loaded domain assemblies.
     /// </summary>
@@ -97,18 +99,16 @@ public static class TypesToExcel
             {
                 XlCall.Excel(XlCall.xlcEcho, false);
 
-                const string targetSheet = "Lookups";
-
                 // 1. Remember currently active sheet to restore focus cleanly
-                object activeDoc = null;
+                object? activeDoc = null;
                 try { activeDoc = XlCall.Excel(XlCall.xlfGetDocument, 76); } catch { }
                 string originalSheet = activeDoc?.ToString() ?? string.Empty;
 
                 // 2. Ensure Lookups exists
-                EnsureLookupsSheetExists(targetSheet);
+                EnsureLookupsSheetExists();
 
                 // 3. Make Lookups visible and active so ExcelReference.SetValue can write cleanly
-                MakeSheetVisibleAndActive(targetSheet);
+                MakeSheetVisibleAndActive(TargetSheet);
 
                 int colZero = 0;
 
@@ -139,7 +139,7 @@ public static class TypesToExcel
                         int r1c1StartRow = 2;
                         int r1c1EndRow = rowCount + 1;
                         int r1c1Col = colZero + 1;
-                        string refersTo = $"='{targetSheet}'!R{r1c1StartRow}C{r1c1Col}:R{r1c1EndRow}C{r1c1Col}";
+                        string refersTo = $"='{TargetSheet}'!R{r1c1StartRow}C{r1c1Col}:R{r1c1EndRow}C{r1c1Col}";
 
                         XlCall.Excel(XlCall.xlcDefineName, name, refersTo, 3);
                     }
@@ -148,14 +148,14 @@ public static class TypesToExcel
                 }
 
                 // 4. Move auxiliary sheets ('Lookups' and 'Data') to the end of the tabs
-                WorkbookSession.MoveAuxiliarySheetsToEnd();
+                SheetOps.MoveAuxiliarySheetsToEnd();
 
                 // 5. Hide Lookups if NOT in template edit mode
-                if (!WorkbookSession.IsTemplateEditMode)
+                if (!SheetOps.IsTemplateEditMode)
                 {
                     try
                     {
-                        XlCall.Excel(XlCall.xlcWorkbookSelect, new object[] { targetSheet });
+                        XlCall.Excel(XlCall.xlcWorkbookSelect, new object[] { TargetSheet });
                         XlCall.Excel(XlCall.xlcWorkbookHide);
                     }
                     catch { }
@@ -168,7 +168,7 @@ public static class TypesToExcel
                         ? originalSheet.Substring(originalSheet.LastIndexOf(']') + 1)
                         : originalSheet;
 
-                    if (!cleanOriginal.Equals(targetSheet, StringComparison.OrdinalIgnoreCase))
+                    if (!cleanOriginal.Equals(TargetSheet, StringComparison.OrdinalIgnoreCase))
                     {
                         try { XlCall.Excel(XlCall.xlcWorkbookSelect, new object[] { cleanOriginal }); } catch { }
                     }
@@ -203,15 +203,9 @@ public static class TypesToExcel
         try { XlCall.Excel(XlCall.xlcWorkbookSelect, new object[] { sheetName }); } catch { }
     }
 
-    private static void EnsureLookupsSheetExists(string targetSheet)
+    private static void EnsureLookupsSheetExists()
     {
-        IntPtr existingId = WorkbookSession.GetSheetId(targetSheet);
-        if (existingId != IntPtr.Zero)
-        {
-            WorkbookSession.MoveAuxiliarySheetsToEnd();
-            return;
-        }
-
+        // 1. Check if Lookups already exists across all sheets (visible or hidden) without GetSheetId
         try
         {
             object sheetsObj = XlCall.Excel(XlCall.xlfGetWorkbook, 1);
@@ -224,9 +218,9 @@ public static class TypesToExcel
                     int bIdx = raw.LastIndexOf(']');
                     string clean = bIdx >= 0 ? raw.Substring(bIdx + 1) : raw;
 
-                    if (string.Equals(clean, targetSheet, StringComparison.OrdinalIgnoreCase))
+                    if (string.Equals(clean, TargetSheet, StringComparison.OrdinalIgnoreCase))
                     {
-                        WorkbookSession.MoveAuxiliarySheetsToEnd();
+                        SheetOps.MoveAuxiliarySheetsToEnd();
                         return;
                     }
                 }
@@ -234,6 +228,7 @@ public static class TypesToExcel
         }
         catch { }
 
+        // 2. Only insert if the sheet does not exist
         try
         {
             XlCall.Excel(XlCall.xlcWorkbookInsert, 1);
@@ -244,8 +239,8 @@ public static class TypesToExcel
                 ? fullName.Substring(fullName.LastIndexOf(']') + 1)
                 : fullName;
 
-            XlCall.Excel(XlCall.xlcWorkbookName, tempName, targetSheet);
-            WorkbookSession.MoveAuxiliarySheetsToEnd();
+            XlCall.Excel(XlCall.xlcWorkbookName, tempName, TargetSheet);
+            SheetOps.MoveAuxiliarySheetsToEnd();
         }
         catch { }
     }

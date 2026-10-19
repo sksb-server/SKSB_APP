@@ -19,10 +19,8 @@ public class RibbonController : ExcelRibbon
         <customUI xmlns='http://schemas.microsoft.com/office/2009/07/customui' onLoad='OnRibbonLoad'>
           <ribbon>
             <tabs>
-              <!-- Renamed tab from 'Format' to 'Template Editor' -->
               <tab id='tabTemplateEditor' label='Template Editor'>
                 <group id='grpTemplateDesign' label='Template Design &amp; Validation'>
-                  <!-- Exposed Template Edit Mode Toggle Button -->
                   <toggleButton id='btnToggleTemplateMode'
                                 label='Template Edit Mode'
                                 size='large'
@@ -30,13 +28,11 @@ public class RibbonController : ExcelRibbon
                                 getPressed='GetTemplateModePressed'
                                 onAction='OnToggleTemplateModeClicked' />
                   <separator id='sep1' />
-                  <!-- Custom Dropdown Style Button -->
                   <button id='btnFormatDropdown' 
                           label='Make Dropdown Cell' 
                           size='large' 
                           imageMso='DataValidation' 
                           onAction='OnFormatDropdownClicked' />
-                  <!-- Data Purge Button (Only visible in Template Edit Mode) -->
                   <button id='btnPurgeTemplateData' 
                           label='Purge Template Data' 
                           size='large' 
@@ -45,7 +41,6 @@ public class RibbonController : ExcelRibbon
                           onAction='OnPurgeTemplateDataClicked' />
                 </group>
                 <group id='grpSync' label='Core Lookups'>
-                  <!-- Exposed Manual Sync All Enums Button -->
                   <button id='btnSyncCoreEnums' 
                           label='Sync All Enums' 
                           size='large' 
@@ -71,22 +66,22 @@ public class RibbonController : ExcelRibbon
 
     public bool GetTemplateModePressed(IRibbonControl control)
     {
-        return WorkbookSession.IsTemplateEditMode;
+        return SheetOps.IsTemplateEditMode;
     }
 
     public bool GetPurgeVisible(IRibbonControl control)
     {
-        return WorkbookSession.IsTemplateEditMode;
+        return SheetOps.IsTemplateEditMode;
     }
 
     public void OnToggleTemplateModeClicked(IRibbonControl control, bool isPressed)
     {
-        WorkbookSession.IsTemplateEditMode = isPressed;
+        SheetOps.IsTemplateEditMode = isPressed;
 
         if (isPressed)
         {
             // 1. Unhide both Lookups and Data auxiliary sheets
-            WorkbookSession.SetAuxiliarySheetsVisibility(visible: true);
+            SheetOps.SetAuxiliarySheetsVisibility(visible: true);
 
             // 2. Sync enums
             TypesToExcel.SyncAllCoreEnums();
@@ -104,7 +99,7 @@ public class RibbonController : ExcelRibbon
         else
         {
             // Hide both Lookups and Data sheets
-            WorkbookSession.SetAuxiliarySheetsVisibility(visible: false);
+            SheetOps.SetAuxiliarySheetsVisibility(visible: false);
 
             MessageBox.Show(
                 "Template Edit Mode is now DISABLED.\n\n" +
@@ -166,7 +161,7 @@ public class RibbonController : ExcelRibbon
         {
             ExcelAsyncUtil.QueueAsMacro(() =>
             {
-                WorkbookSession.PurgeAllSheetsData();
+                SheetOps.PurgeAllSheetsData();
                 MessageBox.Show("All sheet data has been purged. Template is now clean.",
                                 "Template Editor", MessageBoxButtons.OK, MessageBoxIcon.Information);
             });

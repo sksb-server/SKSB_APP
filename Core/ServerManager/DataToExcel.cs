@@ -198,27 +198,26 @@ public static class DataToExcel
 
     private static void EnsureDataSheetExists()
     {
-        IntPtr existingId = WorkbookSession.GetSheetId(DataSheetName);
-        if (existingId != IntPtr.Zero) return;
-
+        // 1. Check whether 'Data' already exists across any sheet (visible or hidden)
         try
         {
             object sheetsObj = XlCall.Excel(XlCall.xlfGetWorkbook, 1);
             if (sheetsObj is object[,] sheetArray)
             {
-                int dim1 = sheetArray.GetLength(1);
-                for (int c = 0; c < dim1; c++)
+                foreach (object item in sheetArray)
                 {
-                    string raw = sheetArray[0, c]?.ToString() ?? string.Empty;
+                    string raw = item?.ToString() ?? string.Empty;
                     int bIdx = raw.LastIndexOf(']');
                     string clean = bIdx >= 0 ? raw.Substring(bIdx + 1) : raw;
 
-                    if (string.Equals(clean, DataSheetName, StringComparison.OrdinalIgnoreCase)) return;
+                    if (string.Equals(clean, DataSheetName, StringComparison.OrdinalIgnoreCase))
+                        return; // Sheet already exists; do nothing
                 }
             }
         }
         catch { }
 
+        // 2. Only insert if the sheet genuinely does not exist
         try
         {
             XlCall.Excel(XlCall.xlcWorkbookInsert, 1);

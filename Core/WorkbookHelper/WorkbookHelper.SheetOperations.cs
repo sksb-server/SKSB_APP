@@ -139,4 +139,47 @@ public static class SheetOps
         }
         catch { }
     }
+
+    /// <summary>
+    /// Purges all operational data rows while strictly protecting 'Lookups' and 'Data' auxiliary sheets.
+    /// </summary>
+    public static void PurgeAllSheetsData()
+    {
+        try
+        {
+            XlCall.Excel(XlCall.xlcEcho, false);
+
+            dynamic xlApp = ExcelDnaUtil.Application;
+            dynamic wb = xlApp.ActiveWorkbook;
+            if (wb == null) return;
+
+            foreach (dynamic ws in wb.Sheets)
+            {
+                string sName = (string)ws.Name;
+
+                // Protect both Lookups and Data auxiliary sheets from being wiped
+                if (sName.Equals(LookupsSheetName, StringComparison.OrdinalIgnoreCase) ||
+                    sName.Equals(DataSheetName, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
+
+                ws.Activate();
+
+                // Clear operational rows: row index 1 (Excel row 2) down to 1000 across columns 0 to 25
+                var refRange = new ExcelReference(1, 1000, 0, 25);
+                XlCall.Excel(XlCall.xlcSelect, refRange);
+                XlCall.Excel(XlCall.xlcClear, 3); // 3 = Clear contents only (keeps headers, validation & styles)
+                XlCall.Excel(XlCall.xlcSelect, new ExcelReference(0, 0, 0, 0));
+            }
+        }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[SheetOps.PurgeAllSheetsData Error] {ex.Message}");
+        }
+        finally
+        {
+            XlCall.Excel(XlCall.xlcEcho, true);
+        }
+    }
 }
