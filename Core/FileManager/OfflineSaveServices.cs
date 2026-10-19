@@ -77,7 +77,7 @@ public static class OfflineSaveServices
         return type.Name;
     }
 
-    private static string GetPendingUploadPath<T>() =>
+    public static string GetPendingUploadPath<T>() =>
         Folder.Data.GetFilePath($"{typeof(T).Name}_PendingUpload.json");
 
     /// <summary>

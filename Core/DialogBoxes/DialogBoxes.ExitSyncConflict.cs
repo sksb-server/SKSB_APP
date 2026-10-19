@@ -9,16 +9,25 @@ public enum ExitResolution
 {
     Retry,
     SaveLocallyAndQuit,
-    Cancel
+    Cancel,
+    QuitAnyway
 }
 
 public partial class ExitSyncConflict : Form
 {
     public ExitResolution Resolution { get; private set; } = ExitResolution.Cancel;
 
-    public ExitSyncConflict(string moduleName, string errorMessage, bool allowSaveOffline = true, bool isClosing = true)
+    public ExitSyncConflict(
+        string moduleName,
+        string errorMessage,
+        bool allowSaveOffline = true,
+        bool isClosing = true,
+        bool isDebugPrompt = false)
     {
-        Text = $"{moduleName} - Synchronization Alert";
+        Text = isDebugPrompt
+            ? $"[DEBUG MODE] {moduleName} - Save & Exit Options"
+            : $"{moduleName} - Synchronization Alert";
+
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
@@ -39,7 +48,7 @@ public partial class ExitSyncConflict : Form
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
 
-        // Circular Warning Accent Icon
+        // Circular Status / Indicator Icon
         var pnlIndicator = new Panel
         {
             Size = new Size(36, 36),
@@ -48,12 +57,24 @@ public partial class ExitSyncConflict : Form
         pnlIndicator.Paint += (s, e) =>
         {
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            using var brush = new SolidBrush(Color.FromArgb(217, 119, 6)); // Amber
+            Color iconColor = isDebugPrompt ? Color.FromArgb(79, 70, 229) : Color.FromArgb(217, 119, 6);
+            using var brush = new SolidBrush(iconColor);
             e.Graphics.FillEllipse(brush, 2, 2, 32, 32);
 
             using var pen = new Pen(Color.White, 2.5f);
-            e.Graphics.DrawLine(pen, 18, 10, 18, 20);
-            e.Graphics.FillEllipse(Brushes.White, 16.5f, 23.5f, 3, 3);
+            if (isDebugPrompt)
+            {
+                // Question mark icon for Debug prompt
+                e.Graphics.DrawArc(pen, 12, 9, 12, 10, 180, 200);
+                e.Graphics.DrawLine(pen, 18, 19, 18, 22);
+                e.Graphics.FillEllipse(Brushes.White, 16.5f, 25f, 3, 3);
+            }
+            else
+            {
+                // Exclamation icon for error/offline
+                e.Graphics.DrawLine(pen, 18, 10, 18, 20);
+                e.Graphics.FillEllipse(Brushes.White, 16.5f, 23.5f, 3, 3);
+            }
         };
 
         var pnlContent = new TableLayoutPanel
@@ -66,28 +87,30 @@ public partial class ExitSyncConflict : Form
 
         var lblTitle = new Label
         {
-            Text = "Server Database Offline",
+            Text = isDebugPrompt ? "Debug Save Intercept" : "Server Database Offline",
             Font = new Font("Segoe UI", 11.5f, FontStyle.Bold),
             ForeColor = Color.FromArgb(30, 41, 59),
             AutoSize = true,
             Margin = new Padding(0, 0, 0, 6)
         };
 
-        string actionPrompt = allowSaveOffline
-            ? (isClosing
-                ? "Would you like to retry the server, save an offline stash and quit, or stay in Excel?"
-                : "Would you like to retry connecting, or save an offline stash to upload later?")
-            : "Data validation failed. Fix errors before saving. Saving offline is disabled for invalid data.";
+        string actionPrompt = isDebugPrompt
+            ? "Debug Mode is active. Select how to proceed with this record batch:"
+            : (allowSaveOffline
+                ? (isClosing
+                    ? "Would you like to retry the server, save an offline stash and quit, or stay in Excel?"
+                    : "Would you like to retry connecting, or save an offline stash to upload later?")
+                : "Data validation failed. Fix errors before saving. Saving offline is disabled for invalid data.");
 
         var lblMessage = new Label
         {
-            Text = $"Unable to persist records to the server database.\n\n" +
-                   $"Details:\n{errorMessage}\n\n" +
-                   actionPrompt,
+            Text = isDebugPrompt
+                ? $"Pending records ready to persist.\n\n{actionPrompt}"
+                : $"Unable to persist records to the server database.\n\nDetails:\n{errorMessage}\n\n{actionPrompt}",
             Font = new Font("Segoe UI", 9.5f),
             ForeColor = Color.FromArgb(71, 85, 105),
             AutoSize = true,
-            MaximumSize = new Size(460, 0),
+            MaximumSize = new Size(480, 0),
             Margin = new Padding(0, 0, 0, 18)
         };
 
@@ -99,7 +122,7 @@ public partial class ExitSyncConflict : Form
             Margin = Padding.Empty
         };
 
-        // Cancel / Dismiss Button
+        // Cancel Button (Keeps Excel open)
         var btnCancel = new Button
         {
             Text = isClosing ? "Cancel (Stay in Excel)" : "Cancel",
@@ -115,16 +138,33 @@ public partial class ExitSyncConflict : Form
         btnCancel.Click += (_, _) => { Resolution = ExitResolution.Cancel; Close(); };
         flowButtons.Controls.Add(btnCancel);
 
+#if DEBUG
+        // Quit Anyway Button (DEBUG ONLY)
+        var btnQuitAnyway = new Button
+        {
+            Text = "Quit Anyway (Discard)",
+            Font = new Font("Segoe UI", 9f, FontStyle.Italic),
+            ForeColor = Color.FromArgb(185, 28, 28),
+            BackColor = Color.FromArgb(254, 242, 242),
+            FlatStyle = FlatStyle.Flat,
+            AutoSize = true,
+            Padding = new Padding(12, 6, 12, 6)
+        };
+        btnQuitAnyway.FlatAppearance.BorderColor = Color.FromArgb(252, 165, 165);
+        btnQuitAnyway.Click += (_, _) => { Resolution = ExitResolution.QuitAnyway; Close(); };
+        flowButtons.Controls.Add(btnQuitAnyway);
+#endif
+
         if (allowSaveOffline)
         {
             // Save Offline Button
             var btnSaveLocal = new Button
             {
-                Text = isClosing ? "Save Locally & Quit" : "Save Locally",
+                Text = isClosing ? "Save Offline & Quit" : "Save Offline",
                 Font = new Font("Segoe UI", 9f, FontStyle.Bold),
                 AutoSize = true,
                 Padding = new Padding(14, 6, 14, 6),
-                BackColor = Color.FromArgb(79, 70, 229), // Indigo accent
+                BackColor = Color.FromArgb(79, 70, 229),
                 ForeColor = Color.White,
                 FlatStyle = FlatStyle.Flat
             };
@@ -132,11 +172,11 @@ public partial class ExitSyncConflict : Form
             btnSaveLocal.Click += (_, _) => { Resolution = ExitResolution.SaveLocallyAndQuit; Close(); };
             flowButtons.Controls.Add(btnSaveLocal);
 
-            // Retry Button
+            // Retry Server / Save to Server Button
             var btnRetry = new Button
             {
-                Text = "Retry Server",
-                Font = new Font("Segoe UI", 9f),
+                Text = isDebugPrompt ? "Save to Server" : "Retry Server",
+                Font = new Font("Segoe UI", 9f, FontStyle.Bold),
                 AutoSize = true,
                 Padding = new Padding(14, 6, 14, 6),
                 BackColor = Color.FromArgb(241, 245, 249),

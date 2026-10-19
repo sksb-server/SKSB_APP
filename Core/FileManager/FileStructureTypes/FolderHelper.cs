@@ -4,7 +4,7 @@ using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-using SKSB_App.Core.ExcelBitrateManager;
+using SKSB_App.Core.ExcelBitManager;
 
 namespace SKSB_App.Core.FileManager.Structure;
 

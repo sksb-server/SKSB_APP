@@ -71,4 +71,85 @@
 		<Message Importance="high"
 				 Text="[Excel-DNA Auto-Sync] Deployed @(AddInArtifacts->Count()) artifacts to $(TargetAddInsDir)" />
 	</Target>
+
+	<Project>
+		<!-- ... your existing AutoCleanBeforeBuild, CleanDeployedAddInsBeforeSync, and AutoSyncExcelDnaToDocuments targets ... -->
+
+		<!-- ============================================================= -->
+		<!-- 4. AUTO-GENERATE AI CHAT EXPORT BUNDLE (AUTO-CLEAN & NO ZIP)  -->
+		<!-- ============================================================= -->
+		<Target Name="GenerateAIChatCodeBundle"
+				AfterTargets="Build"
+				Condition="'$(Configuration)' == 'Debug' and '$(_AIChatBundleDone)' != 'true'">
+
+			<PropertyGroup>
+				<!-- Export folder located safely in Documents -->
+				<AIExportDir>$(UserProfile)\Documents\SKSB_App\AI_Source_Export</AIExportDir>
+				<SingleBundleFile>$(AIExportDir)\AI_Context_AllCode.txt</SingleBundleFile>
+				<!-- Guard flag so the multi-project solution build only runs this once -->
+				<_AIChatBundleDone>true</_AIChatBundleDone>
+			</PropertyGroup>
+
+			<!-- 1. AUTO-CLEAN: Wipe the entire previous AI export directory and any AI zips -->
+			<Exec Command="powershell -NoProfile -Command &quot;&amp; {
+			$exportDir = '$(AIExportDir)';
+			
+			# 1a. Delete any existing AI zip files in the target folder or parent Documents\SKSB_App
+			Get-ChildItem -Path '$(UserProfile)\Documents\SKSB_App' -Filter '*AI*.zip' -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue;
+			Get-ChildItem -Path '$(MSBuildThisFileDirectory)' -Filter '*AI*.zip' -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue;
+
+			# 1b. Completely wipe the target AI directory contents
+			if (Test-Path $exportDir) {
+				Get-ChildItem -Path $exportDir -Recurse -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue;
+			} else {
+				New-Item -ItemType Directory -Path $exportDir -Force | Out-Null;
+			}
+		}&quot;" IgnoreExitCode="true" />
+
+			<!-- 2. Find clean source files while strictly excluding binaries, git, and AI directories -->
+			<ItemGroup>
+				<CleanSourceFiles Include="$(MSBuildThisFileDirectory)**\*.cs;
+			                           $(MSBuildThisFileDirectory)**\*.csproj;
+			                           $(MSBuildThisFileDirectory)**\*.dna;
+			                           $(MSBuildThisFileDirectory)**\*.props;
+			                           $(MSBuildThisFileDirectory)**\*.targets;
+			                           $(MSBuildThisFileDirectory)**\*.sql"
+								  Exclude="$(MSBuildThisFileDirectory)**\bin\**;
+			                           $(MSBuildThisFileDirectory)**\obj\**;
+			                           $(MSBuildThisFileDirectory)**\.vs\**;
+			                           $(MSBuildThisFileDirectory)**\.git\**;
+			                           $(MSBuildThisFileDirectory)**\packages\**;
+			                           $(MSBuildThisFileDirectory)**\publish\**;
+			                           $(MSBuildThisFileDirectory)**\AI_Source_Export\**;
+			                           $(MSBuildThisFileDirectory)**\*AI*\**;
+			                           $(AIExportDir)\**" />
+			</ItemGroup>
+
+			<!-- 3. Copy source files into the freshly cleared folder -->
+			<Copy SourceFiles="@(CleanSourceFiles)"
+				  DestinationFolder="$(AIExportDir)\%(RecursiveDir)"
+				  SkipUnchangedFiles="false" />
+
+			<!-- 4. Concatenate into the single, pasteable AI text bundle -->
+			<Exec Command="powershell -NoProfile -Command &quot;&amp; {
+			$dest = '$(SingleBundleFile)';
+			$exportDir = '$(AIExportDir)';
+			
+			Get-ChildItem -Path $exportDir -Recurse -File | Where-Object { 
+				$_.FullName -ne $dest -and 
+				$_.Extension -match '\.(cs|csproj|dna|props|targets|sql)$' 
+			} | ForEach-Object {
+				$rel = $_.FullName.Replace($exportDir + '\', '');
+				'============================================================' | Out-File $dest -Append -Encoding utf8;
+				('FILE: ' + $rel) | Out-File $dest -Append -Encoding utf8;
+				'============================================================' | Out-File $dest -Append -Encoding utf8;
+				Get-Content $_.FullName | Out-File $dest -Append -Encoding utf8;
+				'`n' | Out-File $dest -Append -Encoding utf8;
+			}
+		}&quot;" IgnoreExitCode="true" />
+
+			<Message Importance="high" Text="[AI Clean &amp; Export] Purged stale files/zips and generated fresh code bundle at: $(SingleBundleFile)" />
+		</Target>
+	</Project>
+	
 </Project>

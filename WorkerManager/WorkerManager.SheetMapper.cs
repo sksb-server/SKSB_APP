@@ -20,6 +20,28 @@ public static class SheetMapper
     private static readonly string[] VehicleLicenseSheetAliases = { "Vehicle Licenses", "Vehicle_Licenses", "Worker_License", "Staff_License" };
     private static readonly string[] SkillLicenseSheetAliases = { "Skill Licenses", "Skill_Licenses", "Worker_Skill", "Staff_Skill" };
 
+    /// <summary>
+    /// Pre-caches validation and dropdown metadata on open.
+    /// </summary>
+    public static void InitializeSheetRules()
+    {
+        try
+        {
+            dynamic xlApp = ExcelDnaUtil.Application;
+            dynamic wb = xlApp.ActiveWorkbook;
+            if (wb == null) return;
+
+            string masterSheetName = SheetOps.ResolveSheetName(MasterSheetAliases, "All Workers");
+            string vLicSheetName = SheetOps.ResolveSheetName(VehicleLicenseSheetAliases, "Vehicle Licenses");
+            string sLicSheetName = SheetOps.ResolveSheetName(SkillLicenseSheetAliases, "Skill Licenses");
+
+            try { CellRulesExtractor.InitializeRulesForSheet((object)wb.Sheets[masterSheetName], headerRow: 1, startCol: 1, columnSpan: MasterColumnSpan); } catch { }
+            try { CellRulesExtractor.InitializeRulesForSheet((object)wb.Sheets[vLicSheetName], headerRow: 1, startCol: 1, columnSpan: VehicleLicenseColumnSpan); } catch { }
+            try { CellRulesExtractor.InitializeRulesForSheet((object)wb.Sheets[sLicSheetName], headerRow: 1, startCol: 1, columnSpan: SkillLicenseColumnSpan); } catch { }
+        }
+        catch { }
+    }
+
     public static (List<WorkerRecord> Records, List<string> Errors, List<string> Warnings) ExtractWorkerRecordsWithDiagnostics()
     {
         var result = new List<WorkerRecord>();
@@ -30,112 +52,81 @@ public static class SheetMapper
         dynamic xlApp = ExcelDnaUtil.Application;
         dynamic wb = xlApp.ActiveWorkbook;
 
-        var allowedLicenseTypes = FetchAllowedSkillLicenseTypes();
-
         string masterSheetName = SheetOps.ResolveSheetName(MasterSheetAliases, "All Workers");
         string vLicSheetName = SheetOps.ResolveSheetName(VehicleLicenseSheetAliases, "Vehicle Licenses");
         string sLicSheetName = SheetOps.ResolveSheetName(SkillLicenseSheetAliases, "Skill Licenses");
 
         // -------------------------------------------------------------
-        // 1. ALL WORKERS (Columns A to H)
+        // 1. ALL WORKERS (Evaluated via CellRulesExtractor)
         // -------------------------------------------------------------
         try
         {
             dynamic masterWs = wb.Sheets[masterSheetName];
-            object[,] masterGrid = masterWs.Range["A2:H1000"].Value2;
-            int rows = masterGrid.GetLength(0);
+            var (masterRows, mErrors, mWarnings) = CellRulesExtractor.EvaluateAndExtract(
+                (object)masterWs,
+                startRow: 2,
+                maxRows: 1000,
+                startCol: 1,
+                columnSpan: MasterColumnSpan,
+                driverColIndex: 1
+            );
 
-            for (int r = 1; r <= rows; r++)
+            validationErrors.AddRange(mErrors);
+            validationWarnings.AddRange(mWarnings);
+
+            int excelRow = 1;
+            foreach (var row in masterRows)
             {
-                int excelRow = r + 1;
-                string rawIdStr = DataFormatting.CleanString(masterGrid[r, 1]);
-                string workerName = DataFormatting.CleanString(masterGrid[r, 2]);
-                string rawNric = DataFormatting.CleanString(masterGrid[r, 3]);
-                string passport = DataFormatting.CleanString(masterGrid[r, 4]);
-                string phone = DataFormatting.CleanString(masterGrid[r, 5]);
-
-                if (string.IsNullOrWhiteSpace(rawIdStr) &&
-                    string.IsNullOrWhiteSpace(workerName) &&
-                    string.IsNullOrWhiteSpace(rawNric) &&
-                    string.IsNullOrWhiteSpace(passport) &&
-                    string.IsNullOrWhiteSpace(phone))
-                {
-                    continue;
-                }
-
-                bool hasRowError = false;
-
-                if (string.IsNullOrWhiteSpace(rawIdStr) && !string.IsNullOrWhiteSpace(workerName))
-                {
-                    validationErrors.Add($"• Row {excelRow} [{masterSheetName}]: Worker '{workerName}' is missing a Worker ID.");
-                    hasRowError = true;
-                }
-
-                long workerId = 0;
-                if (!string.IsNullOrWhiteSpace(rawIdStr))
-                {
-                    if (!long.TryParse(rawIdStr, out workerId) || workerId <= 0)
-                    {
-                        validationErrors.Add($"• Row {excelRow} [{masterSheetName}]: Invalid Worker ID '{rawIdStr}'. Must be a positive number.");
-                        hasRowError = true;
-                    }
-                }
-
-                if (string.IsNullOrWhiteSpace(workerName))
-                {
-                    validationErrors.Add($"• Row {excelRow} [{masterSheetName}]: Worker ID {(workerId > 0 ? workerId.ToString() : rawIdStr)} has no Worker Name specified.");
-                    hasRowError = true;
-                }
+                excelRow++;
+                long workerId = DataFormatting.CleanString(GetRowValue(row, "Worker ID", 0)) is string idStr && long.TryParse(idStr, out long parsedId)
+                    ? parsedId
+                    : 0;
+                string workerName = DataFormatting.CleanString(GetRowValue(row, "Worker Name", 1));
 
                 if (workerId > 0 && workerLookup.TryGetValue(workerId, out var existingWorker))
                 {
                     if (!existingWorker.WorkerDetails.WorkerName.Equals(workerName, StringComparison.OrdinalIgnoreCase))
                     {
-                        validationErrors.Add($"• Row {excelRow} [{masterSheetName}]: Duplicate Worker ID {workerId} found with conflicting names ('{existingWorker.WorkerDetails.WorkerName}' vs '{workerName}').");
+                        validationErrors.Add($"  Row {excelRow} [{masterSheetName}]: Duplicate Worker ID {workerId} with conflicting names ('{existingWorker.WorkerDetails.WorkerName}' vs '{workerName}').");
                     }
                     else
                     {
-                        validationErrors.Add($"• Row {excelRow} [{masterSheetName}]: Duplicate Worker ID {workerId} ('{workerName}') entered multiple times.");
+                        validationErrors.Add($"  Row {excelRow} [{masterSheetName}]: Duplicate Worker ID {workerId} ('{workerName}') entered multiple times.");
                     }
-                    hasRowError = true;
+                    continue;
                 }
 
+                string rawNric = DataFormatting.CleanString(GetRowValue(row, "NRIC", 2));
                 long nric = 0;
                 if (!string.IsNullOrWhiteSpace(rawNric))
                 {
                     string cleanNric = System.Text.RegularExpressions.Regex.Replace(rawNric, @"[^\d]", string.Empty);
-                    if (!long.TryParse(cleanNric, out nric) || cleanNric.Length != 12)
-                    {
-                        validationWarnings.Add($"• Row {excelRow} [{masterSheetName}]: Worker ID {workerId} ('{workerName}') NRIC '{rawNric}' is not 12 digits.");
-                    }
+                    long.TryParse(cleanNric, out nric);
                 }
 
-                if (nric == 0 && string.IsNullOrWhiteSpace(passport))
-                {
-                    validationWarnings.Add($"• Row {excelRow} [{masterSheetName}]: Worker ID {workerId} ('{workerName}') has neither an NRIC nor a Passport recorded.");
-                }
-
-                DateOnly joinDate = DataFormatting.ParseDate(masterGrid[r, 6]);
+                string passport = DataFormatting.CleanString(GetRowValue(row, "Passport", 3));
+                string phone = DataFormatting.CleanString(GetRowValue(row, "Phone", 4));
+                DateOnly joinDate = DataFormatting.ParseDate(GetRowValue(row, "Join Date", 5));
                 if (joinDate == default) joinDate = DateOnly.FromDateTime(DateTime.Today);
 
                 DateOnly? resignDate = null;
-                DateOnly parsedResign = DataFormatting.ParseDate(masterGrid[r, 7]);
+                DateOnly parsedResign = DataFormatting.ParseDate(GetRowValue(row, "Resign Date", 6));
                 if (parsedResign != default)
                 {
                     if (parsedResign < joinDate)
                     {
-                        validationErrors.Add($"• Row {excelRow} [{masterSheetName}]: Worker ID {workerId} Resign Date ({parsedResign}) cannot be earlier than Join Date ({joinDate}).");
-                        hasRowError = true;
+                        validationErrors.Add($"  Row {excelRow} [{masterSheetName}]: Worker ID {workerId} Resign Date ({parsedResign}) cannot be earlier than Join Date ({joinDate}).");
+                        continue;
                     }
                     resignDate = parsedResign;
                 }
 
-                string statusStr = DataFormatting.CleanString(masterGrid[r, 8]);
+                string statusStr = DataFormatting.CleanString(GetRowValue(row, "Contract Status", 7));
                 ContractStatus status = Enum.TryParse(statusStr, true, out ContractStatus parsedStatus)
                     ? parsedStatus
                     : ContractStatus.Active;
 
-                if (!hasRowError && workerId > 0)
+                if (workerId > 0)
                 {
                     var worker = new WorkerRecord
                     {
@@ -154,7 +145,6 @@ public static class SheetMapper
                         VehicleLicenses = new List<VehicleLicense>(),
                         SkillLicenses = new List<SkillLicense>()
                     };
-
                     workerLookup[workerId] = worker;
                     result.Add(worker);
                 }
@@ -166,185 +156,70 @@ public static class SheetMapper
         }
 
         // -------------------------------------------------------------
-        // PRE-CALCULATE MAXIMUM EXISTING LICENSE IDS
-        // -------------------------------------------------------------
-        long maxVehicleLicId = 0;
-        long maxSkillLicId = 0;
-
-        try
-        {
-            dynamic vWs = wb.Sheets[vLicSheetName];
-            object[,] vGrid = vWs.Range["A2:A1000"].Value2;
-            int rCount = vGrid.GetLength(0);
-            for (int i = 1; i <= rCount; i++)
-            {
-                if (long.TryParse(vGrid[i, 1]?.ToString(), out long existingId) && existingId > maxVehicleLicId)
-                    maxVehicleLicId = existingId;
-            }
-        }
-        catch { }
-
-        try
-        {
-            dynamic sWs = wb.Sheets[sLicSheetName];
-            object[,] sGrid = sWs.Range["A2:A1000"].Value2;
-            int rCount = sGrid.GetLength(0);
-            for (int i = 1; i <= rCount; i++)
-            {
-                if (long.TryParse(sGrid[i, 1]?.ToString(), out long existingId) && existingId > maxSkillLicId)
-                    maxSkillLicId = existingId;
-            }
-        }
-        catch { }
-
-        var vehicleLicenseIdSet = new HashSet<long>();
-        var skillLicenseIdSet = new HashSet<long>();
-
-        // -------------------------------------------------------------
-        // 2. VEHICLE LICENSES (Columns A to G)
+        // 2. VEHICLE LICENSES (Evaluated via CellRulesExtractor)
         // -------------------------------------------------------------
         try
         {
             dynamic vWs = wb.Sheets[vLicSheetName];
-            object[,] vLicGrid = vWs.Range["A2:G1000"].Value2;
-            int rows = vLicGrid.GetLength(0);
+            var (vRows, vErrors, vWarnings) = CellRulesExtractor.EvaluateAndExtract(
+                (object)vWs,
+                startRow: 2,
+                maxRows: 1000,
+                startCol: 1,
+                columnSpan: VehicleLicenseColumnSpan,
+                driverColIndex: 2
+            );
 
-            for (int r = 1; r <= rows; r++)
+            validationErrors.AddRange(vErrors);
+            validationWarnings.AddRange(vWarnings);
+
+            var vLicSet = new HashSet<long>();
+            long autoLicId = 1000;
+
+            foreach (var row in vRows)
             {
-                int excelRow = r + 1;
-                string rawLicIdStr = DataFormatting.CleanString(vLicGrid[r, 1]);
-                string rawWorkerIdStr = DataFormatting.CleanString(vLicGrid[r, 2]);
-                string rawWorkerName = DataFormatting.CleanString(vLicGrid[r, 3]);
-                string licClassStr = DataFormatting.CleanString(vLicGrid[r, 4]);
+                long.TryParse(DataFormatting.CleanString(GetRowValue(row, "License ID", 0)), out long licId);
+                long.TryParse(DataFormatting.CleanString(GetRowValue(row, "Worker ID", 1)), out long workerId);
+                string licClassStr = DataFormatting.CleanString(GetRowValue(row, "License Class", 3));
 
-                if (string.IsNullOrWhiteSpace(rawLicIdStr) &&
-                    string.IsNullOrWhiteSpace(rawWorkerIdStr) &&
-                    string.IsNullOrWhiteSpace(rawWorkerName) &&
-                    string.IsNullOrWhiteSpace(licClassStr))
+                if (licId <= 0) licId = ++autoLicId;
+                if (!vLicSet.Add(licId))
                 {
+                    validationErrors.Add($"  [{vLicSheetName}]: Duplicate Vehicle License ID {licId}.");
                     continue;
                 }
 
-                bool hasRowError = false;
-                var rowWarnings = new List<string>();
-
-                long licId = 0;
-                if (string.IsNullOrWhiteSpace(rawLicIdStr) || !long.TryParse(rawLicIdStr, out licId) || licId <= 0)
+                if (!workerLookup.TryGetValue(workerId, out var targetWorker))
                 {
-                    maxVehicleLicId++;
-                    licId = maxVehicleLicId;
-                    rowWarnings.Add($"Missing License ID -> Auto-assigned next available ID: {licId}");
-                }
-                else
-                {
-                    if (licId > maxVehicleLicId) maxVehicleLicId = licId;
-                    if (!vehicleLicenseIdSet.Add(licId))
-                    {
-                        validationErrors.Add($"• Row {excelRow} [{vLicSheetName}]: Duplicate License ID {licId} detected.");
-                        hasRowError = true;
-                    }
+                    validationErrors.Add($"  [{vLicSheetName}]: Worker ID {workerId} (License ID {licId}) does not exist in '{masterSheetName}'.");
+                    continue;
                 }
 
-                long workerId = 0;
-                WorkerRecord? targetWorker = null;
-                if (string.IsNullOrWhiteSpace(rawWorkerIdStr) || !long.TryParse(rawWorkerIdStr, out workerId) || workerId <= 0)
+                if (!Enum.TryParse(licClassStr, true, out LicenseClass licClass) || licClass == LicenseClass.None)
                 {
-                    validationErrors.Add($"• Row {excelRow} [{vLicSheetName}]: License ID {licId} is missing a valid numeric Worker ID.");
-                    hasRowError = true;
-                }
-                else if (!workerLookup.TryGetValue(workerId, out targetWorker))
-                {
-                    validationErrors.Add($"• Row {excelRow} [{vLicSheetName}]: Worker ID {workerId} (License ID {licId}) does not exist in '{masterSheetName}'.");
-                    hasRowError = true;
+                    validationErrors.Add($"  [{vLicSheetName}]: Invalid License Class '{licClassStr}' for License ID {licId}.");
+                    continue;
                 }
 
-                if (targetWorker != null && !string.IsNullOrWhiteSpace(rawWorkerName))
-                {
-                    string expectedName = targetWorker.WorkerDetails.WorkerName;
-                    string expectedShort = targetWorker.WorkerDetails.WorkerShortName;
+                DateOnly renewDate = DataFormatting.ParseDate(GetRowValue(row, "Renew Date", 4));
+                DateOnly expiryDate = DataFormatting.ParseDate(GetRowValue(row, "Expiry Date", 5));
+                if (renewDate == default) renewDate = targetWorker.WorkerDetails.JoinDate;
+                if (expiryDate == default) expiryDate = renewDate.AddYears(1);
 
-                    if (!rawWorkerName.Equals(expectedName, StringComparison.OrdinalIgnoreCase) &&
-                        !rawWorkerName.Equals(expectedShort, StringComparison.OrdinalIgnoreCase))
-                    {
-                        rowWarnings.Add($"Worker Name mismatch for ID {workerId} ('{rawWorkerName}' vs master '{expectedName}')");
-                    }
-                }
+                string statusStr = DataFormatting.CleanString(GetRowValue(row, "Status", 6));
+                LicenseStatus licStatus = Enum.TryParse(statusStr, true, out LicenseStatus parsedStatus)
+                    ? parsedStatus
+                    : (DateOnly.FromDateTime(DateTime.Today) > expiryDate ? LicenseStatus.Invalid : LicenseStatus.Valid);
 
-                LicenseClass licClass = LicenseClass.None;
-                if (string.IsNullOrWhiteSpace(licClassStr) || !Enum.TryParse(licClassStr, true, out licClass) || licClass == LicenseClass.None)
+                targetWorker.VehicleLicenses.Add(new VehicleLicense
                 {
-                    validationErrors.Add($"• Row {excelRow} [{vLicSheetName}]: Invalid License Class '{licClassStr}' for License ID {licId}.");
-                    hasRowError = true;
-                }
-
-                DateOnly parsedRenew = DataFormatting.ParseDate(vLicGrid[r, 5]);
-                DateOnly parsedExpiry = DataFormatting.ParseDate(vLicGrid[r, 6]);
-                string statusStr = DataFormatting.CleanString(vLicGrid[r, 7]);
-
-                DateOnly renewDate;
-                DateOnly expiryDate;
-                DateOnly today = DateOnly.FromDateTime(DateTime.Today);
-
-                if (parsedRenew == default && parsedExpiry == default)
-                {
-                    renewDate = (targetWorker != null && targetWorker.WorkerDetails.JoinDate != default)
-                        ? targetWorker.WorkerDetails.JoinDate
-                        : today;
-                    expiryDate = renewDate.AddYears(1);
-                    rowWarnings.Add($"Dates empty -> Defaulted Renewal: {renewDate:yyyy-MM-dd}, Expiry: {expiryDate:yyyy-MM-dd}");
-                }
-                else if (parsedRenew != default && parsedExpiry == default)
-                {
-                    renewDate = parsedRenew;
-                    expiryDate = renewDate.AddYears(1);
-                    rowWarnings.Add($"Expiry empty -> Defaulted to 1 year after renewal: {expiryDate:yyyy-MM-dd}");
-                }
-                else if (parsedRenew == default && parsedExpiry != default)
-                {
-                    expiryDate = parsedExpiry;
-                    renewDate = expiryDate.AddYears(-1);
-                    rowWarnings.Add($"Renewal empty -> Defaulted to 1 year prior to expiry: {renewDate:yyyy-MM-dd}");
-                }
-                else
-                {
-                    renewDate = parsedRenew;
-                    expiryDate = parsedExpiry;
-                }
-
-                if (expiryDate <= renewDate)
-                {
-                    validationErrors.Add($"• Row {excelRow} [{vLicSheetName}]: License ID {licId} Expiry Date ({expiryDate:yyyy-MM-dd}) must be later than Renewal Date ({renewDate:yyyy-MM-dd}).");
-                    hasRowError = true;
-                }
-
-                LicenseStatus licStatus;
-                if (!string.IsNullOrWhiteSpace(statusStr) && Enum.TryParse(statusStr, true, out LicenseStatus parsedStatus))
-                {
-                    licStatus = parsedStatus;
-                }
-                else
-                {
-                    licStatus = today > expiryDate ? LicenseStatus.Invalid : LicenseStatus.Valid;
-                    rowWarnings.Add($"Status empty -> Defaulted to '{licStatus}' based on Expiry Date ({expiryDate:yyyy-MM-dd})");
-                }
-
-                if (rowWarnings.Count > 0)
-                {
-                    validationWarnings.Add($"• Row {excelRow} [{vLicSheetName}]: License ID {licId}: " + string.Join("; ", rowWarnings));
-                }
-
-                if (!hasRowError && targetWorker != null)
-                {
-                    targetWorker.VehicleLicenses.Add(new VehicleLicense
-                    {
-                        LicenseID = licId,
-                        WorkerID = workerId,
-                        LicenseClass = licClass,
-                        RenewDate = renewDate,
-                        ExpiryDate = expiryDate,
-                        LicenseStatus = licStatus
-                    });
-                }
+                    LicenseID = licId,
+                    WorkerID = workerId,
+                    LicenseClass = licClass,
+                    RenewDate = renewDate,
+                    ExpiryDate = expiryDate,
+                    LicenseStatus = licStatus
+                });
             }
         }
         catch (Exception ex)
@@ -353,154 +228,64 @@ public static class SheetMapper
         }
 
         // -------------------------------------------------------------
-        // 3. SKILL LICENSES (Columns A to G)
+        // 3. SKILL LICENSES (Evaluated via CellRulesExtractor)
         // -------------------------------------------------------------
         try
         {
             dynamic sWs = wb.Sheets[sLicSheetName];
-            object[,] sLicGrid = sWs.Range["A2:G1000"].Value2;
-            int rows = sLicGrid.GetLength(0);
+            var (sRows, sErrors, sWarnings) = CellRulesExtractor.EvaluateAndExtract(
+                (object)sWs,
+                startRow: 2,
+                maxRows: 1000,
+                startCol: 1,
+                columnSpan: SkillLicenseColumnSpan,
+                driverColIndex: 2
+            );
 
-            for (int r = 1; r <= rows; r++)
+            validationErrors.AddRange(sErrors);
+            validationWarnings.AddRange(sWarnings);
+
+            var sLicSet = new HashSet<long>();
+            long autoLicId = 2000;
+
+            foreach (var row in sRows)
             {
-                int excelRow = r + 1;
-                string rawLicIdStr = DataFormatting.CleanString(sLicGrid[r, 1]);
-                string rawWorkerIdStr = DataFormatting.CleanString(sLicGrid[r, 2]);
-                string rawWorkerName = DataFormatting.CleanString(sLicGrid[r, 3]);
-                string skillType = DataFormatting.CleanString(sLicGrid[r, 4]);
+                long.TryParse(DataFormatting.CleanString(GetRowValue(row, "License ID", 0)), out long licId);
+                long.TryParse(DataFormatting.CleanString(GetRowValue(row, "Worker ID", 1)), out long workerId);
+                string skillType = DataFormatting.CleanString(GetRowValue(row, "License Type", 3));
 
-                if (string.IsNullOrWhiteSpace(rawLicIdStr) &&
-                    string.IsNullOrWhiteSpace(rawWorkerIdStr) &&
-                    string.IsNullOrWhiteSpace(rawWorkerName) &&
-                    string.IsNullOrWhiteSpace(skillType))
+                if (licId <= 0) licId = ++autoLicId;
+                if (!sLicSet.Add(licId))
                 {
+                    validationErrors.Add($"  [{sLicSheetName}]: Duplicate Skill License ID {licId}.");
                     continue;
                 }
 
-                bool hasRowError = false;
-                var rowWarnings = new List<string>();
-
-                long licId = 0;
-                if (string.IsNullOrWhiteSpace(rawLicIdStr) || !long.TryParse(rawLicIdStr, out licId) || licId <= 0)
+                if (!workerLookup.TryGetValue(workerId, out var targetWorker))
                 {
-                    maxSkillLicId++;
-                    licId = maxSkillLicId;
-                    rowWarnings.Add($"Missing License ID -> Auto-assigned next available ID: {licId}");
-                }
-                else
-                {
-                    if (licId > maxSkillLicId) maxSkillLicId = licId;
-                    if (!skillLicenseIdSet.Add(licId))
-                    {
-                        validationErrors.Add($"• Row {excelRow} [{sLicSheetName}]: Duplicate Skill License ID {licId} detected.");
-                        hasRowError = true;
-                    }
+                    validationErrors.Add($"  [{sLicSheetName}]: Worker ID {workerId} (License ID {licId}) does not exist in '{masterSheetName}'.");
+                    continue;
                 }
 
-                long workerId = 0;
-                WorkerRecord? targetWorker = null;
-                if (string.IsNullOrWhiteSpace(rawWorkerIdStr) || !long.TryParse(rawWorkerIdStr, out workerId) || workerId <= 0)
-                {
-                    validationErrors.Add($"• Row {excelRow} [{sLicSheetName}]: License ID {licId} is missing a valid numeric Worker ID.");
-                    hasRowError = true;
-                }
-                else if (!workerLookup.TryGetValue(workerId, out targetWorker))
-                {
-                    validationErrors.Add($"• Row {excelRow} [{sLicSheetName}]: Worker ID {workerId} (License ID {licId}) does not exist in '{masterSheetName}'.");
-                    hasRowError = true;
-                }
+                DateOnly renewDate = DataFormatting.ParseDate(GetRowValue(row, "Renew Date", 4));
+                DateOnly expiryDate = DataFormatting.ParseDate(GetRowValue(row, "Expiry Date", 5));
+                if (renewDate == default) renewDate = targetWorker.WorkerDetails.JoinDate;
+                if (expiryDate == default) expiryDate = renewDate.AddYears(1);
 
-                if (targetWorker != null && !string.IsNullOrWhiteSpace(rawWorkerName))
-                {
-                    string expectedName = targetWorker.WorkerDetails.WorkerName;
-                    string expectedShort = targetWorker.WorkerDetails.WorkerShortName;
+                string statusStr = DataFormatting.CleanString(GetRowValue(row, "Status", 6));
+                LicenseStatus licStatus = Enum.TryParse(statusStr, true, out LicenseStatus parsedStatus)
+                    ? parsedStatus
+                    : (DateOnly.FromDateTime(DateTime.Today) > expiryDate ? LicenseStatus.Invalid : LicenseStatus.Valid);
 
-                    if (!rawWorkerName.Equals(expectedName, StringComparison.OrdinalIgnoreCase) &&
-                        !rawWorkerName.Equals(expectedShort, StringComparison.OrdinalIgnoreCase))
-                    {
-                        rowWarnings.Add($"Worker Name mismatch for ID {workerId} ('{rawWorkerName}' vs master '{expectedName}')");
-                    }
-                }
-
-                if (string.IsNullOrWhiteSpace(skillType))
+                targetWorker.SkillLicenses.Add(new SkillLicense
                 {
-                    validationErrors.Add($"• Row {excelRow} [{sLicSheetName}]: License ID {licId} has no License Type specified.");
-                    hasRowError = true;
-                }
-                else if (allowedLicenseTypes.Count > 0 && !allowedLicenseTypes.Contains(skillType))
-                {
-                    validationErrors.Add($"• Row {excelRow} [{sLicSheetName}]: License ID {licId} has invalid License Type '{skillType}'. It is not part of the allowed license types.");
-                    hasRowError = true;
-                }
-
-                DateOnly parsedRenew = DataFormatting.ParseDate(sLicGrid[r, 5]);
-                DateOnly parsedExpiry = DataFormatting.ParseDate(sLicGrid[r, 6]);
-                string statusStr = DataFormatting.CleanString(sLicGrid[r, 7]);
-
-                DateOnly renewDate;
-                DateOnly expiryDate;
-                DateOnly today = DateOnly.FromDateTime(DateTime.Today);
-
-                if (parsedRenew == default && parsedExpiry == default)
-                {
-                    renewDate = (targetWorker != null && targetWorker.WorkerDetails.JoinDate != default)
-                        ? targetWorker.WorkerDetails.JoinDate
-                        : today;
-                    expiryDate = renewDate.AddYears(1);
-                    rowWarnings.Add($"Dates empty -> Defaulted Renewal: {renewDate:yyyy-MM-dd}, Expiry: {expiryDate:yyyy-MM-dd}");
-                }
-                else if (parsedRenew != default && parsedExpiry == default)
-                {
-                    renewDate = parsedRenew;
-                    expiryDate = renewDate.AddYears(1);
-                    rowWarnings.Add($"Expiry empty -> Defaulted to 1 year after renewal: {expiryDate:yyyy-MM-dd}");
-                }
-                else if (parsedRenew == default && parsedExpiry != default)
-                {
-                    expiryDate = parsedExpiry;
-                    renewDate = expiryDate.AddYears(-1);
-                    rowWarnings.Add($"Renewal empty -> Defaulted to 1 year prior to expiry: {renewDate:yyyy-MM-dd}");
-                }
-                else
-                {
-                    renewDate = parsedRenew;
-                    expiryDate = parsedExpiry;
-                }
-
-                if (expiryDate <= renewDate)
-                {
-                    validationErrors.Add($"• Row {excelRow} [{sLicSheetName}]: License ID {licId} Expiry Date ({expiryDate:yyyy-MM-dd}) must be later than Renewal Date ({renewDate:yyyy-MM-dd}).");
-                    hasRowError = true;
-                }
-
-                LicenseStatus licStatus;
-                if (!string.IsNullOrWhiteSpace(statusStr) && Enum.TryParse(statusStr, true, out LicenseStatus parsedStatus))
-                {
-                    licStatus = parsedStatus;
-                }
-                else
-                {
-                    licStatus = today > expiryDate ? LicenseStatus.Invalid : LicenseStatus.Valid;
-                    rowWarnings.Add($"Status empty -> Defaulted to '{licStatus}' based on Expiry Date ({expiryDate:yyyy-MM-dd})");
-                }
-
-                if (rowWarnings.Count > 0)
-                {
-                    validationWarnings.Add($"• Row {excelRow} [{sLicSheetName}]: License ID {licId} ('{skillType}'): " + string.Join("; ", rowWarnings));
-                }
-
-                if (!hasRowError && targetWorker != null)
-                {
-                    targetWorker.SkillLicenses.Add(new SkillLicense
-                    {
-                        LicenseID = licId,
-                        WorkerID = workerId,
-                        LicenseType = skillType,
-                        RenewDate = renewDate,
-                        ExpiryDate = expiryDate,
-                        LicenseStatus = licStatus
-                    });
-                }
+                    LicenseID = licId,
+                    WorkerID = workerId,
+                    LicenseType = skillType,
+                    RenewDate = renewDate,
+                    ExpiryDate = expiryDate,
+                    LicenseStatus = licStatus
+                });
             }
         }
         catch (Exception ex)
@@ -511,28 +296,35 @@ public static class SheetMapper
         return (result, validationErrors, validationWarnings);
     }
 
+    private static object? GetRowValue(Dictionary<string, object?> dict, string key, int fallbackIndex)
+    {
+        if (dict.TryGetValue(key, out var val)) return val;
+        foreach (var entry in dict)
+        {
+            if (entry.Key.IndexOf(key, StringComparison.OrdinalIgnoreCase) >= 0)
+                return entry.Value;
+        }
+        return dict.Values.ElementAtOrDefault(fallbackIndex);
+    }
+
     public static List<WorkerRecord> ExtractWorkerRecords()
     {
         var (records, errors, warnings) = ExtractWorkerRecordsWithDiagnostics();
-
         if (errors.Count > 0 || warnings.Count > 0)
         {
             using var dlg = new ValidationSummary("Worker Manager", errors, warnings);
             dlg.ShowDialog();
-
             if (errors.Count > 0 || dlg.Action != ValidationDialogAction.ProceedAnyway)
             {
                 return new List<WorkerRecord>();
             }
         }
-
         return records;
     }
 
     public static void PopulateWorksheet(List<WorkerRecord> workerList)
     {
         if (workerList == null) return;
-
         var sortedList = workerList
             .OrderBy(w => w.WorkerDetails.ContractStatus == ContractStatus.Resigned ? 1 : 0)
             .ThenBy(w => w.WorkerID)
@@ -543,11 +335,9 @@ public static class SheetMapper
         string targetSLic = SheetOps.ResolveSheetName(SkillLicenseSheetAliases, "Skill Licenses");
 
         object initialActiveSheet = XlCall.Excel(XlCall.xlfGetDocument, 1);
-
         try
         {
             XlCall.Excel(XlCall.xlcEcho, false);
-
             int rowCount = sortedList.Count;
 
             // 1. ALL WORKERS
@@ -562,7 +352,6 @@ public static class SheetMapper
                 {
                     var w = sortedList[i];
                     var details = w.WorkerDetails;
-
                     masterOutput[i, 0] = w.WorkerID;
                     masterOutput[i, 1] = details.WorkerName;
                     masterOutput[i, 2] = details.NRIC > 0 ? (object)details.NRIC : string.Empty;
@@ -574,11 +363,9 @@ public static class SheetMapper
                         : string.Empty;
                     masterOutput[i, 7] = details.ContractStatus.ToString();
                 }
-
                 var writeMasterRef = new ExcelReference(1, rowCount, 0, MasterColumnSpan - 1);
                 writeMasterRef.SetValue(masterOutput);
             }
-
             DataFormatting.ResizeTable(targetMaster, rowCount, MasterColumnSpan);
 
             // 2. VEHICLE LICENSES
@@ -609,11 +396,9 @@ public static class SheetMapper
                     vOutput[i, 5] = lic.ExpiryDate.ToDateTime(TimeOnly.MinValue).ToOADate();
                     vOutput[i, 6] = lic.LicenseStatus.ToString();
                 }
-
                 var writeVRef = new ExcelReference(1, allVLicenses.Count, 0, VehicleLicenseColumnSpan - 1);
                 writeVRef.SetValue(vOutput);
             }
-
             DataFormatting.ResizeTable(targetVLic, allVLicenses.Count, VehicleLicenseColumnSpan);
 
             // 3. SKILL LICENSES
@@ -644,11 +429,9 @@ public static class SheetMapper
                     sOutput[i, 5] = lic.ExpiryDate.ToDateTime(TimeOnly.MinValue).ToOADate();
                     sOutput[i, 6] = lic.LicenseStatus.ToString();
                 }
-
                 var writeSRef = new ExcelReference(1, allSLicenses.Count, 0, SkillLicenseColumnSpan - 1);
                 writeSRef.SetValue(sOutput);
             }
-
             DataFormatting.ResizeTable(targetSLic, allSLicenses.Count, SkillLicenseColumnSpan);
 
             PopulateSkillLicenseTypesTable();
@@ -673,7 +456,6 @@ public static class SheetMapper
     {
         var sb = new StringBuilder();
         sb.AppendLine("=== Skill License Types Sync Diagnostics ===");
-
         var distinctTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
         try
@@ -685,7 +467,7 @@ public static class SheetMapper
                 if (!string.IsNullOrWhiteSpace(r.LicenseType))
                 {
                     distinctTypes.Add(r.LicenseType.Trim());
-                    sb.AppendLine($"    • {r.LicenseType.Trim()}");
+                    sb.AppendLine($"      {r.LicenseType.Trim()}");
                 }
             }
         }
@@ -694,9 +476,6 @@ public static class SheetMapper
             sb.AppendLine($"[1. Database Query FAILED]: {exDb.Message}");
         }
 
-        // Inside WorkerManager/SheetMapper.cs -> PopulateSkillLicenseTypesTable:
-
-        // 2. Fallback to local snapshot
         if (distinctTypes.Count == 0)
         {
             try
@@ -719,7 +498,6 @@ public static class SheetMapper
             }
         }
 
-        // 3. Fallback: Existing worker records
         if (distinctTypes.Count == 0)
         {
             try
@@ -809,10 +587,8 @@ public static class SheetMapper
             }
 
             sb.AppendLine($"[4. Excel Table]: Found table '{targetTable.Name}' on sheet '{foundSheetName}'.");
-
             string[] sortedTypes = distinctTypes.OrderBy(x => x).ToArray();
             int count = sortedTypes.Length;
-
             dynamic sheet = targetTable.Parent;
             dynamic headerRange = targetTable.HeaderRowRange;
             int headerRow = (int)headerRange.Row;
@@ -832,13 +608,10 @@ public static class SheetMapper
 
             dynamic newRange = sheet.Range[sheet.Cells[headerRow, col], sheet.Cells[headerRow + count, col]];
             targetTable.Resize(newRange);
-
             object[,] matrix = new object[count, 1];
             for (int i = 0; i < count; i++) matrix[i, 0] = sortedTypes[i];
-
             dynamic writeRange = sheet.Range[sheet.Cells[headerRow + 1, col], sheet.Cells[headerRow + count, col]];
             writeRange.Value2 = matrix;
-
             sb.AppendLine($"[5. Writeback]: Successfully written {count} type(s) into {sheet.Name}!R{headerRow + 1}C{col}:R{headerRow + count}C{col}.");
 
             try
@@ -864,126 +637,13 @@ public static class SheetMapper
         }
     }
 
-    private static HashSet<string> FetchAllowedSkillLicenseTypes()
-    {
-        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        try
-        {
-            dynamic xlApp = ExcelDnaUtil.Application;
-            dynamic wb = xlApp.ActiveWorkbook;
-
-            dynamic? targetTable = null;
-            foreach (dynamic ws in wb.Sheets)
-            {
-                try
-                {
-                    targetTable = ws.ListObjects["SkillLicenseTypesTable"];
-                    if (targetTable != null) break;
-                }
-                catch { }
-            }
-
-            if (targetTable == null)
-            {
-                string sLicSheetName = SheetOps.ResolveSheetName(SkillLicenseSheetAliases, "Skill Licenses");
-                try
-                {
-                    dynamic ws = wb.Sheets[sLicSheetName];
-                    foreach (dynamic lo in ws.ListObjects)
-                    {
-                        string loName = lo.Name?.ToString() ?? string.Empty;
-                        if (loName.IndexOf("SkillLicenseType", StringComparison.OrdinalIgnoreCase) >= 0)
-                        {
-                            targetTable = lo;
-                            break;
-                        }
-                    }
-                }
-                catch { }
-            }
-
-            if (targetTable != null && targetTable.DataBodyRange != null)
-            {
-                object rawBody = targetTable.DataBodyRange.Value2;
-                PopulateSetFromObject(set, rawBody);
-            }
-
-            if (set.Count == 0)
-            {
-                try
-                {
-                    dynamic tableVal = xlApp.Evaluate("SkillLicenseTypesTable[Skill License Types]");
-                    PopulateSetFromObject(set, tableVal);
-                }
-                catch { }
-            }
-
-            if (set.Count == 0)
-            {
-                try
-                {
-                    dynamic namedVal = xlApp.Evaluate("LicenseTypesList");
-                    PopulateSetFromObject(set, namedVal);
-                }
-                catch { }
-            }
-        }
-        catch { }
-
-        return set;
-    }
-
-    private static void PopulateSetFromObject(HashSet<string> set, dynamic? obj)
-    {
-        if (obj == null) return;
-
-        try
-        {
-            if (obj.GetType().Name.Contains("ComObject") || obj.GetType().Name.Contains("Range"))
-            {
-                obj = obj.Value2;
-            }
-        }
-        catch { }
-
-        if (obj is object[,] arr)
-        {
-            int rCount = arr.GetLength(0);
-            int cCount = arr.GetLength(1);
-            for (int r = 1; r <= rCount; r++)
-            {
-                for (int c = 1; c <= cCount; c++)
-                {
-                    string val = arr[r, c]?.ToString()?.Trim() ?? string.Empty;
-                    if (!string.IsNullOrEmpty(val) && !val.StartsWith("#") && !val.Equals("System.__ComObject", StringComparison.OrdinalIgnoreCase))
-                        set.Add(val);
-                }
-            }
-        }
-        else if (obj is object[] vec)
-        {
-            foreach (var item in vec)
-            {
-                string val = item?.ToString()?.Trim() ?? string.Empty;
-                if (!string.IsNullOrEmpty(val) && !val.StartsWith("#") && !val.Equals("System.__ComObject", StringComparison.OrdinalIgnoreCase))
-                    set.Add(val);
-            }
-        }
-        else
-        {
-            string single = obj.ToString()?.Trim() ?? string.Empty;
-            if (!string.IsNullOrEmpty(single) && !single.StartsWith("#") && !single.Equals("System.__ComObject", StringComparison.OrdinalIgnoreCase))
-                set.Add(single);
-        }
-    }
-
     public static List<SkillLicenseType> ExtractSkillLicenseTypes()
     {
         var distinctTypes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         dynamic xlApp = ExcelDnaUtil.Application;
         dynamic wb = xlApp.ActiveWorkbook;
-
         dynamic? targetTable = null;
+
         foreach (dynamic ws in wb.Sheets)
         {
             try
@@ -1019,12 +679,10 @@ public static class SheetMapper
             dynamic headerRange = targetTable.HeaderRowRange;
             int headerRow = (int)headerRange.Row;
             int col = (int)headerRange.Column;
-
             try
             {
                 dynamic scanRange = sheet.Range[sheet.Cells[headerRow + 1, col], sheet.Cells[headerRow + 100, col]];
                 object[,] colGrid = scanRange.Value2;
-
                 if (colGrid != null)
                 {
                     int rCount = colGrid.GetLength(0);
@@ -1071,7 +729,6 @@ public static class SheetMapper
                 LicenseType = type
             });
         }
-
         return result;
     }
 }

@@ -21,7 +21,7 @@ public class Events : IExcelAddIn
     {
         ExcelAsyncUtil.QueueAsMacro(() =>
         {
-            HookEvents();
+            EventHooks();
 
             try
             {
@@ -41,7 +41,7 @@ public class Events : IExcelAddIn
     public void AutoClose()
     {
         Arrow.HideAll();
-        UnhookEvents();
+        UnEventHooks();
         try
         {
             XlCall.Excel(XlCall.xlcOnWindow, Type.Missing);
@@ -91,7 +91,7 @@ public class Events : IExcelAddIn
         }
     }
 
-    private static void HookEvents()
+    private static void EventHooks()
     {
         try
         {
@@ -111,11 +111,11 @@ public class Events : IExcelAddIn
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"[TemplateEditor - HookEvents Error] {ex.Message}");
+            System.Diagnostics.Debug.WriteLine($"[TemplateEditor - EventHooks Error] {ex.Message}");
         }
     }
 
-    private static void UnhookEvents()
+    private static void UnEventHooks()
     {
         try
         {

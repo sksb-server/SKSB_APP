@@ -6,19 +6,21 @@ using System.Windows.Forms;
 using ExcelDna.Integration;
 using SKSB_App.Core.DialogBoxes;
 using SKSB_App.Core.FileManager;
-using SKSB_App.Core.FileManager.Structure;
 
-public static class GenericHookEvents
+public static class EventHooks
 {
     /// <summary>
     /// Unified save routine (Ctrl+S, QAT Save icon, Ribbon Save button).
     /// </summary>
-    public static void Save<T>(SyncDescriptor<T> descriptor)
+    public static void Save<T>(HookProperties<T> descriptor)
     {
+        if (SheetOps.IsMasterTemplateFile() || SheetOps.IsTemplateEditMode) return;
+
         while (true)
         {
             var (data, validationErrors, validationWarnings) = descriptor.ExtractAndValidate();
 
+            // 1. Validation Check
             if (validationErrors.Count > 0 || validationWarnings.Count > 0)
             {
                 using var valDialog = new ValidationSummary(descriptor.ModuleName, validationErrors, validationWarnings);
@@ -30,39 +32,72 @@ public static class GenericHookEvents
                 }
             }
 
+#if DEBUG
+            // In DEBUG: ALWAYS prompt. NEVER auto-save without asking.
+            using var debugPrompt = new ExitSyncConflict(
+                descriptor.ModuleName,
+                string.Empty,
+                allowSaveOffline: true,
+                isClosing: false,
+                isDebugPrompt: true
+            );
+            debugPrompt.ShowDialog();
+
+            switch (debugPrompt.Resolution)
+            {
+                case ExitResolution.Retry: // Developer clicked "Save to Server"
+                    var (dbSuccess, dbErr) = descriptor.SaveToServer(data);
+                    if (dbSuccess)
+                    {
+                        OfflineSaveServices.ClearPendingOfflineSnapshot<T>();
+                        descriptor.PopulateWorksheet?.Invoke(data);
+                        try { ((dynamic)ExcelDnaUtil.Application).ActiveWorkbook.Saved = true; } catch { }
+                        SaveNotification.ShowSuccess(descriptor.ModuleName, "Debug: Data committed to PostgreSQL server successfully.");
+                        return;
+                    }
+                    else
+                    {
+                        MessageBox.Show($"Server Save Failed:\n\n{dbErr}", "Debug Server Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        continue;
+                    }
+
+                case ExitResolution.SaveLocallyAndQuit: // Developer clicked "Save Offline"
+                    OfflineSaveServices.SaveOfflineSnapshot(data);
+                    descriptor.PopulateWorksheet?.Invoke(data);
+                    try { ((dynamic)ExcelDnaUtil.Application).ActiveWorkbook.Saved = true; } catch { }
+                    SaveNotification.ShowOffline(descriptor.ModuleName, "Debug: Records stashed to offline JSON storage.");
+                    return;
+
+                case ExitResolution.QuitAnyway:
+                case ExitResolution.Cancel:
+                default:
+                    return; // Return to sheet without saving
+            }
+#else
+            // In RELEASE: Standard direct save to server
             if (data == null || descriptor.IsDatasetEmpty(data))
             {
                 SaveNotification.ShowSuccess(descriptor.ModuleName, "The worksheet contains no records to save.");
                 return;
             }
 
-            // Attempt Database Save
-            var (success, dbErr) = descriptor.SaveToServer(data);
+            var (success, dbErrRelease) = descriptor.SaveToServer(data);
             if (success)
             {
                 OfflineSaveServices.ClearPendingOfflineSnapshot<T>();
                 descriptor.PopulateWorksheet?.Invoke(data);
-
-                try
-                {
-                    dynamic xlApp = ExcelDnaUtil.Application;
-                    xlApp.ActiveWorkbook.Saved = true;
-                }
-                catch { }
-
-                SaveNotification.ShowSuccess(
-                    descriptor.ModuleName,
-                    "Save completed successfully. All records have been persisted to the database."
-                );
+                try { ((dynamic)ExcelDnaUtil.Application).ActiveWorkbook.Saved = true; } catch { }
+                SaveNotification.ShowSuccess(descriptor.ModuleName, "Save completed successfully. All records persisted to database.");
                 return;
             }
 
-            // Server Unreachable -> Prompt for offline stash
+            // Fallback when server is offline
             using var conflictDialog = new ExitSyncConflict(
                 descriptor.ModuleName,
-                string.IsNullOrWhiteSpace(dbErr) ? "Could not establish a connection to PostgreSQL." : dbErr,
+                string.IsNullOrWhiteSpace(dbErrRelease) ? "Could not establish a connection to PostgreSQL." : dbErrRelease,
                 allowSaveOffline: true,
-                isClosing: false
+                isClosing: false,
+                isDebugPrompt: false
             );
             conflictDialog.ShowDialog();
 
@@ -74,36 +109,27 @@ public static class GenericHookEvents
                 case ExitResolution.SaveLocallyAndQuit:
                     OfflineSaveServices.SaveOfflineSnapshot(data);
                     descriptor.PopulateWorksheet?.Invoke(data);
-
-                    try
-                    {
-                        dynamic xlApp = ExcelDnaUtil.Application;
-                        xlApp.ActiveWorkbook.Saved = true;
-                    }
-                    catch { }
-
-                    SaveNotification.ShowOffline(
-                        descriptor.ModuleName,
-                        "Saved records to local offline storage.\n\nWhen the server is back online, changes will automatically synchronize."
-                    );
+                    try { ((dynamic)ExcelDnaUtil.Application).ActiveWorkbook.Saved = true; } catch { }
+                    SaveNotification.ShowOffline(descriptor.ModuleName, "Saved records to local offline storage.");
                     return;
 
                 case ExitResolution.Cancel:
                 default:
                     return;
             }
+#endif
         }
     }
 
     /// <summary>
-    /// Intercepts Excel window close event to ensure changes are verified and persisted before quitting.
+    /// Intercepts Excel window close event to verify, prompt in debug, or persist before quitting.
     /// </summary>
     public static void InterceptClose<T>(
         dynamic wb,
         ref bool cancel,
-        SyncDescriptor<T> descriptor,
+        HookProperties<T> descriptor,
         ref bool isExiting,
-        Action unhookEvents)
+        Action unEventHooks)
     {
         if (isExiting)
         {
@@ -111,10 +137,11 @@ public static class GenericHookEvents
             return;
         }
 
+        // Never intercept master template files
+        if (SheetOps.IsMasterTemplateFile() || SheetOps.IsTemplateEditMode) return;
+
         try
         {
-            if (SheetOps.IsMasterTemplateFile() || SheetOps.IsTemplateEditMode) return;
-
             while (true)
             {
                 var (data, validationErrors, validationWarnings) = descriptor.ExtractAndValidate();
@@ -126,17 +153,15 @@ public static class GenericHookEvents
                     valDialog.ShowDialog();
 
 #if DEBUG
-                    // Quits right at validation without prompting with save dialog
                     if (valDialog.Action == ValidationDialogAction.DebugQuitAnyway)
                     {
                         isExiting = true;
-                        unhookEvents();
+                        unEventHooks();
                         wb.Saved = true;
                         cancel = false;
                         return;
                     }
 #endif
-
                     if (validationErrors.Count > 0 || valDialog.Action != ValidationDialogAction.ProceedAnyway)
                     {
                         cancel = true; // Keep Excel open
@@ -144,6 +169,60 @@ public static class GenericHookEvents
                     }
                 }
 
+#if DEBUG
+                // In DEBUG: ALWAYS prompt on exit! Do NOT auto-save silently!
+                using var closePrompt = new ExitSyncConflict(
+                    descriptor.ModuleName,
+                    string.Empty,
+                    allowSaveOffline: true,
+                    isClosing: true,
+                    isDebugPrompt: true
+                );
+                closePrompt.ShowDialog();
+
+                switch (closePrompt.Resolution)
+                {
+                    case ExitResolution.Retry: // Developer clicked "Save to Server"
+                        var (dbSuccess, dbErr) = descriptor.SaveToServer(data);
+                        if (dbSuccess)
+                        {
+                            OfflineSaveServices.ClearPendingOfflineSnapshot<T>();
+                            SaveNotification.ShowSuccess(descriptor.ModuleName, "Debug: Changes committed to PostgreSQL server before exit.");
+                            isExiting = true;
+                            unEventHooks();
+                            wb.Saved = true;
+                            cancel = false;
+                            return;
+                        }
+                        else
+                        {
+                            MessageBox.Show($"Server Save Failed:\n\n{dbErr}", "Debug Server Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            continue;
+                        }
+
+                    case ExitResolution.SaveLocallyAndQuit: // Developer clicked "Save Offline & Quit"
+                        OfflineSaveServices.SaveOfflineSnapshot(data);
+                        SaveNotification.ShowOffline(descriptor.ModuleName, "Debug: Changes saved to offline storage before exit.");
+                        isExiting = true;
+                        unEventHooks();
+                        wb.Saved = true;
+                        cancel = false;
+                        return;
+
+                    case ExitResolution.QuitAnyway: // Developer clicked "Quit Anyway (Discard)"
+                        isExiting = true;
+                        unEventHooks();
+                        wb.Saved = true;  // Mark true so Excel's native prompt is silenced
+                        cancel = false;   // Release Excel close lock
+                        return;
+
+                    case ExitResolution.Cancel:
+                    default:
+                        cancel = true; // Stay in Excel
+                        return;
+                }
+#else
+                // In RELEASE on Close: Attempt silent save
                 if (data == null || descriptor.IsDatasetEmpty(data))
                 {
                     isExiting = true;
@@ -152,25 +231,24 @@ public static class GenericHookEvents
                     return;
                 }
 
-                // 2. Attempt Silent Save
                 var (success, dbError) = descriptor.SaveToServer(data);
                 if (success)
                 {
                     OfflineSaveServices.ClearPendingOfflineSnapshot<T>();
                     isExiting = true;
-                    unhookEvents();
-
+                    unEventHooks();
                     wb.Saved = true;
                     cancel = false;
                     return;
                 }
 
-                // 3. Database Offline Dialog
+                // If DB is offline in production:
                 using var dialog = new ExitSyncConflict(
                     descriptor.ModuleName,
                     string.IsNullOrWhiteSpace(dbError) ? "Could not persist records to the PostgreSQL server." : dbError,
                     allowSaveOffline: true,
-                    isClosing: true
+                    isClosing: true,
+                    isDebugPrompt: false
                 );
                 dialog.ShowDialog();
 
@@ -182,8 +260,7 @@ public static class GenericHookEvents
                     case ExitResolution.SaveLocallyAndQuit:
                         OfflineSaveServices.SaveOfflineSnapshot(data);
                         isExiting = true;
-                        unhookEvents();
-
+                        unEventHooks();
                         wb.Saved = true;
                         cancel = false;
                         return;
@@ -193,11 +270,12 @@ public static class GenericHookEvents
                         cancel = true;
                         return;
                 }
+#endif
             }
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"[GenericHookEvents.InterceptClose] Error: {ex.Message}");
+            System.Diagnostics.Debug.WriteLine($"[EventHooks.InterceptClose] Error: {ex.Message}");
             cancel = true;
         }
     }
@@ -205,7 +283,7 @@ public static class GenericHookEvents
     /// <summary>
     /// Delayed startup initialization: synchronizes lookups, pending offline uploads, and version conflicts.
     /// </summary>
-    public static void HandleStartup<T>(SyncDescriptor<T> descriptor)
+    public static void HandleStartup<T>(HookProperties<T> descriptor)
     {
         try
         {
@@ -217,17 +295,16 @@ public static class GenericHookEvents
 
             descriptor.SyncLookups?.Invoke(false);
 
-            string pendingFilePath = Folder.Data.GetFilePath("List`1_PendingUpload.json");
-
             if (OfflineSaveServices.HasPendingOfflineSnapshot<T>())
             {
+                string pendingFilePath = OfflineSaveServices.GetPendingUploadPath<T>();
                 var pendingData = OfflineSaveServices.LoadPendingOfflineSnapshot<T>();
-
                 bool isValid = pendingData != null && (descriptor.ValidateOfflinePayload?.Invoke(pendingData) ?? true);
+
                 if (!isValid)
                 {
                     MessageBox.Show(
-                        "Found a corrupt offline pending file. The upload has been aborted to protect the database.",
+                        "Found a corrupt or invalid offline pending file. The upload has been aborted to protect the database.",
                         "Upload Rejected",
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Warning
@@ -249,15 +326,15 @@ public static class GenericHookEvents
 
                         string diffMessage = descriptor.FormatConflictSummary != null && serverData != null
                             ? descriptor.FormatConflictSummary(pendingData!, serverData)
-                            : $"• Your Offline Save: {localOfflineTime:yyyy-MM-dd HH:mm:ss}\n• Current Server:     {serverLastUpdate.Value:yyyy-MM-dd HH:mm:ss}\n";
+                            : $"  Your Offline Save: {localOfflineTime:yyyy-MM-dd HH:mm:ss}\n  Current Server:     {serverLastUpdate.Value:yyyy-MM-dd HH:mm:ss}\n";
 
                         var dialogChoice = MessageBox.Show(
                             $"=== DATA VERSION CONFLICT DETECTED ===\n" +
                             $"The server was modified after your last offline save.\n\n" +
                             $"{diffMessage}\n\n" +
                             $"Would you like to OVERWRITE the server with your local offline version?\n" +
-                            $"• Yes: Overwrite server database with your local offline records.\n" +
-                            $"• No:  Discard your offline file and load the latest server copy.",
+                            $"  Yes: Overwrite server database with your local offline records.\n" +
+                            $"  No:  Discard your offline file and load the latest server copy.",
                             "Synchronization Conflict Preview",
                             MessageBoxButtons.YesNo,
                             MessageBoxIcon.Question
@@ -273,7 +350,6 @@ public static class GenericHookEvents
                         {
                             OfflineSaveServices.ClearPendingOfflineSnapshot<T>();
                             descriptor.PopulateWorksheet?.Invoke(pendingData!);
-
                             SaveNotification.ShowSuccess(
                                 descriptor.ModuleName,
                                 "Offline changes uploaded successfully!\n\n• Committed records to PostgreSQL server.\n• Local pending upload stash has been cleared."
@@ -300,13 +376,10 @@ public static class GenericHookEvents
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"[GenericHookEvents.HandleStartup] Error: {ex.Message}");
+            System.Diagnostics.Debug.WriteLine($"[EventHooks.HandleStartup] Error: {ex.Message}");
         }
     }
 
-    /// <summary>
-    /// Generic state check for Ribbon toggle buttons across any manager add-in.
-    /// </summary>
     public static bool IsSimulatedOffline()
     {
 #if DEBUG
@@ -316,23 +389,18 @@ public static class GenericHookEvents
 #endif
     }
 
-    /// <summary>
-    /// Generic toggle handler for Ribbon buttons. Toggles ServerEnvironment.SimulateOffline,
-    /// invalidates the calling ribbon control, and alerts the developer.
-    /// </summary>
     public static void ToggleSimulatedOffline(ExcelDna.Integration.CustomUI.IRibbonUI? ribbonUi, string controlId, bool pressed)
     {
 #if DEBUG
         SKSB_App.Core.ServerManager.ServerEnvironment.SimulateOffline = pressed;
         ribbonUi?.InvalidateControl(controlId);
-
-        System.Windows.Forms.MessageBox.Show(
+        MessageBox.Show(
             pressed
                 ? "Server is now SIMULATED OFFLINE.\nAll PostgreSQL database operations will fail immediately to test offline local stashing."
                 : "Server is now ONLINE.\nNormal PostgreSQL database connectivity restored.",
             "Debug Server Mode",
-            System.Windows.Forms.MessageBoxButtons.OK,
-            pressed ? System.Windows.Forms.MessageBoxIcon.Warning : System.Windows.Forms.MessageBoxIcon.Information
+            MessageBoxButtons.OK,
+            pressed ? MessageBoxIcon.Warning : MessageBoxIcon.Information
         );
 #endif
     }

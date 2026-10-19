@@ -1,0 +1,51 @@
+﻿<Project Sdk="Microsoft.NET.Sdk">
+
+	<PropertyGroup>
+		<OutputType>WinExe</OutputType>
+		<TargetFramework>net8.0-windows</TargetFramework>
+		<PlatformTarget>AnyCPU</PlatformTarget>
+		<UseWindowsForms>true</UseWindowsForms>
+		<ImplicitUsings>enable</ImplicitUsings>
+		<Nullable>enable</Nullable>
+		<GenerateRuntimeConfigurationFiles>true</GenerateRuntimeConfigurationFiles>
+		<ApplicationHighDpiMode>PerMonitorV2</ApplicationHighDpiMode>
+	</PropertyGroup>
+
+	<ItemGroup>
+		<ProjectReference Include="..\Core\Core.csproj">
+			<Private>true</Private>
+			<CopyLocal>true</CopyLocal>
+		</ProjectReference>
+	</ItemGroup>
+
+	<!-- Automatically deploys Portal.exe to Documents\SKSB_App\ and Solution Root on build -->
+	<Target Name="CopyPortalToTargetDirectories" AfterTargets="Build">
+		<PropertyGroup>
+			<DocsAppFolder>$(UserProfile)\Documents\SKSB_App</DocsAppFolder>
+			<SolutionRootFolder>$(MSBuildThisFileDirectory)..\</SolutionRootFolder>
+		</PropertyGroup>
+
+		<ItemGroup>
+			<PortalBuildFiles Include="$(TargetDir)*.*" />
+		</ItemGroup>
+
+		<!-- 1. Copy to C:\Users\<user>\Documents\SKSB_App\ (Required by Launcher) -->
+		<MakeDir Directories="$(DocsAppFolder)" Condition="!Exists('$(DocsAppFolder)')" />
+		<Copy SourceFiles="@(PortalBuildFiles)"
+		      DestinationFolder="$(DocsAppFolder)"
+		      SkipUnchangedFiles="false" />
+
+		<!-- 2. Copy to Solution Root (For standalone launching) -->
+		<Copy SourceFiles="@(PortalBuildFiles)"
+		      DestinationFolder="$(SolutionRootFolder)"
+		      SkipUnchangedFiles="true" />
+
+		<Message Importance="high" Text="[Portal Deploy] Successfully deployed Portal.exe to $(DocsAppFolder)" />
+	</Target>
+
+	<Target Name="KillExistingExcelAndPortalOnBuild" BeforeTargets="BeforeBuild">
+		<Exec Command="taskkill /f /fi &quot;IMAGENAME eq excel.exe&quot; 2&gt;nul || exit 0" IgnoreExitCode="true" />
+		<Exec Command="taskkill /f /fi &quot;IMAGENAME eq Portal.exe&quot; 2&gt;nul || exit 0" IgnoreExitCode="true" />
+	</Target>
+
+</Project>

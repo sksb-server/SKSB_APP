@@ -6,7 +6,7 @@ using System.Collections.Generic;
 /// <summary>
 /// Defines how a specific manager workbook extracts, validates, saves, and populates its domain data.
 /// </summary>
-public class SyncDescriptor<T>
+public class HookProperties<T>
 {
     public string ModuleName { get; set; } = "Manager";
     public string ServerTableName { get; set; } = string.Empty;

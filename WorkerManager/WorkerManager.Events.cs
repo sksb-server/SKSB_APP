@@ -1,13 +1,11 @@
 ﻿namespace SKSB_App.WorkerManager;
 
-using ExcelDna.Integration;
-using SKSB_App.Core.ServerManager;
-using SKSB_App.Core.Services;
-using SKSB_App.Core.Types;
-using SKSB_App.Core.WorkbookHelper;
 using System;
 using System.Collections.Generic;
-using System.Linq;
+using ExcelDna.Integration;
+using SKSB_App.Core.ServerManager;
+using SKSB_App.Core.Types;
+using SKSB_App.Core.WorkbookHelper;
 
 public class Events : IExcelAddIn
 {
@@ -15,15 +13,13 @@ public class Events : IExcelAddIn
     private static bool _isExiting = false;
     private static bool _isInternalSaving = false;
 
-    // Explicit delegates required for COM Dynamic Event Binding
     private delegate void WorkbookBeforeCloseDelegate(dynamic wb, ref bool cancel);
     private delegate void WorkbookBeforeSaveDelegate(dynamic wb, bool saveAsUi, ref bool cancel);
 
     private static WorkbookBeforeCloseDelegate? _beforeCloseHandler;
     private static WorkbookBeforeSaveDelegate? _beforeSaveHandler;
 
-    // Descriptor of Worker Manager's sync requirements
-    public static readonly SyncDescriptor<List<WorkerRecord>> WorkerSyncDescriptor = new()
+    public static readonly HookProperties<List<WorkerRecord>> WorkerSyncDescriptor = new()
     {
         ModuleName = "Worker Manager",
         ServerTableName = "worker_master",
@@ -41,7 +37,7 @@ public class Events : IExcelAddIn
         ExcelAsyncUtil.QueueAsMacro(() =>
         {
             HookApplicationEvents();
-            SyncWorkerLookupsData(isInteractive: false);
+            SKSB_App.Core.DropDown.Arrow.EnsureExcelEventsHooked();
 
             double nowSerial = Convert.ToDouble(XlCall.Excel(XlCall.xlfNow));
             XlCall.Excel(XlCall.xlcOnTime, nowSerial + (1.0 / 86400.0), "DelayedAutoLoadMacro");
@@ -79,10 +75,9 @@ public class Events : IExcelAddIn
             dynamic xlApp = ExcelDnaUtil.Application;
             _xlAppRoot = xlApp;
 
-            // FIXED: Using new Action(UnhookApplicationEvents) to prevent dynamic method group dispatch failure
             _beforeCloseHandler = new WorkbookBeforeCloseDelegate((dynamic wb, ref bool cancel) =>
             {
-                GenericHookEvents.InterceptClose(
+                EventHooks.InterceptClose(
                     (object)wb,
                     ref cancel,
                     WorkerSyncDescriptor,
@@ -96,7 +91,7 @@ public class Events : IExcelAddIn
             {
                 if (_isInternalSaving || SheetOps.IsMasterTemplateFile() || SheetOps.IsTemplateEditMode) return;
                 cancel = true;
-                ExcelAsyncUtil.QueueAsMacro(() => GenericHookEvents.Save(WorkerSyncDescriptor));
+                ExcelAsyncUtil.QueueAsMacro(() => EventHooks.Save(WorkerSyncDescriptor));
             });
             _xlAppRoot.WorkbookBeforeSave += _beforeSaveHandler;
         }
@@ -128,10 +123,14 @@ public class Events : IExcelAddIn
             try { XlCall.Excel(XlCall.xlcSave); } finally { _isInternalSaving = false; }
             return;
         }
-
-        GenericHookEvents.Save(WorkerSyncDescriptor);
+        EventHooks.Save(WorkerSyncDescriptor);
     }
 
     [ExcelCommand(Name = "DelayedAutoLoadMacro")]
-    public static void DelayedAutoLoadMacro() => GenericHookEvents.HandleStartup(WorkerSyncDescriptor);
+    public static void DelayedAutoLoadMacro()
+    {
+        SyncWorkerLookupsData(isInteractive: false);
+        SheetMapper.InitializeSheetRules();
+        EventHooks.HandleStartup(WorkerSyncDescriptor);
+    }
 }

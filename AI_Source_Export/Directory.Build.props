@@ -1,0 +1,129 @@
+<Project>
+	<!-- ============================================================= -->
+	<!-- 1. AUTO-CLEAN BEFORE BUILD                                     -->
+	<!-- Wipes stale compiled binaries from local bin/ output folders  -->
+	<!-- ============================================================= -->
+	<Target Name="AutoCleanBeforeBuild" BeforeTargets="BeforeBuild">
+		<Message Importance="high" Text="[Auto-Clean] Cleaning local target directory for $(MSBuildProjectName)..." />
+		<ItemGroup>
+			<StaleOutputFiles Include="$(TargetDir)**\*.*" />
+		</ItemGroup>
+		<Delete Files="@(StaleOutputFiles)" TreatErrorsAsWarnings="true" />
+	</Target>
+
+	<!-- ============================================================= -->
+	<!-- 2. CLEAN STALE DEPLOYMENT ARTIFACTS BEFORE SYNC               -->
+	<!-- Removes old version of this specific module from AddIns folder-->
+	<!-- ============================================================= -->
+	<Target Name="CleanDeployedAddInsBeforeSync"
+			BeforeTargets="AutoSyncExcelDnaToDocuments"
+			Condition="'@(PackageReference->WithMetadataValue(&quot;Identity&quot;, &quot;ExcelDna.AddIn&quot;))' != ''">
+
+		<PropertyGroup>
+			<TargetAddInsDir>$(UserProfile)\Documents\SKSB_App\AddIns</TargetAddInsDir>
+		</PropertyGroup>
+
+		<ItemGroup>
+			<StaleAddInsFiles Include="$(TargetAddInsDir)\*$(MSBuildProjectName)*.*" />
+			<StaleAddInsFiles Include="$(TargetAddInsDir)\*$(TargetName)*.*" />
+		</ItemGroup>
+
+		<Delete Files="@(StaleAddInsFiles)" TreatErrorsAsWarnings="true" />
+		<Message Importance="high" Text="[Auto-Clean] Removed stale deployment files for $(MSBuildProjectName) in $(TargetAddInsDir)" />
+	</Target>
+
+	<!-- ============================================================= -->
+	<!-- 3. EXCEL-DNA AUTO-SYNC TO DOCUMENTS                           -->
+	<!-- Deploys newly compiled DLLs, XLLs, and packed binaries        -->
+	<!-- ============================================================= -->
+	<Target Name="AutoSyncExcelDnaToDocuments"
+			AfterTargets="ExcelDnaPack;Build"
+			Condition="'@(PackageReference->WithMetadataValue(&quot;Identity&quot;, &quot;ExcelDna.AddIn&quot;))' != ''">
+
+		<PropertyGroup>
+			<TargetAddInsDir>$(UserProfile)\Documents\SKSB_App\AddIns</TargetAddInsDir>
+		</PropertyGroup>
+
+		<MakeDir Directories="$(TargetAddInsDir)" Condition="!Exists('$(TargetAddInsDir)')" />
+
+		<ItemGroup>
+			<!-- 1. All compiled DLLs and JSON configurations -->
+			<AddInArtifacts Include="$(TargetDir)*.dll" />
+			<AddInArtifacts Include="$(TargetDir)*.runtimeconfig.json" />
+			<AddInArtifacts Include="$(TargetDir)*.deps.json" />
+
+			<!-- 2. The standard XLLs and DNA manifests -->
+			<AddInArtifacts Include="$(TargetDir)*-AddIn*.xll" />
+			<AddInArtifacts Include="$(TargetDir)*-AddIn*.dna" />
+
+			<!-- 3. Packed standalone XLLs from publish\ -->
+			<PackedArtifacts Include="$(TargetDir)publish\*-packed.xll" />
+		</ItemGroup>
+
+		<Copy SourceFiles="@(AddInArtifacts)"
+			  DestinationFolder="$(TargetAddInsDir)"
+			  SkipUnchangedFiles="false" />
+
+		<Copy SourceFiles="@(PackedArtifacts)"
+			  DestinationFolder="$(TargetAddInsDir)"
+			  SkipUnchangedFiles="false" />
+
+		<Message Importance="high"
+				 Text="[Excel-DNA Auto-Sync] Deployed @(AddInArtifacts->Count()) artifacts to $(TargetAddInsDir)" />
+	</Target>
+
+	<!-- ============================================================= -->
+	<!-- 4. AUTO-GENERATE AI CHAT EXPORT BUNDLE (LOOP-SAFE)            -->
+	<!-- ============================================================= -->
+	<Target Name="GenerateAIChatCodeBundle" AfterTargets="Build" Condition="'$(Configuration)' == 'Debug'">
+		<PropertyGroup>
+			<!-- Export folder located safely in Documents -->
+			<AIExportDir>$(UserProfile)\Documents\SKSB_App\AI_Source_Export</AIExportDir>
+			<SingleBundleFile>$(AIExportDir)\AI_Context_AllCode.txt</SingleBundleFile>
+		</PropertyGroup>
+
+		<!-- 1. Ensure target directory exists and clear previous single bundle -->
+		<MakeDir Directories="$(AIExportDir)" Condition="!Exists('$(AIExportDir)')" />
+		<Delete Files="$(SingleBundleFile)" Condition="Exists('$(SingleBundleFile)')" TreatErrorsAsWarnings="true" />
+
+		<!-- 2. Find source files while STRICTLY excluding the export directory and all build artifacts -->
+		<ItemGroup>
+			<CleanSourceFiles Include="$(MSBuildThisFileDirectory)**\*.cs;
+			                           $(MSBuildThisFileDirectory)**\*.csproj;
+			                           $(MSBuildThisFileDirectory)**\*.dna;
+			                           $(MSBuildThisFileDirectory)**\*.props;
+			                           $(MSBuildThisFileDirectory)**\*.targets;
+			                           $(MSBuildThisFileDirectory)**\*.sql"
+			                  Exclude="$(MSBuildThisFileDirectory)**\bin\**;
+			                           $(MSBuildThisFileDirectory)**\obj\**;
+			                           $(MSBuildThisFileDirectory)**\.vs\**;
+			                           $(MSBuildThisFileDirectory)**\.git\**;
+			                           $(MSBuildThisFileDirectory)**\packages\**;
+			                           $(MSBuildThisFileDirectory)**\publish\**;
+			                           $(MSBuildThisFileDirectory)**\AI_Source_Export\**;
+			                           $(MSBuildThisFileDirectory)**\*AI*\**;
+			                           $(AIExportDir)\**" />
+		</ItemGroup>
+
+		<!-- 3. Copy clean source files without recursive self-referencing -->
+		<Copy SourceFiles="@(CleanSourceFiles)"
+		      DestinationFolder="$(AIExportDir)\%(RecursiveDir)"
+		      SkipUnchangedFiles="true" />
+
+		<!-- 4. Combine into a single text file for instant pasting into AI chat -->
+		<Exec Command="powershell -NoProfile -Command &quot;&amp; {
+			$dest = '$(SingleBundleFile)';
+			Get-ChildItem -Path '$(AIExportDir)' -Recurse -File | Where-Object { $_.FullName -ne $dest -and $_.Extension -match '\.(cs|csproj|dna|props|targets|sql)$' } | ForEach-Object {
+				$rel = $_.FullName.Replace('$(AIExportDir)\', '');
+				'============================================================' | Out-File $dest -Append -Encoding utf8;
+				('FILE: ' + $rel) | Out-File $dest -Append -Encoding utf8;
+				'============================================================' | Out-File $dest -Append -Encoding utf8;
+				Get-Content $_.FullName | Out-File $dest -Append -Encoding utf8;
+				'`n' | Out-File $dest -Append -Encoding utf8;
+			}
+		}&quot;" IgnoreExitCode="true" />
+
+		<Message Importance="high" Text="[AI Export] Cleanly exported source files to $(AIExportDir)" />
+	</Target>
+	
+</Project>

@@ -124,7 +124,7 @@ public class RibbonController : ExcelRibbon
     {
         ExcelAsyncUtil.QueueAsMacro(() =>
         {
-            GenericHookEvents.Save(Events.WorkerSyncDescriptor);
+            EventHooks.Save(Events.WorkerSyncDescriptor);
         });
     }
 
@@ -154,13 +154,11 @@ public class RibbonController : ExcelRibbon
         }
     }
 
-    // Inside WorkerManager/RibbonController.cs:
-
 #if DEBUG
     public bool GetSimulateOfflinePressed(IRibbonControl control)
-        => GenericHookEvents.IsSimulatedOffline();
+        => EventHooks.IsSimulatedOffline();
 
     public void OnToggleOfflineClicked(IRibbonControl control, bool pressed)
-        => GenericHookEvents.ToggleSimulatedOffline(_ribbonUi, control.Id, pressed);
+        => EventHooks.ToggleSimulatedOffline(_ribbonUi, control.Id, pressed);
 #endif
 }

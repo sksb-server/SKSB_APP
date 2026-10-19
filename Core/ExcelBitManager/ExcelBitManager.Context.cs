@@ -1,11 +1,11 @@
-﻿using SKSB_App.Core.ExcelBitrateManager;
+﻿using SKSB_App.Core.ExcelBitManager;
 using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text;
 using System.Threading.Tasks;
 
-namespace SKSB_App.Core.ExcelBitrateManager;
+namespace SKSB_App.Core.ExcelBitManager;
 
 public static class Context
 {

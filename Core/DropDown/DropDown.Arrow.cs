@@ -7,7 +7,7 @@ using System.Linq;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using ExcelDna.Integration;
-using SKSB_App.Core.ExcelBitrateManager;
+using SKSB_App.Core.ExcelBitManager;
 
 public static class Arrow
 {
@@ -18,6 +18,7 @@ public static class Arrow
 
     private static dynamic? _activeCell;
     private static Action<string>? _onItemSelected;
+    private static bool _isEventsHooked = false;
 
     private class DropdownItem
     {
@@ -43,9 +44,6 @@ public static class Arrow
     [DllImport("user32.dll", EntryPoint = "SetWindowLong")]
     private static extern int SetWindowLong32(IntPtr hWnd, int nIndex, int dwNewLong);
 
-    /// <summary>
-    /// Targets 64-bit vs 32-bit Win32 user32 exports using Context.OfficeBitness.
-    /// </summary>
     private static IntPtr SetWindowLongPtr(IntPtr hWnd, int nIndex, IntPtr dwNewLong)
     {
         bool is64Bit = Context.OfficeBitness switch
@@ -59,11 +57,10 @@ public static class Arrow
         {
             return SetWindowLongPtr64(hWnd, nIndex, dwNewLong);
         }
-
         return new IntPtr(SetWindowLong32(hWnd, nIndex, dwNewLong.ToInt32()));
     }
 
-    private static IntPtr GetExcelHwnd(dynamic xlApp)
+    public static IntPtr GetExcelHwnd(dynamic xlApp)
     {
         try
         {
@@ -71,7 +68,6 @@ public static class Arrow
             if (rawHwnd is long l) return new IntPtr(l);
             if (rawHwnd is int i) return new IntPtr(i);
             if (rawHwnd is IntPtr p) return p;
-
             return new IntPtr(Convert.ToInt64(rawHwnd));
         }
         catch
@@ -81,7 +77,9 @@ public static class Arrow
     }
 
     private const int GWL_HWNDPARENT = -8;
-    private static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+    // Z-Order: Use HWND_NOTOPMOST so the windows stay linked strictly to Excel's Z-order level
+    private static readonly IntPtr HWND_NOTOPMOST = new IntPtr(-2);
+    private static readonly IntPtr HWND_TOP = new IntPtr(0);
     private const uint SWP_NOACTIVATE = 0x0010;
     private const uint SWP_SHOWWINDOW = 0x0040;
 
@@ -100,8 +98,8 @@ public static class Arrow
             get
             {
                 var cp = base.CreateParams;
-                cp.ExStyle |= 0x00000080; // WS_EX_TOOLWINDOW: Never appear in Alt+Tab
-                cp.ExStyle |= 0x08000000; // WS_EX_NOACTIVATE: Never steal activation from Excel
+                cp.ExStyle |= 0x00000080; // WS_EX_TOOLWINDOW: Excluded from Alt+Tab
+                cp.ExStyle |= 0x08000000; // WS_EX_NOACTIVATE: Does not steal activation
                 return cp;
             }
         }
@@ -124,8 +122,8 @@ public static class Arrow
             get
             {
                 var cp = base.CreateParams;
-                cp.ExStyle |= 0x00000080; // WS_EX_TOOLWINDOW: Never appear in Alt+Tab
-                cp.ExStyle |= 0x08000000; // WS_EX_NOACTIVATE: Never steal activation from Excel
+                cp.ExStyle |= 0x00000080; // WS_EX_TOOLWINDOW: Excluded from Alt+Tab
+                cp.ExStyle |= 0x08000000; // WS_EX_NOACTIVATE: Does not steal activation
                 return cp;
             }
         }
@@ -142,7 +140,6 @@ public static class Arrow
     private static void InitializeArrowHost()
     {
         _arrowHost = new ArrowHostForm { BackColor = Color.FromArgb(218, 220, 224) };
-
         _arrowButton = new Button
         {
             Dock = DockStyle.Fill,
@@ -176,24 +173,6 @@ public static class Arrow
         _arrowHost.Controls.Add(_arrowButton);
     }
 
-    public static void Teardown()
-    {
-        try
-        {
-            HideAll();
-            if (_arrowHost != null && !_arrowHost.IsDisposed)
-            {
-                _arrowHost.Dispose();
-                _arrowHost = null;
-            }
-            if (_popupHost != null && !_popupHost.IsDisposed)
-            {
-                _popupHost.Dispose();
-                _popupHost = null;
-            }
-        }
-        catch { }
-    }
     private static void InitializePopupHost()
     {
         _popupHost = new PopupHostForm
@@ -224,16 +203,24 @@ public static class Arrow
         _popupHost.Deactivate += (_, _) => DismissAndReturnFocus();
     }
 
-    private static void HookExcelEvents(dynamic xlApp)
+    /// <summary>
+    /// Explicitly attaches event hooks to Excel to auto-hide the controls when Excel deactivates.
+    /// </summary>
+    public static void EnsureExcelEventsHooked()
     {
+        if (_isEventsHooked) return;
         try
         {
-            // Hide the floating arrow whenever Excel loses window focus or switches active sheets/windows
+            dynamic xlApp = ExcelDnaUtil.Application;
+            if (xlApp == null) return;
+
             xlApp.WindowDeactivate += new Action<dynamic, dynamic>((wb, wn) => HideAll());
             xlApp.SheetDeactivate += new Action<dynamic>(ws => HideAll());
+            _isEventsHooked = true;
         }
         catch { }
     }
+
     private static void OnListBoxDrawItem(object? sender, DrawItemEventArgs e)
     {
         if (e.Index < 0 || e.Index >= _listBox!.Items.Count) return;
@@ -268,8 +255,8 @@ public static class Arrow
         try
         {
             dynamic xlApp = ExcelDnaUtil.Application;
+            EnsureExcelEventsHooked();
 
-            // Safety check: if Excel window is minimized or not active, hide arrow
             if (xlApp.WindowState == -4140 /* xlMinimized */)
             {
                 HideAll();
@@ -282,6 +269,7 @@ public static class Arrow
             IntPtr excelHwnd = GetExcelHwnd(xlApp);
             if (excelHwnd != IntPtr.Zero)
             {
+                // Assign Excel main window as owner so the arrow/popup follows Excel's Z-order directly
                 SetWindowLongPtr(_arrowHost!.Handle, GWL_HWNDPARENT, excelHwnd);
                 SetWindowLongPtr(_popupHost!.Handle, GWL_HWNDPARENT, excelHwnd);
             }
@@ -328,7 +316,8 @@ public static class Arrow
                 _arrowHost.Show();
             }
 
-            SetWindowPos(_arrowHost.Handle, HWND_TOPMOST, arrowXPx, arrowYPx, arrowWidthPx, arrowHeightPx, SWP_SHOWWINDOW | SWP_NOACTIVATE);
+            // Placed at HWND_TOP relative to its owner (Excel) - not system-wide HWND_TOPMOST
+            SetWindowPos(_arrowHost.Handle, HWND_TOP, arrowXPx, arrowYPx, arrowWidthPx, arrowHeightPx, SWP_SHOWWINDOW | SWP_NOACTIVATE);
             HidePopup();
         }
         catch
@@ -391,7 +380,6 @@ public static class Arrow
             var config = Metadata.ReadConfig(singleCell);
             dynamic xlApp = ExcelDnaUtil.Application;
             dynamic sheet = singleCell.Worksheet;
-            string sheetName = sheet.Name?.ToString() ?? "Unknown";
             int row = (int)singleCell.Row;
             int col = (int)singleCell.Column;
 
@@ -409,24 +397,9 @@ public static class Arrow
             try { leftVal = sheet.Cells[row, col - 1].Value2?.ToString()?.Trim() ?? string.Empty; } catch { }
             try { rightVal = sheet.Cells[row, col + 1].Value2?.ToString()?.Trim() ?? string.Empty; } catch { }
 
-#if DEBUG
-            var diagSb = new System.Text.StringBuilder();
-            diagSb.AppendLine($"=== DROPDOWN DIAGNOSTICS ===");
-            diagSb.AppendLine($"Sheet: '{sheetName}' | Cell: R{row}C{col} ({singleCell.Address})");
-            diagSb.AppendLine($"In-Cell Text: '{inCellText}'");
-            diagSb.AppendLine($"Left (Col {col - 1}): '{leftVal}' | Right (Col {col + 1}): '{rightVal}'");
-            diagSb.AppendLine();
-            diagSb.AppendLine($"--- CONFIG LOADED ---");
-            diagSb.AppendLine($"Source:     {config.Source}");
-            diagSb.AppendLine($"Transform:  {config.Transform}");
-            diagSb.AppendLine($"Filter:     {config.Filter}");
-            diagSb.AppendLine($"SyncLeft:   {config.SyncLeft}");
-            diagSb.AppendLine();
-#endif
-
             var baseItems = new List<string>();
 
-            // 1. Generic Source Evaluation
+            // 1. Source Evaluation
             if (!string.IsNullOrWhiteSpace(config.Source))
             {
                 dynamic? rawSource = null;
@@ -444,11 +417,6 @@ public static class Arrow
                     try { rawSource = xlApp.Evaluate(cleanSource); } catch { }
                 }
 
-#if DEBUG
-                diagSb.AppendLine($"--- SOURCE EVALUATION ---");
-                diagSb.AppendLine($"RawSource Type: {(rawSource == null ? "NULL" : rawSource.GetType().FullName)}");
-#endif
-
                 if (rawSource != null)
                 {
                     try
@@ -459,11 +427,6 @@ public static class Arrow
                     catch { }
                 }
 
-#if DEBUG
-                diagSb.AppendLine($"After Value2 Unwrap: {(rawSource == null ? "NULL" : rawSource.GetType().FullName)}");
-#endif
-
-                // D. Extract items: handles 2D matrices, 1D vectors, collections, and scalars
                 if (rawSource is object[,] matrix)
                 {
                     int rCount = matrix.GetLength(0);
@@ -493,73 +456,51 @@ public static class Arrow
                 {
                     string s = rawSource.ToString()?.Trim() ?? string.Empty;
                     bool isComError = long.TryParse(s, out long errNum) && errNum < -2000000000;
-
-                    // Discard Excel COM error codes like -2146826265
                     if (!string.IsNullOrWhiteSpace(s) && !s.StartsWith("#") && !isComError && !s.Equals("System.__ComObject", StringComparison.OrdinalIgnoreCase))
                     {
                         baseItems.Add(s);
                     }
                 }
-
-#if DEBUG
-                diagSb.AppendLine($"Base Items Count: {baseItems.Count}");
-                diagSb.AppendLine();
-#endif
             }
 
-            // 2. Generic Pipeline: Transform & Filter
+            // 2. Transform & Filter
             var processedItems = new List<DropdownItem>();
-            int debugItemCounter = 0;
 
             foreach (string rawItem in baseItems)
             {
-                debugItemCounter++;
                 string safeItem = rawItem.Replace("\"", "\"\"");
                 bool isNumeric = double.TryParse(rawItem, out _);
                 string itemToken = isNumeric ? rawItem : $"\"{safeItem}\"";
                 string leftToken = double.TryParse(leftVal, out _) ? leftVal : $"\"{leftVal.Replace("\"", "\"\"")}\"";
                 string rightToken = double.TryParse(rightVal, out _) ? rightVal : $"\"{rightVal.Replace("\"", "\"\"")}\"";
 
-                // Stage 2: Transform Item Display Name
                 string displayLabel = rawItem;
-                string transformFormulaUsed = "NONE";
-                string transformRawResult = "N/A";
-
                 if (!string.IsNullOrWhiteSpace(config.Transform))
                 {
-                    transformFormulaUsed = config.Transform
+                    string transformExpr = config.Transform
                         .Replace("@item", itemToken)
                         .Replace("@left", leftToken)
                         .Replace("@right", rightToken);
 
-                    object? transformed = Metadata.EvaluateFormulaSafely(xlApp, transformFormulaUsed);
-                    transformRawResult = transformed?.ToString() ?? "NULL";
-
+                    object? transformed = Metadata.EvaluateFormulaSafely(xlApp, transformExpr);
                     if (transformed != null && !(transformed is ExcelError))
                     {
                         string outStr = transformed.ToString()?.Trim() ?? string.Empty;
-                        displayLabel = outStr;
+                        if (!string.IsNullOrEmpty(outStr)) displayLabel = outStr;
                     }
                 }
 
-                // Stage 3: Evaluate Filter
                 bool isValid = true;
-                string filterFormulaUsed = "NONE";
-                string filterRawResult = "N/A";
-
                 if (!string.IsNullOrWhiteSpace(config.Filter))
                 {
                     string safeDisplay = displayLabel.Replace("\"", "\"\"");
-
-                    filterFormulaUsed = config.Filter
+                    string filterExpr = config.Filter
                         .Replace("@item", itemToken)
                         .Replace("@display", $"\"{safeDisplay}\"")
                         .Replace("@left", leftToken)
                         .Replace("@right", rightToken);
 
-                    object? filterResult = Metadata.EvaluateFormulaSafely(xlApp, filterFormulaUsed);
-                    filterRawResult = filterResult?.ToString() ?? "NULL";
-
+                    object? filterResult = Metadata.EvaluateFormulaSafely(xlApp, filterExpr);
                     if (filterResult is bool b)
                     {
                         isValid = b;
@@ -575,18 +516,6 @@ public static class Arrow
                     }
                 }
 
-#if DEBUG
-                if (debugItemCounter <= 5 || displayLabel.Contains("-2146826265") || rawItem.Contains("-2146826265"))
-                {
-                    diagSb.AppendLine($"[Item #{debugItemCounter}] Raw: '{rawItem}'");
-                    diagSb.AppendLine($"  Transform: {transformFormulaUsed}");
-                    diagSb.AppendLine($"  -> Transformed Display: '{displayLabel}' (Raw Obj: {transformRawResult})");
-                    diagSb.AppendLine($"  Filter: {filterFormulaUsed}");
-                    diagSb.AppendLine($"  -> Filter Result: '{filterRawResult}' => IsValid: {isValid}");
-                    diagSb.AppendLine();
-                }
-#endif
-
                 processedItems.Add(new DropdownItem
                 {
                     Display = displayLabel,
@@ -594,11 +523,6 @@ public static class Arrow
                     IsValid = isValid
                 });
             }
-
-#if DEBUG
-            // Display diagnostics box before opening popup
-            MessageBox.Show(diagSb.ToString(), $"Debug Diagnostics - {sheetName} R{row}C{col}", MessageBoxButtons.OK, MessageBoxIcon.Information);
-#endif
 
             // 3. Selection Commit & Sync Writeback
             _onItemSelected = (chosenDisplay) =>
@@ -633,7 +557,6 @@ public static class Arrow
                             try { header = sheet.Cells[hRow, col].Value2?.ToString()?.Trim() ?? string.Empty; } catch { }
                             if (!string.IsNullOrEmpty(header)) break;
                         }
-
                         targetCol = header.IndexOf("ID", StringComparison.OrdinalIgnoreCase) >= 0 ? col + 1 : col - 1;
                     }
 
@@ -650,12 +573,10 @@ public static class Arrow
                         syncExpr = syncExpr.Substring(1).Trim();
 
                     object? resolvedVal = Metadata.EvaluateFormulaSafely(xlApp, syncExpr);
-
                     if (resolvedVal != null && !(resolvedVal is ExcelError))
                     {
                         string resStr = resolvedVal.ToString() ?? string.Empty;
                         bool isComError = long.TryParse(resStr, out long valNum) && valNum < -2000000000;
-
                         if (!resStr.StartsWith("#") && !isComError)
                         {
                             sheet.Cells[row, targetCol].Value2 = resolvedVal;
@@ -677,19 +598,15 @@ public static class Arrow
                 if (!string.IsNullOrWhiteSpace(inCellText))
                 {
                     string q = inCellText.Trim();
-
                     Func<DropdownItem, int> ranker = i =>
                     {
                         if (i.Display.Equals(q, StringComparison.OrdinalIgnoreCase)) return 0;
                         if (i.Display.StartsWith(q, StringComparison.OrdinalIgnoreCase)) return 1;
-
                         var words = i.Display.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
                         if (words.Any(w => w.StartsWith(q, StringComparison.OrdinalIgnoreCase))) return 2;
-
                         if (i.Display.IndexOf(q, StringComparison.OrdinalIgnoreCase) >= 0) return 3;
                         return 4;
                     };
-
                     sortedValid = validItems.OrderBy(ranker).ThenBy(i => i.Display);
                     sortedInvalid = invalidItems.OrderBy(ranker).ThenBy(i => i.Display);
                 }
@@ -710,7 +627,7 @@ public static class Arrow
                 _listBox.Items.Add(new DropdownItem { Display = "(No options available)", IsValid = false });
             }
 
-            // Anchored positioning
+            // Position Popup
             dynamic window = xlApp.ActiveWindow;
             dynamic targetPane = window.ActivePane;
             try
@@ -743,11 +660,11 @@ public static class Arrow
                 _popupHost.Show();
             }
 
-            SetWindowPos(_popupHost.Handle, HWND_TOPMOST, cellLeftPx, cellBottomPx, popupWidthPx, calculatedHeightPx, SWP_SHOWWINDOW | SWP_NOACTIVATE);
+            SetWindowPos(_popupHost.Handle, HWND_TOP, cellLeftPx, cellBottomPx, popupWidthPx, calculatedHeightPx, SWP_SHOWWINDOW | SWP_NOACTIVATE);
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"[Arrow Error]\n{ex.Message}\n\n{ex.StackTrace}", "PopulateAndOpenMenu Exception", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            System.Diagnostics.Debug.WriteLine($"[Arrow.PopulateAndOpenMenu Error] {ex.Message}");
         }
     }
 
@@ -758,5 +675,24 @@ public static class Arrow
             _onItemSelected(item.Display);
         }
         DismissAndReturnFocus();
+    }
+
+    public static void Teardown()
+    {
+        try
+        {
+            HideAll();
+            if (_arrowHost != null && !_arrowHost.IsDisposed)
+            {
+                _arrowHost.Dispose();
+                _arrowHost = null;
+            }
+            if (_popupHost != null && !_popupHost.IsDisposed)
+            {
+                _popupHost.Dispose();
+                _popupHost = null;
+            }
+        }
+        catch { }
     }
 }
