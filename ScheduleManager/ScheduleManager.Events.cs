@@ -26,7 +26,7 @@ public class Events : IExcelAddIn
             HookApplicationClose();
 
             // 1. Sync Core static enums into 'Lookups' tab
-            TypesToExcel.Sync(
+            ToExcel.Sync(
                 typeof(Shifts),
                 typeof(Days),
                 typeof(AttendanceStatus),
@@ -34,7 +34,7 @@ public class Events : IExcelAddIn
                 typeof(VehicleType)
             );
 
-            // 2. Sync dynamic master entities (Worker, Vehicle, Project) into 'Data' tab
+            // 2. Sync dynamic master entities (Staff, Vehicle, Project) into 'Data' tab
             SyncScheduleLookupsData();
 
             // 3. Delayed startup macro for auto-load & offline reconciliation
@@ -60,8 +60,8 @@ public class Events : IExcelAddIn
     public static void SyncScheduleLookupsData()
     {
         // Spawns 'Data' sheet and registers defined names
-        DataToExcel.SyncData<WorkerRecord, long>("WorkerID", s => s.WorkerID);
-        DataToExcel.SyncData<WorkerRecord, string>("WorkerName", s => s.WorkerDetails.WorkerName);
+        DataToExcel.SyncData<StaffRecord, long>("StaffID", s => s.StaffID);
+        DataToExcel.SyncData<StaffRecord, string>("StaffName", s => s.StaffDetails.StaffName);
         DataToExcel.SyncData<VehicleRecord, string>("VehiclePlate", v => v.VehiclePlate);
         DataToExcel.SyncData<ProjectRecord, string>("ProjectID", p => p.ProjectID);
     }

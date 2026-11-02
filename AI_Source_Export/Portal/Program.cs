@@ -24,7 +24,6 @@ static class Program
         using var mutex = new Mutex(true, PortalMutexName, out bool isInitialInstance);
         if (!isInitialInstance)
         {
-            // Focus existing Portal instance
             FocusExistingPortal();
             return;
         }
@@ -32,7 +31,6 @@ static class Program
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
-
         Application.Run(new PortalForm());
     }
 

@@ -24,13 +24,4 @@
 		<PackageReference Include="Dapper" Version="2.1.35" />
 	</ItemGroup>
 
-	<ItemGroup>
-		<None Remove="publish.ps1" />
-		<None Include="publish.ps1" />
-	</ItemGroup>
-
-	<ItemGroup>
-	  <Compile Update="DialogBoxes\DialogBoxes.ImportResult.cs" />
-	</ItemGroup>
-
 </Project>

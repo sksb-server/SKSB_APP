@@ -73,7 +73,7 @@ public class RibbonController : ExcelRibbon
             return;
         }
 
-        // 2. BACKGROUND WORKER: Offload disk serialization and PostgreSQL WorkbookHelper
+        // 2. BACKGROUND STAFF: Offload disk serialization and PostgreSQL WorkbookHelper
         Task.Run(async () =>
         {
             try

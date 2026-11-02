@@ -4,9 +4,10 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
+using System.Text;
 using System.Windows.Forms;
-using SKSB_App.Core.ExcelBitManager;
-using SKSB_App.Core.FileManager.Structure;
+using SKSB_App.Core.Bootstrap.Environment;
+using SKSB_App.Core.Bootstrap.Storage;
 
 public static class PortalRouter
 {
@@ -16,7 +17,6 @@ public static class PortalRouter
     [DllImport("user32.dll")]
     private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
 
-    // .NET 8 P/Invoke replacement for Marshal.GetActiveObject
     [DllImport("oleaut32.dll", PreserveSig = false)]
     private static extern void GetActiveObject(
         ref Guid rclsid,
@@ -30,11 +30,23 @@ public static class PortalRouter
         out Guid clsid
     );
 
+    private delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool EnumWindows(EnumWindowsProc lpEnumFunc, IntPtr lParam);
+
+    [DllImport("user32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+    private static extern int GetWindowText(IntPtr hWnd, StringBuilder lpString, int nMaxCount);
+
+    [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
+    private static extern int GetWindowTextLength(IntPtr hWnd);
+
     private const int SW_RESTORE = 9;
 
     public static void Launch(TemplateAddInPair pair)
     {
-        string excelPath = Context.ExcelPath;
+        string excelPath = ExcelRegistry.ExcelPath;
         if (string.IsNullOrEmpty(excelPath) || !File.Exists(excelPath))
         {
             MessageBox.Show("Excel installation could not be detected on this workstation.",
@@ -47,15 +59,25 @@ public static class PortalRouter
             string templateFileName = pair.Template();
             string templateBaseName = Path.GetFileNameWithoutExtension(templateFileName);
 
-            // 1. Check if an Excel window with this specific workbook is already open
+            // 1. Bring existing window to front if already running
             if (TryFocusExistingWorkbook(templateBaseName))
             {
-                return; // Module already active and brought to front
+                return;
             }
 
-            // 2. Not already open: dispatch Excel with the requested template and companion add-in
-            string templatePath = Folder.Templates.GetFilePath(templateFileName, mustExist: true);
-            string addInPath = Folder.AddIns.GetFilePath(pair.AddIn(), mustExist: true);
+            // 2. Resolve Template & Add-In paths
+            string templatePath = ResolveTemplatePath(templateFileName);
+            string addInPath = TemplateAddInPair.ResolveAddInPath(pair.AddIn());
+
+            if (!File.Exists(templatePath))
+            {
+                throw new FileNotFoundException($"Template file not found at:\n{templatePath}", templatePath);
+            }
+
+            if (!File.Exists(addInPath))
+            {
+                throw new FileNotFoundException($"Add-In file not found at:\n{addInPath}", addInPath);
+            }
 
             var startInfo = new ProcessStartInfo
             {
@@ -78,43 +100,83 @@ public static class PortalRouter
         }
     }
 
-    /// <summary>
-    /// Searches active Excel instances for a workbook whose name matches the target template.
-    /// If found, activates the workbook and brings its window to the front.
-    /// </summary>
+    private static string ResolveTemplatePath(string templateFileName)
+    {
+#if DEBUG
+        // 1. Check Codes Root: Documents\codes\SKSB_App\Templates\<file>
+        string codesTemplates = Path.Combine(FolderRegistry.SKSB_App.GetPath(), "Templates", templateFileName);
+        if (File.Exists(codesTemplates)) return codesTemplates;
+
+        // 2. Check explicit MyDocuments\codes\SKSB_App\Templates
+        string directCodes = Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+            "codes", "SKSB_App", "Templates", templateFileName);
+        if (File.Exists(directCodes)) return directCodes;
+
+        // 3. Check AppContext.BaseDirectory\Templates
+        string binTemplates = Path.Combine(AppContext.BaseDirectory, "Templates", templateFileName);
+        if (File.Exists(binTemplates)) return binTemplates;
+
+        return codesTemplates;
+#else
+        // Release: Always Documents\SKSB_App\Templates\<file>
+        return FolderRegistry.Templates.GetFilePath(templateFileName, mustExist: true);
+#endif
+    }
+
     private static bool TryFocusExistingWorkbook(string targetWorkbookName)
     {
         try
         {
-            // Query running Excel COM instance via OLEAUT32 in .NET 8
             object? xlAppObj = GetActiveObjectHelper("Excel.Application");
-            if (xlAppObj == null) return false;
-
-            dynamic xlApp = xlAppObj;
-
-            foreach (dynamic wb in xlApp.Workbooks)
+            if (xlAppObj != null)
             {
-                string wbName = wb.Name?.ToString() ?? string.Empty;
-
-                if (wbName.IndexOf(targetWorkbookName, StringComparison.OrdinalIgnoreCase) >= 0)
+                dynamic xlApp = xlAppObj;
+                foreach (dynamic wb in xlApp.Workbooks)
                 {
-                    wb.Activate();
-                    xlApp.Visible = true;
-
-                    IntPtr hwnd = new IntPtr((int)xlApp.Hwnd);
-                    if (hwnd != IntPtr.Zero)
+                    string wbName = wb.Name?.ToString() ?? string.Empty;
+                    if (wbName.IndexOf(targetWorkbookName, StringComparison.OrdinalIgnoreCase) >= 0)
                     {
-                        ShowWindow(hwnd, SW_RESTORE);
-                        SetForegroundWindow(hwnd);
+                        wb.Activate();
+                        xlApp.Visible = true;
+                        IntPtr hwnd = new IntPtr((int)xlApp.Hwnd);
+                        if (hwnd != IntPtr.Zero)
+                        {
+                            ShowWindow(hwnd, SW_RESTORE);
+                            SetForegroundWindow(hwnd);
+                            return true;
+                        }
                     }
-
-                    return true;
                 }
             }
         }
-        catch
+        catch { }
+
+        IntPtr foundHwnd = IntPtr.Zero;
+        EnumWindows((hWnd, lParam) =>
         {
-            // Throws if Excel is not running or COM ROT is unavailable
+            int length = GetWindowTextLength(hWnd);
+            if (length > 0)
+            {
+                var sb = new StringBuilder(length + 1);
+                GetWindowText(hWnd, sb, sb.Capacity);
+                string title = sb.ToString();
+
+                if (title.IndexOf("Excel", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                    title.IndexOf(targetWorkbookName, StringComparison.OrdinalIgnoreCase) >= 0)
+                {
+                    foundHwnd = hWnd;
+                    return false;
+                }
+            }
+            return true;
+        }, IntPtr.Zero);
+
+        if (foundHwnd != IntPtr.Zero)
+        {
+            ShowWindow(foundHwnd, SW_RESTORE);
+            SetForegroundWindow(foundHwnd);
+            return true;
         }
 
         return false;

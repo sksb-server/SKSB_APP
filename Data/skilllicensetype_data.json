@@ -1,12 +1,12 @@
 [
   {
-    "TypeID": 1,
-    "LicenseType": "Hero",
+    "SkillLicenseTypeID": 1,
+    "SkillLicenseName": "Hero",
     "Description": ""
   },
   {
-    "TypeID": 2,
-    "LicenseType": "Legend",
+    "SkillLicenseTypeID": 14,
+    "SkillLicenseName": "Legend",
     "Description": ""
   }
 ]

@@ -14,7 +14,7 @@ public static class SheetMapper
     // Sheet Aliases
     private static readonly string[] ScheduleAliases = { "Daily Schedule", "Daily_Schedule", "Schedule" };
     private static readonly string[] AttendanceAliases = { "Daily Attendance", "Daily_Attendance", "Attendance" };
-    private static readonly string[] PreferenceAliases = { "Preference", "Worker Preference", "Preferences" };
+    private static readonly string[] PreferenceAliases = { "Preference", "Staff Preference", "Preferences" };
 
     public static ScheduleRecord? ExtractScheduleRecord(DateOnly scheduleDate)
     {
@@ -23,7 +23,7 @@ public static class SheetMapper
 
         // -------------------------------------------------------------
         // 1. INGEST PROJECTS (Sheet: "Daily Schedule")
-        // Columns: Project ID (A) | Shift (B) | Workers CSV (C) | Vehicles CSV (D) | Remarks (E)
+        // Columns: Project ID (A) | Shift (B) | Staffs CSV (C) | Vehicles CSV (D) | Remarks (E)
         // -------------------------------------------------------------
         string schedSheet = WorkbookSession.ResolveSheetName(ScheduleAliases, "Daily Schedule");
         IntPtr schedId = WorkbookSession.GetSheetId(schedSheet);
@@ -40,23 +40,23 @@ public static class SheetMapper
                 if (string.IsNullOrWhiteSpace(projId)) continue;
 
                 string shiftStr = CleanCellString(schedGrid[r, 1]);
-                string workersCsv = CleanCellString(schedGrid[r, 2]);
+                string staffsCsv = CleanCellString(schedGrid[r, 2]);
                 string vehiclesCsv = CleanCellString(schedGrid[r, 3]);
                 string remarks = CleanCellString(schedGrid[r, 4]);
 
-                var workerList = workersCsv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
+                var staffList = staffsCsv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
                 var vehicleList = vehiclesCsv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).ToList();
 
-                if (workerList.Count == 0)
+                if (staffList.Count == 0)
                 {
-                    validationErrors.Add($"• Row {r + 2} [Daily Schedule]: Project '{projId}' has no assigned workers.");
+                    validationErrors.Add($"• Row {r + 2} [Daily Schedule]: Project '{projId}' has no assigned staffs.");
                 }
 
                 record.Projects.Add(new DailyProjectSchedule
                 {
                     ProjectID = projId,
                     Shift = Enum.TryParse(shiftStr, true, out Shifts s) ? s : Shifts.Morning,
-                    Workers = workerList,
+                    Staffs = staffList,
                     Vehicles = vehicleList,
                     Remarks = remarks
                 });
@@ -65,7 +65,7 @@ public static class SheetMapper
 
         // -------------------------------------------------------------
         // 2. INGEST ATTENDANCE (Sheet: "Daily Attendance")
-        // Col A: Worker ID | B: Name (Skip) | C: Skill (Skip) | D: Leave (Skip) | E: ClockIn | F: ClockOut | G: Biometric | H: Override | I: Reason | J: AttendanceState | K: IsAllocated
+        // Col A: Staff ID | B: Name (Skip) | C: Skill (Skip) | D: Leave (Skip) | E: ClockIn | F: ClockOut | G: Biometric | H: Override | I: Reason | J: AttendanceState | K: IsAllocated
         // -------------------------------------------------------------
         string attSheet = WorkbookSession.ResolveSheetName(AttendanceAliases, "Daily Attendance");
         IntPtr attId = WorkbookSession.GetSheetId(attSheet);
@@ -78,8 +78,8 @@ public static class SheetMapper
             int rows = attGrid.GetLength(0);
             for (int r = 0; r < rows; r++)
             {
-                object rawWorkerId = attGrid[r, 0];
-                if (rawWorkerId == null || rawWorkerId is ExcelEmpty || !long.TryParse(rawWorkerId.ToString(), out long workerId) || workerId <= 0)
+                object rawStaffId = attGrid[r, 0];
+                if (rawStaffId == null || rawStaffId is ExcelEmpty || !long.TryParse(rawStaffId.ToString(), out long staffId) || staffId <= 0)
                     continue;
 
                 TimeOnly clockIn = ParseTime(attGrid[r, 4]);
@@ -93,13 +93,13 @@ public static class SheetMapper
                 AttendanceStatus manualOverride = Enum.TryParse(overrideStr, true, out AttendanceStatus mo) ? mo : AttendanceStatus.Absence;
                 if (manualOverride != AttendanceStatus.Absence && string.IsNullOrWhiteSpace(reason))
                 {
-                    validationErrors.Add($"• Row {r + 2} [Daily Attendance]: Worker ID {workerId} has a manual override without an override reason.");
+                    validationErrors.Add($"• Row {r + 2} [Daily Attendance]: Staff ID {staffId} has a manual override without an override reason.");
                 }
 
-                record.WorkerAttendance.Add(new DailyWorkerAttendance
+                record.StaffAttendance.Add(new DailyStaffAttendance
                 {
                     DailyScheduleDate = scheduleDate,
-                    WorkerID = workerId,
+                    StaffID = staffId,
                     ClockInTime = clockIn,
                     ClockOutTime = clockOut,
                     BiometricStatus = Enum.TryParse(bioStr, true, out BiometricStatus b) ? b : BiometricStatus.None,
@@ -151,7 +151,7 @@ public static class SheetMapper
                     var p = record.Projects[i];
                     schedOut[i, 0] = p.ProjectID;
                     schedOut[i, 1] = p.Shift.ToString();
-                    schedOut[i, 2] = string.Join(", ", p.Workers);
+                    schedOut[i, 2] = string.Join(", ", p.Staffs);
                     schedOut[i, 3] = string.Join(", ", p.Vehicles);
                     schedOut[i, 4] = p.Remarks;
                 }
@@ -163,13 +163,13 @@ public static class SheetMapper
             XlCall.Excel(XlCall.xlcWorkbookSelect, new object[] { attSheet });
             WorkbookSession.ClearActiveSheetDataRows(1, 500, 0, 10);
 
-            if (record.WorkerAttendance.Count > 0)
+            if (record.StaffAttendance.Count > 0)
             {
-                object[,] attOut = new object[record.WorkerAttendance.Count, 11];
-                for (int i = 0; i < record.WorkerAttendance.Count; i++)
+                object[,] attOut = new object[record.StaffAttendance.Count, 11];
+                for (int i = 0; i < record.StaffAttendance.Count; i++)
                 {
-                    var a = record.WorkerAttendance[i];
-                    attOut[i, 0] = a.WorkerID;
+                    var a = record.StaffAttendance[i];
+                    attOut[i, 0] = a.StaffID;
                     // attOut[i, 1] -> Name (Formula Lookup)
                     // attOut[i, 2] -> Primary Skill (Formula Lookup)
                     // attOut[i, 3] -> Leave Status (Formula Lookup)
@@ -181,7 +181,7 @@ public static class SheetMapper
                     attOut[i, 9] = a.AttendanceStatus.ToString();
                     attOut[i, 10] = a.IsAllocated;
                 }
-                new ExcelReference(1, record.WorkerAttendance.Count, 0, 10).SetValue(attOut);
+                new ExcelReference(1, record.StaffAttendance.Count, 0, 10).SetValue(attOut);
             }
         }
         finally

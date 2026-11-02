@@ -1,0 +1,18 @@
+[
+  {
+    "WorkshopID": 1,
+    "WorkshopName": "Ah Keong Auto Repairs",
+    "WorkshopAddress": "Lot 12, Jalan Utarid U5/11, Shah Alam",
+    "WorkshopOwner": "Tan Ah Keong",
+    "PrimaryContact": "012-3456789",
+    "SecondaryContact": "03-78451122"
+  },
+  {
+    "WorkshopID": 2,
+    "WorkshopName": "Pusat Tayar \u0026 Servis Klang",
+    "WorkshopAddress": "No 44, Jalan Kapar, Klang",
+    "WorkshopOwner": "M. Murugan",
+    "PrimaryContact": "016-9876543",
+    "SecondaryContact": "03-33445566"
+  }
+]

@@ -1,39 +1,56 @@
 ﻿namespace SKSB_App.VehicleManager;
 
 using ExcelDna.Integration;
-using SKSB_App.Core.DialogBoxes;
-using SKSB_App.Core.FileManager;
-using SKSB_App.Core.FileManager.Structure;
-using SKSB_App.Core.TemplateEditor;
-using SKSB_App.Core.ServerManager;
-using SKSB_App.Core.Services;
+using SKSB_App.Core.Integration.Database;
+using SKSB_App.Core.RuntimeUI.DateFilter;
+using SKSB_App.Core.RuntimeUI.DropDown;
 using SKSB_App.Core.Types;
-using SKSB_App.Core.WorkbookHelper;
+using SKSB_App.Core.WorkbookOpen.Entry;
+using SKSB_App.Core.WorkbookOpen.Sheet;
+using SKSB_App.Core.WorkbookOpen.Sync;
+using SKSB_App.Core.WorkbookSave.Entry;
+using SKSB_App.Core.WorkbookSave.Storage;
 using System;
 using System.Collections.Generic;
-using System.IO;
-using System.Windows.Forms;
 
 public class Events : IExcelAddIn
 {
+    private static dynamic? _xlAppRoot;
+    private static bool _isExiting = false;
+    private static bool _isInternalSaving = false;
+
+    private static readonly EventsAutoOpen _coreEvents = new();
+
     private delegate void WorkbookBeforeCloseDelegate(dynamic wb, ref bool cancel);
-    private static dynamic? _appEvents;
-    private static WorkbookBeforeCloseDelegate? _closeHandler;
+    private delegate void WorkbookBeforeSaveDelegate(dynamic wb, bool saveAsUi, ref bool cancel);
+    private static WorkbookBeforeCloseDelegate? _beforeCloseHandler;
+    private static WorkbookBeforeSaveDelegate? _beforeSaveHandler;
+
+    public static readonly SaveContract<List<VehicleRecord>> VehicleSyncDescriptor = new()
+    {
+        ModuleName = "Vehicle Manager",
+        ServerTableName = "vehicle_master",
+        ExtractAndValidate = () => SheetMapper.ExtractVehicleRecordsWithDiagnostics(),
+        IsDatasetEmpty = list => list == null || list.Count == 0,
+        SaveToServer = list => (ServerSyncCommands.SaveVehiclesSilent(list, out string err), err),
+        PopulateWorksheet = list => SheetMapper.PopulateWorksheet(list),
+        FetchFromServer = () => ServerSyncCommands.FetchVehicleRecords(),
+        SyncLookups = isInteractive => SyncVehicleLookupsData(isInteractive),
+        ValidateOfflinePayload = list => list.Count > 0 && list.TrueForAll(v => !string.IsNullOrWhiteSpace(v.VehiclePlate))
+    };
 
     public void AutoOpen()
     {
         ExcelAsyncUtil.QueueAsMacro(() =>
         {
-            HookApplicationClose();
+            _coreEvents.AutoOpen();
 
-            // 1. Live server data lookups
-            SyncVehicleLookupsData();
+            HookApplicationEvents();
+            Arrow.EnsureExcelEventsHooked();
 
-            // 2. Startup reconciliation with conflict detection
             double nowSerial = Convert.ToDouble(XlCall.Excel(XlCall.xlfNow));
             XlCall.Excel(XlCall.xlcOnTime, nowSerial + (1.0 / 86400.0), "DelayedAutoLoadMacro");
 
-            // 3. Hotkeys
             XlCall.Excel(XlCall.xlcOnKey, "^s", "OnHotKeySave");
             XlCall.Excel(XlCall.xlcOnKey, "^+s", "OnHotKeySave");
         });
@@ -43,200 +60,144 @@ public class Events : IExcelAddIn
     {
         ExcelAsyncUtil.QueueAsMacro(() =>
         {
-            UnhookApplicationClose();
+            _coreEvents.AutoClose();
+            Arrow.Teardown();
+            UnhookApplicationEvents();
             XlCall.Excel(XlCall.xlcOnKey, "^s");
             XlCall.Excel(XlCall.xlcOnKey, "^+s");
         });
     }
 
-    public static void SyncVehicleLookupsData()
+    public static void SyncVehicleLookupsData(bool isInteractive = false)
     {
-        DataToExcel.SyncData<WorkerRecord, string>("WorkerName", s => s.WorkerDetails.WorkerName);
-    }
-
-    private static void HookApplicationClose()
-    {
-        try
+        ExcelAsyncUtil.QueueAsMacro(() =>
         {
-            dynamic xlApp = ExcelDnaUtil.Application;
-            _appEvents = xlApp;
-            _closeHandler = new WorkbookBeforeCloseDelegate(OnWorkbookBeforeClose);
-            xlApp.WorkbookBeforeClose += _closeHandler;
-        }
-        catch { }
-    }
-
-    private static void UnhookApplicationClose()
-    {
-        try
-        {
-            if (_appEvents != null && _closeHandler != null)
+            try
             {
-                _appEvents.WorkbookBeforeClose -= _closeHandler;
-                _closeHandler = null;
-                _appEvents = null;
+                // Sync ONLY the specific enums used across Vehicle Manager sheets
+                EnumList.Sync(
+                    typeof(DateFilterScope),
+                    typeof(VehicleType),
+                    typeof(ServiceType),
+                    typeof(MaintenanceStatus),
+                    typeof(VehicleStatus),
+                    typeof(VehiclePermitType),
+                    typeof(VehicleType),
+                    typeof(InsuranceType)
+                );
+
+                // Sync ONLY Staff records to Data sheet (row-aligned StaffIDList and StaffNameList)
+                DataList.SyncEntities(typeof(StaffRecord));
             }
-        }
-        catch { }
+            catch (Exception ex)
+            {
+                System.Diagnostics.Debug.WriteLine($"[SyncVehicleLookupsData Warning] {ex.Message}");
+            }
+        });
     }
 
-    private static void OnWorkbookBeforeClose(dynamic wb, ref bool cancel)
+    private static void HookApplicationEvents()
     {
         try
         {
-            if (WorkbookSession.IsMasterTemplateFile() || WorkbookSession.IsTemplateEditMode) return;
+            if (_xlAppRoot != null) return;
+            dynamic xlApp = ExcelDnaUtil.Application;
+            _xlAppRoot = xlApp;
 
-            while (true)
+            dynamic ourWorkbook = xlApp.ActiveWorkbook;
+
+            _beforeCloseHandler = new WorkbookBeforeCloseDelegate((dynamic wb, ref bool cancel) =>
             {
-                // Attempt standard silent server save
-                bool saved = ServerSyncCommands.SaveVehiclesSilent();
-
-                if (saved)
+                if (!Guard.IsVehicleWorkbook(wb))
                 {
-                    // Success: Clear any offline stash if it existed
-                    OfflineSaveServices.ClearPendingOfflineSnapshot<List<VehicleRecord>>();
                     wb.Saved = true;
+                    cancel = false;
                     return;
                 }
 
-                // Failed: Show 3-way conflict dialog
-                using var dialog = new ExitSyncConflict(
-                    "Vehicle Manager",
-                    "Could not persist records to the PostgreSQL server (connection timeout or schema conflict)."
+                SaveEntry.InterceptClose(
+                    (object)wb,
+                    ref cancel,
+                    VehicleSyncDescriptor,
+                    ref _isExiting,
+                    new Action(UnhookApplicationEvents)
                 );
-                dialog.ShowDialog();
+            });
+            _xlAppRoot.WorkbookBeforeClose += _beforeCloseHandler;
 
-                switch (dialog.Resolution)
+            _beforeSaveHandler = new WorkbookBeforeSaveDelegate((dynamic wb, bool saveAsUi, ref bool cancel) =>
+            {
+                try
                 {
-                    case ExitResolution.Retry:
-                        // Loops back to top and retries SaveVehiclesSilent()
-                        continue;
-
-                    case ExitResolution.SaveLocallyAndQuit:
-                        // Extract current rows from Excel
-                        var currentRecords = SheetMapper.ExtractVehicleRecords();
-                        if (currentRecords != null && currentRecords.Count > 0)
-                        {
-                            OfflineSaveServices.SaveOfflineSnapshot(currentRecords);
-                            MessageBox.Show(
-                                "Your records have been safely saved to local disk.\n\n" +
-                                "The system will automatically detect this file and prompt to commit it to the server when you next start.",
-                                "Saved Offline",
-                                MessageBoxButtons.OK,
-                                MessageBoxIcon.Information
-                            );
-                        }
-
-                        // Mark clean so Excel closes without prompt
-                        wb.Saved = true;
-                        return;
-
-                    case ExitResolution.Cancel:
-                    default:
-                        // Abort close sequence and keep workbook open
-                        cancel = true;
-                        return;
+                    if (ourWorkbook != null && wb != null && wb != ourWorkbook) return;
                 }
-            }
+                catch { }
+
+                if (_isInternalSaving || SheetOperations.IsMasterTemplateFile() || SheetOperations.IsTemplateEditMode) return;
+
+                cancel = true;
+                ExcelAsyncUtil.QueueAsMacro(() => SaveEntry.Save(VehicleSyncDescriptor));
+            });
+            _xlAppRoot.WorkbookBeforeSave += _beforeSaveHandler;
         }
-        catch (Exception ex)
-        {
-            System.Diagnostics.Debug.WriteLine($"[OnWorkbookBeforeClose] Error: {ex.Message}");
-        }
+        catch { }
     }
 
-    [ExcelCommand(Name = "DelayedAutoLoadMacro")]
-    public static void DelayedAutoLoadMacro()
+    private static void UnhookApplicationEvents()
     {
         try
         {
-            if (WorkbookSession.IsMasterTemplateFile() || WorkbookSession.IsTemplateEditMode)
+            if (_xlAppRoot != null)
             {
-                WorkbookSession.ShowStatusConfirmation("Design Mode: Auto-load bypassed.");
-                return;
-            }
-
-            // -------------------------------------------------------------
-            // STARTUP RECONCILIATION: Check for pending offline file
-            // -------------------------------------------------------------
-            if (OfflineSaveServices.HasPendingOfflineSnapshot<List<VehicleRecord>>())
-            {
-                var pendingRecords = OfflineSaveServices.LoadPendingOfflineSnapshot<List<VehicleRecord>>();
-                DateTime localOfflineTime = File.GetLastWriteTime(
-                    Folder.Data.GetFilePath("List`1_PendingUpload.json")
-                );
-
-                // Check server's latest timestamp
-                DateTime? serverLastUpdate = OfflineSaveServices.GetServerLatestTimestamp("vehicle_master");
-
-                bool canCommit = true;
-
-                if (serverLastUpdate.HasValue && serverLastUpdate.Value > localOfflineTime)
-                {
-                    // Conflict: Server has newer data than our offline exit file
-                    var conflictChoice = MessageBox.Show(
-                        $"[Synchronization Conflict Detected]\n\n" +
-                        $"• Your offline saved file: {localOfflineTime:yyyy-MM-dd HH:mm:ss}\n" +
-                        $"• Newer server version:  {serverLastUpdate.Value:yyyy-MM-dd HH:mm:ss}\n\n" +
-                        "The server was updated after your offline save.\n\n" +
-                        "Do you still want to COMMIT your offline changes to the server?\n" +
-                        "• Yes: Overwrite server records with your local offline version.\n" +
-                        "• No: Discard local offline changes and load the latest server copy.",
-                        "Data Version Conflict",
-                        MessageBoxButtons.YesNo,
-                        MessageBoxIcon.Question
-                    );
-
-                    canCommit = (conflictChoice == DialogResult.Yes);
-                }
-
-                if (canCommit && pendingRecords != null && pendingRecords.Count > 0)
-                {
-                    // Commit offline records to the server
-                    var (success, count, _) = ServerSyncCommands.SaveVehiclesAsync(pendingRecords)
-                                                                 .GetAwaiter()
-                                                                 .GetResult();
-                    if (success)
-                    {
-                        OfflineSaveServices.ClearPendingOfflineSnapshot<List<VehicleRecord>>();
-                        SheetMapper.PopulateWorksheet(pendingRecords);
-                        WorkbookSession.ShowStatusConfirmation($"Committed {count} offline records to server.");
-                        return;
-                    }
-                }
-                else
-                {
-                    // User chose 'No': Clear pending offline file and fall through to regular server load
-                    OfflineSaveServices.ClearPendingOfflineSnapshot<List<VehicleRecord>>();
-                }
-            }
-
-            // Standard operational load from PostgreSQL
-            if (ServerSyncCommands.LoadVehiclesSilent())
-            {
-                WorkbookSession.ShowStatusConfirmation("Vehicle records loaded from server.");
+                if (_beforeCloseHandler != null) _xlAppRoot.WorkbookBeforeClose -= _beforeCloseHandler;
+                if (_beforeSaveHandler != null) _xlAppRoot.WorkbookBeforeSave -= _beforeSaveHandler;
+                _beforeCloseHandler = null;
+                _beforeSaveHandler = null;
+                _xlAppRoot = null;
             }
         }
-        catch (Exception ex)
-        {
-            System.Diagnostics.Debug.WriteLine($"[DelayedAutoLoad] Error: {ex.Message}");
-        }
+        catch { }
     }
 
     [ExcelCommand(Name = "OnHotKeySave")]
     public static void OnHotKeySave()
     {
-        if (WorkbookSession.IsMasterTemplateFile() || WorkbookSession.IsTemplateEditMode)
+        if (SheetOperations.IsMasterTemplateFile() || SheetOperations.IsTemplateEditMode)
         {
-            XlCall.Excel(XlCall.xlcSave);
+            _isInternalSaving = true;
+            try { XlCall.Excel(XlCall.xlcSave); } finally { _isInternalSaving = false; }
             return;
         }
 
-        bool success = ServerSyncCommands.SaveVehiclesSilent();
-        if (success)
+        SaveEntry.Save(VehicleSyncDescriptor);
+    }
+
+    [ExcelCommand(Name = "DelayedAutoLoadMacro")]
+    public static void DelayedAutoLoadMacro()
+    {
+        if (!Guard.IsVehicleWorkbook()) return;
+
+        dynamic xlApp = ExcelDnaUtil.Application;
+        try
         {
-            OfflineSaveServices.ClearPendingOfflineSnapshot<List<VehicleRecord>>();
-            MessageBox.Show("Save completed successfully.", "SKSB Vehicle Manager", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            if (xlApp.ActiveWorkbook != null && !SheetOperations.IsMasterTemplateFile())
+            {
+                xlApp.ActiveWindow.Caption = "Vehicle_Manager";
+            }
+        }
+        catch { }
+
+        OfflineSave.HandleStartup(VehicleSyncDescriptor);
+
+        dynamic wb = xlApp.ActiveWorkbook;
+        if (wb != null && !SheetOperations.IsTemplateEditMode)
+        {
+            foreach (dynamic sheet in wb.Worksheets)
+            {
+                SheetProtections.ApplyStyleDrivenProtection(sheet);
+            }
+
+            SheetOperations.SetAuxiliarySheetsVisibility(visible: false);
         }
     }
 }

@@ -1,155 +1,129 @@
 <Project>
-	<!-- ============================================================= -->
-	<!-- 1. AUTO-CLEAN BEFORE BUILD                                     -->
-	<!-- Wipes stale compiled binaries from local bin/ output folders  -->
-	<!-- ============================================================= -->
-	<Target Name="AutoCleanBeforeBuild" BeforeTargets="BeforeBuild">
-		<Message Importance="high" Text="[Auto-Clean] Cleaning local target directory for $(MSBuildProjectName)..." />
-		<ItemGroup>
-			<StaleOutputFiles Include="$(TargetDir)**\*.*" />
-		</ItemGroup>
-		<Delete Files="@(StaleOutputFiles)" TreatErrorsAsWarnings="true" />
-	</Target>
+  <!-- ============================================================= -->
+  <!-- GLOBAL PATH DEFINITIONS                                       -->
+  <!-- Source & Development root: C:\Users\<user>\Documents\codes\SKSB_App -->
+  <!-- Deployment Release target: C:\Users\<user>\Documents\SKSB_App -->
+  <!-- ============================================================= -->
+  <PropertyGroup>
+    <AIExportDir>$(MSBuildThisFileDirectory)AI_Source_Export</AIExportDir>
+    <SingleBundleFile>$(AIExportDir)\AI_Context_AllCode.txt</SingleBundleFile>
+    <SourceAddInsDir>$(MSBuildThisFileDirectory)AddIns</SourceAddInsDir>
+    <ReleaseDeploymentDir>$(UserProfile)\Documents\SKSB_App</ReleaseDeploymentDir>
+  </PropertyGroup>
 
-	<!-- ============================================================= -->
-	<!-- 2. CLEAN STALE DEPLOYMENT ARTIFACTS BEFORE SYNC               -->
-	<!-- Removes old version of this specific module from AddIns folder-->
-	<!-- ============================================================= -->
-	<Target Name="CleanDeployedAddInsBeforeSync"
-			BeforeTargets="AutoSyncExcelDnaToDocuments"
-			Condition="'@(PackageReference->WithMetadataValue(&quot;Identity&quot;, &quot;ExcelDna.AddIn&quot;))' != ''">
+  <!-- ============================================================= -->
+  <!-- 1. TOTAL CLEAN (RUNS ONLY ON 'CLEAN' OR 'REBUILD' BUTTON)    -->
+  <!-- Will NEVER run during normal 'Build Solution' or 'F5' Debug   -->
+  <!-- ============================================================= -->
+  <Target Name="DeepCleanAllArtifactsOnClean"
+          BeforeTargets="Clean"
+          Condition="'$(_DeepCleanExecuted)' != 'true'">
 
-		<PropertyGroup>
-			<TargetAddInsDir>$(UserProfile)\Documents\SKSB_App\AddIns</TargetAddInsDir>
-		</PropertyGroup>
+    <PropertyGroup>
+      <_DeepCleanExecuted>true</_DeepCleanExecuted>
+    </PropertyGroup>
 
-		<ItemGroup>
-			<StaleAddInsFiles Include="$(TargetAddInsDir)\*$(MSBuildProjectName)*.*" />
-			<StaleAddInsFiles Include="$(TargetAddInsDir)\*$(TargetName)*.*" />
-		</ItemGroup>
+    <Message Importance="high" Text="[Clean] Wiping easy-access AddIns, AI export, and Release directories..." />
 
-		<Delete Files="@(StaleAddInsFiles)" TreatErrorsAsWarnings="true" />
-		<Message Importance="high" Text="[Auto-Clean] Removed stale deployment files for $(MSBuildProjectName) in $(TargetAddInsDir)" />
-	</Target>
+    <!-- 1a. Completely wipe everything inside Codes\SKSB_App\AddIns -->
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -Command &quot;if (Test-Path '$(SourceAddInsDir)') { Get-ChildItem -Path '$(SourceAddInsDir)' -Recurse -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue }&quot;" IgnoreExitCode="true" />
 
-	<!-- ============================================================= -->
-	<!-- 3. EXCEL-DNA AUTO-SYNC TO DOCUMENTS                           -->
-	<!-- Deploys newly compiled DLLs, XLLs, and packed binaries        -->
-	<!-- ============================================================= -->
-	<Target Name="AutoSyncExcelDnaToDocuments"
-			AfterTargets="ExcelDnaPack;Build"
-			Condition="'@(PackageReference->WithMetadataValue(&quot;Identity&quot;, &quot;ExcelDna.AddIn&quot;))' != ''">
+    <!-- 1b. Wipe AI export folder and any loose AI zips -->
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -Command &quot;Remove-Item -Path '$(MSBuildThisFileDirectory)*AI*.zip' -Force -ErrorAction SilentlyContinue; if (Test-Path '$(AIExportDir)') { Remove-Item -Path '$(AIExportDir)' -Recurse -Force -ErrorAction SilentlyContinue }&quot;" IgnoreExitCode="true" />
 
-		<PropertyGroup>
-			<TargetAddInsDir>$(UserProfile)\Documents\SKSB_App\AddIns</TargetAddInsDir>
-		</PropertyGroup>
+    <!-- 1c. Only wipe Documents\SKSB_App when cleaning in RELEASE mode -->
+    <Exec Condition="'$(Configuration)' == 'Release'"
+          Command="powershell -NoProfile -ExecutionPolicy Bypass -Command &quot;if (Test-Path '$(ReleaseDeploymentDir)') { Get-ChildItem -Path '$(ReleaseDeploymentDir)' -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch '\\Data\\' } | Remove-Item -Force -ErrorAction SilentlyContinue }&quot;"
+          IgnoreExitCode="true" />
+  </Target>
 
-		<MakeDir Directories="$(TargetAddInsDir)" Condition="!Exists('$(TargetAddInsDir)')" />
+  <!-- ============================================================= -->
+  <!-- 2. COPY BUILD ARTIFACTS TO CODES\ADDINS ON BUILD              -->
+  <!-- Safe wildcard copy: Never fails on optional/missing files     -->
+  <!-- ============================================================= -->
+  <Target Name="SyncAddInsToCodesFolderOnBuild"
+          AfterTargets="Build"
+          Condition="'$(MSBuildProjectName)' == 'Core' or '@(PackageReference->WithMetadataValue(&quot;Identity&quot;, &quot;ExcelDna.AddIn&quot;))' != ''">
 
-		<ItemGroup>
-			<!-- 1. All compiled DLLs and JSON configurations -->
-			<AddInArtifacts Include="$(TargetDir)*.dll" />
-			<AddInArtifacts Include="$(TargetDir)*.runtimeconfig.json" />
-			<AddInArtifacts Include="$(TargetDir)*.deps.json" />
+    <MakeDir Directories="$(SourceAddInsDir)" Condition="!Exists('$(SourceAddInsDir)')" />
 
-			<!-- 2. The standard XLLs and DNA manifests -->
-			<AddInArtifacts Include="$(TargetDir)*-AddIn*.xll" />
-			<AddInArtifacts Include="$(TargetDir)*-AddIn*.dna" />
+    <ItemGroup>
+      <!-- Deploy project's DLL, config, and symbols (using wildcards so missing items won't break MSB3030) -->
+      <ModuleArtifacts Include="$(TargetDir)$(TargetName).dll" />
+      <ModuleArtifacts Include="$(TargetDir)$(TargetName).pdb" Condition="Exists('$(TargetDir)$(TargetName).pdb')" />
+      <ModuleArtifacts Include="$(TargetDir)$(TargetName).deps.json" Condition="Exists('$(TargetDir)$(TargetName).deps.json')" />
+      <ModuleArtifacts Include="$(TargetDir)$(TargetName).runtimeconfig.json" Condition="Exists('$(TargetDir)$(TargetName).runtimeconfig.json')" />
 
-			<!-- 3. Packed standalone XLLs from publish\ -->
-			<PackedArtifacts Include="$(TargetDir)publish\*-packed.xll" />
-		</ItemGroup>
+      <!-- Wildcards automatically capture Core-AddIn.dna, Core-AddIn64.dna, and all XLLs without hardcoding -->
+      <ModuleArtifacts Include="$(TargetDir)*-AddIn*.xll" />
+      <ModuleArtifacts Include="$(TargetDir)*-AddIn*.dna" />
+      <ModuleArtifacts Include="$(TargetDir)*.dna" />
+      <PackedArtifacts Include="$(TargetDir)publish\*-packed.xll" />
+    </ItemGroup>
 
-		<Copy SourceFiles="@(AddInArtifacts)"
-			  DestinationFolder="$(TargetAddInsDir)"
-			  SkipUnchangedFiles="false" />
+    <Copy SourceFiles="@(ModuleArtifacts)"
+          DestinationFolder="$(SourceAddInsDir)"
+          SkipUnchangedFiles="false" />
 
-		<Copy SourceFiles="@(PackedArtifacts)"
-			  DestinationFolder="$(TargetAddInsDir)"
-			  SkipUnchangedFiles="false" />
+    <Copy SourceFiles="@(PackedArtifacts)"
+          DestinationFolder="$(SourceAddInsDir)"
+          SkipUnchangedFiles="false"
+          Condition="'@(PackedArtifacts)' != ''" />
 
-		<Message Importance="high"
-				 Text="[Excel-DNA Auto-Sync] Deployed @(AddInArtifacts->Count()) artifacts to $(TargetAddInsDir)" />
-	</Target>
+    <Message Importance="high" Text="[AddIn Sync] Deployed $(MSBuildProjectName) artifacts to $(SourceAddInsDir)" />
+  </Target>
 
-	<Project>
-		<!-- ... your existing AutoCleanBeforeBuild, CleanDeployedAddInsBeforeSync, and AutoSyncExcelDnaToDocuments targets ... -->
+  <!-- ============================================================= -->
+  <!-- 3. AUTO-GENERATE AI CHAT EXPORT BUNDLE                        -->
+  <!-- Triggers once per build cycle on Launcher                     -->
+  <!-- ============================================================= -->
+  <Target Name="GenerateAIChatCodeBundle"
+          AfterTargets="Build"
+          Condition="'$(_AIChatBundleRan)' != 'true' and ('$(MSBuildProjectName)' == 'Launcher' or '$(MSBuildProjectName)' == 'SKSB_App')">
 
-		<!-- ============================================================= -->
-		<!-- 4. AUTO-GENERATE AI CHAT EXPORT BUNDLE (AUTO-CLEAN & NO ZIP)  -->
-		<!-- ============================================================= -->
-		<Target Name="GenerateAIChatCodeBundle"
-				AfterTargets="Build"
-				Condition="'$(Configuration)' == 'Debug' and '$(_AIChatBundleDone)' != 'true'">
+    <PropertyGroup>
+      <_AIChatBundleRan>true</_AIChatBundleRan>
+    </PropertyGroup>
 
-			<PropertyGroup>
-				<!-- Export folder located safely in Documents -->
-				<AIExportDir>$(UserProfile)\Documents\SKSB_App\AI_Source_Export</AIExportDir>
-				<SingleBundleFile>$(AIExportDir)\AI_Context_AllCode.txt</SingleBundleFile>
-				<!-- Guard flag so the multi-project solution build only runs this once -->
-				<_AIChatBundleDone>true</_AIChatBundleDone>
-			</PropertyGroup>
+    <MakeDir Directories="$(AIExportDir)" Condition="!Exists('$(AIExportDir)')" />
 
-			<!-- 1. AUTO-CLEAN: Wipe the entire previous AI export directory and any AI zips -->
-			<Exec Command="powershell -NoProfile -Command &quot;&amp; {
-			$exportDir = '$(AIExportDir)';
-			
-			# 1a. Delete any existing AI zip files in the target folder or parent Documents\SKSB_App
-			Get-ChildItem -Path '$(UserProfile)\Documents\SKSB_App' -Filter '*AI*.zip' -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue;
-			Get-ChildItem -Path '$(MSBuildThisFileDirectory)' -Filter '*AI*.zip' -File -ErrorAction SilentlyContinue | Remove-Item -Force -ErrorAction SilentlyContinue;
+    <ItemGroup>
+      <CleanSourceFiles Include="$(MSBuildThisFileDirectory)**\*.cs;
+                                 $(MSBuildThisFileDirectory)**\*.csproj;
+                                 $(MSBuildThisFileDirectory)**\*.dna;
+                                 $(MSBuildThisFileDirectory)**\*.props;
+                                 $(MSBuildThisFileDirectory)**\*.targets;
+                                 $(MSBuildThisFileDirectory)**\*.sql"
+                        Exclude="$(MSBuildThisFileDirectory)**\bin\**;
+                                 $(MSBuildThisFileDirectory)**\obj\**;
+                                 $(MSBuildThisFileDirectory)**\.vs\**;
+                                 $(MSBuildThisFileDirectory)**\.git\**;
+                                 $(MSBuildThisFileDirectory)**\packages\**;
+                                 $(MSBuildThisFileDirectory)**\publish\**;
+                                 $(MSBuildThisFileDirectory)**\publish_staging\**;
+                                 $(MSBuildThisFileDirectory)**\AI_Source_Export\**;
+                                 $(MSBuildThisFileDirectory)**\*AI*\**;
+                                 $(AIExportDir)\**" />
+    </ItemGroup>
 
-			# 1b. Completely wipe the target AI directory contents
-			if (Test-Path $exportDir) {
-				Get-ChildItem -Path $exportDir -Recurse -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue;
-			} else {
-				New-Item -ItemType Directory -Path $exportDir -Force | Out-Null;
-			}
-		}&quot;" IgnoreExitCode="true" />
+    <Copy SourceFiles="@(CleanSourceFiles)"
+          DestinationFolder="$(AIExportDir)\%(RecursiveDir)"
+          SkipUnchangedFiles="false" />
 
-			<!-- 2. Find clean source files while strictly excluding binaries, git, and AI directories -->
-			<ItemGroup>
-				<CleanSourceFiles Include="$(MSBuildThisFileDirectory)**\*.cs;
-			                           $(MSBuildThisFileDirectory)**\*.csproj;
-			                           $(MSBuildThisFileDirectory)**\*.dna;
-			                           $(MSBuildThisFileDirectory)**\*.props;
-			                           $(MSBuildThisFileDirectory)**\*.targets;
-			                           $(MSBuildThisFileDirectory)**\*.sql"
-								  Exclude="$(MSBuildThisFileDirectory)**\bin\**;
-			                           $(MSBuildThisFileDirectory)**\obj\**;
-			                           $(MSBuildThisFileDirectory)**\.vs\**;
-			                           $(MSBuildThisFileDirectory)**\.git\**;
-			                           $(MSBuildThisFileDirectory)**\packages\**;
-			                           $(MSBuildThisFileDirectory)**\publish\**;
-			                           $(MSBuildThisFileDirectory)**\AI_Source_Export\**;
-			                           $(MSBuildThisFileDirectory)**\*AI*\**;
-			                           $(AIExportDir)\**" />
-			</ItemGroup>
+    <!-- Consolidate into AI_Context_AllCode.txt using atomic write -->
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -Command &quot;$dest = '$(SingleBundleFile)'; $tmp = $dest + '.tmp'; New-Item -ItemType File -Path $tmp -Force | Out-Null; Get-ChildItem -Path '$(AIExportDir)' -Recurse -File | Where-Object { $_.FullName -ne $dest -and $_.FullName -ne $tmp -and $_.Extension -match '\.(cs|csproj|dna|props|targets|sql)$' } | ForEach-Object { '============================================================' | Out-File $tmp -Append -Encoding utf8; ('FILE: ' + $_.FullName.Replace('$(AIExportDir)\', '')) | Out-File $tmp -Append -Encoding utf8; '============================================================' | Out-File $tmp -Append -Encoding utf8; Get-Content $_.FullName | Out-File $tmp -Append -Encoding utf8; '`n' | Out-File $tmp -Append -Encoding utf8 }; Move-Item -Path $tmp -Destination $dest -Force;&quot;" IgnoreExitCode="true" />
 
-			<!-- 3. Copy source files into the freshly cleared folder -->
-			<Copy SourceFiles="@(CleanSourceFiles)"
-				  DestinationFolder="$(AIExportDir)\%(RecursiveDir)"
-				  SkipUnchangedFiles="false" />
+    <Message Importance="high" Text="[AI Export Ready] Unified bundle created at: $(SingleBundleFile)" />
+  </Target>
 
-			<!-- 4. Concatenate into the single, pasteable AI text bundle -->
-			<Exec Command="powershell -NoProfile -Command &quot;&amp; {
-			$dest = '$(SingleBundleFile)';
-			$exportDir = '$(AIExportDir)';
-			
-			Get-ChildItem -Path $exportDir -Recurse -File | Where-Object { 
-				$_.FullName -ne $dest -and 
-				$_.Extension -match '\.(cs|csproj|dna|props|targets|sql)$' 
-			} | ForEach-Object {
-				$rel = $_.FullName.Replace($exportDir + '\', '');
-				'============================================================' | Out-File $dest -Append -Encoding utf8;
-				('FILE: ' + $rel) | Out-File $dest -Append -Encoding utf8;
-				'============================================================' | Out-File $dest -Append -Encoding utf8;
-				Get-Content $_.FullName | Out-File $dest -Append -Encoding utf8;
-				'`n' | Out-File $dest -Append -Encoding utf8;
-			}
-		}&quot;" IgnoreExitCode="true" />
-
-			<Message Importance="high" Text="[AI Clean &amp; Export] Purged stale files/zips and generated fresh code bundle at: $(SingleBundleFile)" />
-		</Target>
-	</Project>
-	
+  <!-- ============================================================= -->
+  <!-- 4. AUTO-DEPLOY RELEASE PACKAGE TO SERVER (RELEASE ONLY)       -->
+  <!-- ============================================================= -->
+  <Target Name="AutoDeployReleaseToServer"
+          AfterTargets="Build"
+          Condition="'$(Configuration)' == 'Release' and ('$(MSBuildProjectName)' == 'Launcher' or '$(MSBuildProjectName)' == 'SKSB_App')">
+    <Message Importance="high" Text="[Release Deploy] Building and deploying SKSB package to server..." />
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)publish.ps1&quot;"
+          IgnoreExitCode="true" />
+  </Target>
 </Project>

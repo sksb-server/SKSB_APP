@@ -83,7 +83,7 @@ public class RibbonController : ExcelRibbon
         {
             Events.SyncScheduleLookupsData();
             MessageBox.Show(
-                "Schedule lookup data refreshed successfully.\n\n• Lookups: Synced core enums\n• Data: Live Worker, Vehicle, and Project identifiers refreshed",
+                "Schedule lookup data refreshed successfully.\n\n• Lookups: Synced core enums\n• Data: Live Staff, Vehicle, and Project identifiers refreshed",
                 "Lookups Synced",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Information
@@ -104,7 +104,7 @@ public class RibbonController : ExcelRibbon
             return; // Pre-save validation failed or no data
         }
 
-        // 2. BACKGROUND WORKER: Offload serialization and PostgreSQL WorkbookHelper
+        // 2. BACKGROUND STAFF: Offload serialization and PostgreSQL WorkbookHelper
         Task.Run(async () =>
         {
             try
