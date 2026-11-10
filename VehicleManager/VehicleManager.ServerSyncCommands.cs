@@ -317,6 +317,10 @@ internal static class ServerSyncCommands
                                 FuelCompany = o.fuel_company?.ToString() ?? string.Empty,
                                 StationName = o.station_name?.ToString() ?? string.Empty,
                                 ReceiptNumber = o.receipt_number?.ToString() ?? string.Empty,
+                                Time = o.time?.ToString() ?? string.Empty,
+                                FuelType = o.fuel_type?.ToString() ?? string.Empty,
+                                PriceAtFueling = o.price_at_fueling != null ? Convert.ToDecimal(o.price_at_fueling) : 0.00m,
+                                FuelAmount = o.fuel_amount != null ? Convert.ToDecimal(o.fuel_amount) : 0.00m,
                                 Amount = o.amount != null ? Convert.ToDecimal(o.amount) : 0.00m,
                                 Remarks = o.remarks?.ToString() ?? string.Empty
                             });

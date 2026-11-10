@@ -697,9 +697,25 @@ public record OdometerLog
     [ColumnRule(IsRequired = false)]
     public string ReceiptNumber { get; set; } = string.Empty;
 
+    [ExcelColumn("Fuel Type")]
+    [ColumnRule(IsRequired = false)]
+    public string FuelType { get; set; } = string.Empty;
+
+    [ExcelColumn("Price at Fueling")]
+    [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
+    public decimal PriceAtFueling { get; set; } = 0.00m;
+
+    [ExcelColumn("Fuel Amount")]
+    [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
+    public decimal FuelAmount { get; set; } = 0.00m;
+
     [ExcelColumn("Transaction Amount")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
     public decimal Amount { get; set; } = 0.00m;
+
+    [ExcelColumn("Time")]
+    [ColumnRule(IsRequired = false)]
+    public string Time { get; set; } = string.Empty;
 
     [ExcelColumn("Remarks")]
     [ColumnRule(IsRequired = false)]

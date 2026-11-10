@@ -3,6 +3,7 @@
 using System;
 using ExcelDna.Integration;
 using SKSB_App.Core.Diagnostics;
+using SKSB_App.Core.WorkbookSave.Entry;
 
 public static class SheetOperations
 {
@@ -57,6 +58,40 @@ public static class SheetOperations
             return false;
         }
     }
+
+    /// <summary>
+    /// Universal workbook guard: true when <paramref name="wb"/> (or the active workbook) contains one of
+    /// the alias sheets carrying the module's signature ListObject table.
+    /// </summary>
+    public static bool IsModuleWorkbook(dynamic? wb, string[] sheetAliases, string signatureTableName)
+    {
+        if (sheetAliases == null || sheetAliases.Length == 0 || string.IsNullOrWhiteSpace(signatureTableName))
+            return false;
+
+        try
+        {
+            dynamic xlApp = ExcelDnaUtil.Application;
+            dynamic? targetWb = wb ?? xlApp.ActiveWorkbook;
+            if (targetWb == null) return false;
+
+            foreach (string alias in sheetAliases)
+            {
+                dynamic? ws = null;
+                try { ws = targetWb.Sheets[alias]; } catch { }
+                if (ws == null) continue;
+
+                dynamic? table = null;
+                try { table = ws.ListObjects[signatureTableName]; } catch { }
+                if (table != null) return true;
+            }
+        }
+        catch { }
+
+        return false;
+    }
+
+    public static bool IsModuleWorkbook(dynamic? wb, ISaveContract contract) =>
+        contract != null && IsModuleWorkbook(wb, contract.MasterSheetAliases, contract.MasterTableName);
 
     public static void ShowStatusConfirmation(string message)
     {

@@ -29,7 +29,7 @@ internal static partial class SheetMapper
         string id = string.IsNullOrWhiteSpace(log.VehiclePlate)
             ? (log.FuelCardNumber ?? string.Empty).Trim()
             : NormalizePlate(log.VehiclePlate);
-        return $"{log.Date:yyyyMMdd}_{id}_{log.Amount:F2}_{(log.ReceiptNumber ?? string.Empty).Trim()}_{log.CurrentOdometer}_{(log.StationName ?? string.Empty).Trim()}";
+        return $"{log.Date:yyyyMMdd}_{(log.Time ?? string.Empty).Trim()}_{id}_{log.Amount:F2}_{(log.ReceiptNumber ?? string.Empty).Trim()}_{log.CurrentOdometer}_{(log.StationName ?? string.Empty).Trim()}_{(log.FuelType ?? string.Empty).Trim()}_{log.PriceAtFueling:F2}_{log.FuelAmount:F2}";
     }
 
     internal static (int ImportedCount, int SkippedCount, decimal TotalAmount, string ProviderName) ImportFuelStatement(string filePath)
@@ -158,17 +158,20 @@ internal static partial class SheetMapper
             var log = new OdometerLog
             {
                 Date = raw.Date,
+                Time = raw.Time?.Trim() ?? string.Empty,
                 VehiclePlate = plate,
                 CurrentOdometer = raw.Odometer > 0 ? (int)raw.Odometer : 0,
                 FuelCardNumber = resolvedCard,
                 StationName = raw.StationName ?? string.Empty,
+                FuelType = raw.FuelType ?? string.Empty,
+                PriceAtFueling = raw.PriceAtFueling,
+                FuelAmount = raw.FuelAmount,
                 Amount = raw.Amount,
                 ReceiptNumber = raw.ReceiptNumber ?? string.Empty
             };
             if (!string.IsNullOrWhiteSpace(vType)) SetProp(log, "VehicleType", vType);
             if (staffId > 0) log.StaffID = staffId;
             if (!string.IsNullOrWhiteSpace(staffName)) log.StaffName = staffName;
-            if (!string.IsNullOrWhiteSpace(raw.Time)) log.Remarks = $"Time: {raw.Time.Trim()}";
 
             candidateLogs.Add(log);
         }
@@ -215,7 +218,8 @@ internal static partial class SheetMapper
             combined.AddRange(cleanTransactions);
 
             combined = combined.OrderBy(x => GetProp<DateOnly>(x, "Date"))
-                               .ThenBy(x => GetProp<string>(x, "Time") ?? string.Empty)
+                               .ThenBy(x => x.Time ?? string.Empty)
+                               .ThenBy(x => x.OdometerID)
                                .ToList();
 
             SheetProtections.ExecuteWithBypass((object)wsOdo, new Action(() =>
@@ -391,6 +395,9 @@ internal sealed class RawFuelItem
     public string StationName { get; set; } = string.Empty;
     public decimal Amount { get; set; }
     public string ReceiptNumber { get; set; } = string.Empty;
+    public string FuelType { get; set; } = string.Empty;
+    public decimal PriceAtFueling { get; set; }
+    public decimal FuelAmount { get; set; }
 }
 
 internal static class FuelStatementParser
@@ -608,7 +615,7 @@ internal static class FuelStatementParser
         var plateRx = new Regex(@"Pendaftaran\s*Kenderaan\s*[:\s]*([A-Z0-9]+)", RegexOptions.IgnoreCase);
 
         var fullRowRx = new Regex(
-            @"(\d{2}/\d{2}/\d{4})\s*(\d{2}:\d{2}(?::\d{2})?)\s*(\d{8,15})\s*(.+?)\s*(00\d{8})\s*(?:Diesel|PRIMAX).*?\s+([\d\.,]+\s+[\d\.,]+\s+[\-\d\.,]+\s+[\-\d\.,]+\s+[\-\d\.,]+)",
+            @"(\d{2}/\d{2}/\d{4})\s*(\d{2}:\d{2}(?::\d{2})?)\s*(\d{8,15})\s*(.+?)\s*(00\d{8})\s*((?:Diesel|PRIMAX).*?)\s+([\d\.,]+\s+[\d\.,]+\s+[\-\d\.,]+\s+[\-\d\.,]+\s+[\-\d\.,]+)",
             RegexOptions.IgnoreCase);
 
         string carryCard = string.Empty;
@@ -653,9 +660,17 @@ internal static class FuelStatementParser
                 string middle = m.Groups[4].Value.Trim();
                 long.TryParse(m.Groups[5].Value, out long odo);
 
-                var numTokens = m.Groups[6].Value.Trim().Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+                string rawFuelType = Regex.Replace(m.Groups[6].Value, @"\s+", " ").Trim();
+
+                var numTokens = m.Groups[7].Value.Trim().Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
                 string netStr = numTokens.Last().TrimEnd('.').Replace(",", "");
                 decimal.TryParse(netStr, NumberStyles.Any, CultureInfo.InvariantCulture, out decimal netAmt);
+                decimal.TryParse(numTokens[0].Replace(",", ""), NumberStyles.Any, CultureInfo.InvariantCulture, out decimal fuelQty);
+                decimal unitPrice = 0m;
+                if (numTokens.Length > 1)
+                    decimal.TryParse(numTokens[1].Replace(",", ""), NumberStyles.Any, CultureInfo.InvariantCulture, out unitPrice);
+                if (unitPrice <= 0m && fuelQty > 0m && netAmt > 0m)
+                    unitPrice = Math.Round(netAmt / fuelQty, 2);
 
                 ExtractPetronasStationAndDriver(middle, sortedKnownNames, out string station, out string driver);
 
@@ -678,7 +693,10 @@ internal static class FuelStatementParser
                     StationName = station,
                     Odometer = odo,
                     Amount = netAmt,
-                    ReceiptNumber = receipt
+                    ReceiptNumber = receipt,
+                    FuelType = rawFuelType,
+                    PriceAtFueling = unitPrice,
+                    FuelAmount = fuelQty
                 });
             }
         }
@@ -833,6 +851,20 @@ internal static class FuelStatementParser
                     }
                 }
 
+                decimal.TryParse(tm.Groups[7].Value.Replace(",", ""), NumberStyles.Any, CultureInfo.InvariantCulture, out decimal fuelQty);
+                decimal.TryParse(tm.Groups[8].Value.Replace(",", ""), NumberStyles.Any, CultureInfo.InvariantCulture, out decimal unitPrice);
+                if (unitPrice <= 0m && fuelQty > 0m && grossAmt > 0m)
+                    unitPrice = Math.Round(grossAmt / fuelQty, 2);
+
+                string shellCode = tm.Groups[6].Value;
+                string shellDesc = tm.Groups[3].Value;
+                string shellFuelType;
+                if (shellDesc.Contains("V-Power", StringComparison.OrdinalIgnoreCase) || shellDesc.Contains("97")) shellFuelType = "RON 97";
+                else if (shellDesc.Contains("95")) shellFuelType = "RON 95";
+                else if (shellDesc.Contains("Diesel", StringComparison.OrdinalIgnoreCase) || subsidyAmt < 0m ||
+                         shellCode is "20" or "23" or "31") shellFuelType = "Diesel";
+                else shellFuelType = "Shell Code " + shellCode;
+
                 decimal netAmount = grossAmt + subsidyAmt;
                 if (netAmount <= 0m && grossAmt > 0m) netAmount = grossAmt;
 
@@ -864,7 +896,10 @@ internal static class FuelStatementParser
                     StationName = station,
                     Odometer = odo,
                     Amount = netAmount,
-                    ReceiptNumber = receipt
+                    ReceiptNumber = receipt,
+                    FuelType = shellFuelType,
+                    PriceAtFueling = unitPrice,
+                    FuelAmount = fuelQty
                 });
             }
 
@@ -925,19 +960,30 @@ internal static class FuelStatementParser
             if (DateTime.TryParse(dStr, CultureInfo.InvariantCulture, DateTimeStyles.None, out var dt) ||
                 DateTime.TryParse(dStr, new CultureInfo("en-GB"), DateTimeStyles.None, out dt))
             {
-                decimal.TryParse(GetVal(p, map, "amount").Replace(",", ""), NumberStyles.Any, CultureInfo.InvariantCulture, out decimal amt);
+                decimal.TryParse(GetAmountVal(p, map).Replace(",", ""), NumberStyles.Any, CultureInfo.InvariantCulture, out decimal amt);
+                decimal.TryParse(GetValAny(p, map, "price", "unit price").Replace(",", ""), NumberStyles.Any, CultureInfo.InvariantCulture, out decimal price);
+                decimal.TryParse(GetValAny(p, map, "fuel amount", "lit", "qty", "quantity", "volume").Replace(",", ""), NumberStyles.Any, CultureInfo.InvariantCulture, out decimal fuelQty);
+                string timeVal = GetValAny(p, map, "time");
+                if (!string.IsNullOrWhiteSpace(timeVal) && TimeOnly.TryParse(timeVal, CultureInfo.InvariantCulture, DateTimeStyles.None, out var tParsed))
+                    timeVal = tParsed.ToString("HH:mm", CultureInfo.InvariantCulture);
+                else
+                    timeVal = dt.ToString("HH:mm");
                 long.TryParse(GetVal(p, map, "odometer"), out long odo);
 
                 items.Add(new RawFuelItem
                 {
                     Date = DateOnly.FromDateTime(dt),
-                    Time = dt.ToString("HH:mm"),
+                    Time = timeVal,
                     CardNumber = GetVal(p, map, "card").Replace("'", ""),
                     VehiclePlate = GetVal(p, map, "vehicle"),
                     StaffName = GetVal(p, map, "driver"),
                     StationName = GetVal(p, map, "station"),
                     Amount = amt,
-                    Odometer = odo
+                    Odometer = odo,
+                    FuelType = GetValAny(p, map, "fuel type", "product"),
+                    PriceAtFueling = price,
+                    FuelAmount = fuelQty,
+                    ReceiptNumber = GetValAny(p, map, "receipt", "reciept")
                 });
             }
         }
@@ -949,6 +995,27 @@ internal static class FuelStatementParser
         string s = Regex.Replace(raw, @"\s+", " ").Trim();
         int slash = s.IndexOf('/');
         return slash > 0 ? s.Substring(0, slash).Trim() : s;
+    }
+
+    private static string GetValAny(string[] p, Dictionary<string, int> map, params string[] keys)
+    {
+        foreach (var key in keys)
+        {
+            string v = GetVal(p, map, key);
+            if (!string.IsNullOrWhiteSpace(v)) return v;
+        }
+        return string.Empty;
+    }
+
+    // "amount" must not pick up the "Fuel Amount" (litres) column.
+    private static string GetAmountVal(string[] p, Dictionary<string, int> map)
+    {
+        foreach (var (k, idx) in map)
+        {
+            if (k.Contains("amount") && !k.Contains("fuel") && idx < p.Length)
+                return p[idx].Trim().Replace("\"", "");
+        }
+        return string.Empty;
     }
 
     private static string GetVal(string[] p, Dictionary<string, int> map, string key)

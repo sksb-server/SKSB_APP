@@ -219,6 +219,10 @@ public static class ServerDispatcher
                 FuelCompany = o.FuelCompany ?? string.Empty,
                 StationName = o.StationName ?? string.Empty,
                 ReceiptNumber = o.ReceiptNumber ?? string.Empty,
+                Time = o.Time ?? string.Empty,
+                FuelType = o.FuelType ?? string.Empty,
+                PriceAtFueling = o.PriceAtFueling,
+                FuelAmount = o.FuelAmount,
                 Amount = o.Amount,
                 Remarks = o.Remarks ?? string.Empty
             };
@@ -370,11 +374,11 @@ ON CONFLICT (insurance_id) DO UPDATE SET
 INSERT INTO vehicle_odometers (
     odometer_id, date, vehicle_plate, vehicle_type, staff_id, project,
     odometer_before, current_odometer, fuel_card_number, fuel_company,
-    station_name, receipt_number, amount, remarks, updated_at
+    station_name, receipt_number, amount, remarks, time, fuel_type, price_at_fueling, fuel_amount, updated_at
 ) VALUES (
     @OdometerId, @Date, @VehiclePlate, @VehicleType, @StaffId, @Project,
     @OdometerBefore, @CurrentOdometer, @FuelCardNumber, @FuelCompany,
-    @StationName, @ReceiptNumber, @Amount, @Remarks, CURRENT_TIMESTAMP
+    @StationName, @ReceiptNumber, @Amount, @Remarks, @Time, @FuelType, @PriceAtFueling, @FuelAmount, CURRENT_TIMESTAMP
 )
 ON CONFLICT (odometer_id) DO UPDATE SET
     date             = EXCLUDED.date,
@@ -390,6 +394,10 @@ ON CONFLICT (odometer_id) DO UPDATE SET
     receipt_number   = EXCLUDED.receipt_number,
     amount           = EXCLUDED.amount,
     remarks          = EXCLUDED.remarks,
+    time             = EXCLUDED.time,
+    fuel_type        = EXCLUDED.fuel_type,
+    price_at_fueling = EXCLUDED.price_at_fueling,
+    fuel_amount      = EXCLUDED.fuel_amount,
     updated_at       = CURRENT_TIMESTAMP;";
 
         // 3. Execute in Transaction
@@ -413,7 +421,14 @@ ON CONFLICT (odometer_id) DO UPDATE SET
             if (roadTaxRecords.Any()) conn.Execute(sqlRoadTaxUpsert, roadTaxRecords, trans);
             if (permitRecords.Any()) conn.Execute(sqlPermitUpsert, permitRecords, trans);
             if (insuranceRecords.Any()) conn.Execute(sqlInsuranceUpsert, insuranceRecords, trans);
-            if (odoRecords.Any()) conn.Execute(sqlOdometerUpsert, odoRecords, trans);
+            if (odoRecords.Any())
+            {
+                conn.Execute("ALTER TABLE vehicle_odometers ADD COLUMN IF NOT EXISTS time VARCHAR(16) DEFAULT '';", transaction: trans);
+                conn.Execute("ALTER TABLE vehicle_odometers ADD COLUMN IF NOT EXISTS fuel_type VARCHAR(64) DEFAULT '';", transaction: trans);
+                conn.Execute("ALTER TABLE vehicle_odometers ADD COLUMN IF NOT EXISTS price_at_fueling NUMERIC(12,4) DEFAULT 0;", transaction: trans);
+                conn.Execute("ALTER TABLE vehicle_odometers ADD COLUMN IF NOT EXISTS fuel_amount NUMERIC(12,4) DEFAULT 0;", transaction: trans);
+                conn.Execute(sqlOdometerUpsert, odoRecords, trans);
+            }
         });
 
 #if DEBUG

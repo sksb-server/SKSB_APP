@@ -136,7 +136,8 @@ public static class TableMapper
                 object? rawVal = dataGrid[r, binding.ColumnIndex];
                 if (rawVal == null || SheetMapperHelper.IsComError(rawVal)) continue;
 
-                object? converted = ConvertValue(rawVal, binding.Property.PropertyType);
+                object? converted = ConvertValue(rawVal, binding.Property.PropertyType,
+                    binding.Property.Name.Equals("Time", StringComparison.OrdinalIgnoreCase));
                 if (converted != null)
                 {
                     object targetObj = binding.TargetInstance(item);
@@ -276,8 +277,10 @@ public static class TableMapper
                 catch { }
 
                 // Inside TableMapper.PopulateTableSafe, right after reading archFmt:
-                bool isTextFormattedCell = string.Equals(archFmt, "@", StringComparison.OrdinalIgnoreCase) ||
-                                           binding.Property.PropertyType == typeof(string);
+                bool isTimeColumn = binding.Property.Name.Equals("Time", StringComparison.OrdinalIgnoreCase);
+                bool isTextFormattedCell = !isTimeColumn &&
+                                           (string.Equals(archFmt, "@", StringComparison.OrdinalIgnoreCase) ||
+                                            binding.Property.PropertyType == typeof(string));
 
                 object[,] colData = new object[effectiveRows, 1];
                 for (int r = 0; r < recordCount; r++)
@@ -285,7 +288,15 @@ public static class TableMapper
                     object? target = binding.TargetInstance(records[r]);
                     object? val = target != null ? binding.Property.GetValue(target) : null;
 
-                    if (isTextFormattedCell && val is long lVal)
+                    if (isTimeColumn)
+                    {
+                        if (val is string timeStr && !string.IsNullOrWhiteSpace(timeStr) &&
+                            TimeOnly.TryParse(timeStr.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.None, out var parsedTime))
+                            colData[r, 0] = parsedTime.ToTimeSpan().TotalDays;
+                        else
+                            colData[r, 0] = string.Empty;
+                    }
+                    else if (isTextFormattedCell && val is long lVal)
                     {
                         // If the cell is formatted as Text ("@") in the template, write long as string (and hide 0)
                         colData[r, 0] = lVal > 0 ? lVal.ToString("D12") : string.Empty;
@@ -316,11 +327,16 @@ public static class TableMapper
                 {
                     try
                     {
-                        if (!string.IsNullOrWhiteSpace(archFmt) && !archFmt.Equals("General", StringComparison.OrdinalIgnoreCase))
+                        if (isTimeColumn && (string.IsNullOrWhiteSpace(archFmt) ||
+                            archFmt.Equals("General", StringComparison.OrdinalIgnoreCase) || archFmt == "@"))
+                        {
+                            colRange.NumberFormat = "hh:mm";
+                        }
+                        else if (!string.IsNullOrWhiteSpace(archFmt) && !archFmt.Equals("General", StringComparison.OrdinalIgnoreCase))
                         {
                             colRange.NumberFormat = archFmt;
                         }
-                        if (archFmtLocal != null)
+                        if (archFmtLocal != null && !isTimeColumn)
                         {
                             colRange.NumberFormatLocal = archFmtLocal;
                         }
@@ -390,9 +406,26 @@ public static class TableMapper
         return val;
     }
 
-    public static object? ConvertValue(object? rawValue, Type targetType)
+    public static object? ConvertValue(object? rawValue, Type targetType, bool isTimeColumn = false)
     {
         if (rawValue == null || SheetMapperHelper.IsComError(rawValue)) return null;
+
+        if (isTimeColumn && (Nullable.GetUnderlyingType(targetType) ?? targetType) == typeof(string))
+        {
+            if (rawValue is double oaTime)
+            {
+                double frac = oaTime - Math.Floor(oaTime);
+                var secs = Math.Round(frac * 86400.0);
+                if (secs >= 86400) secs = 0;
+                return TimeOnly.FromTimeSpan(TimeSpan.FromSeconds(secs)).ToString("HH:mm", CultureInfo.InvariantCulture);
+            }
+            if (rawValue is DateTime dtTime) return dtTime.ToString("HH:mm", CultureInfo.InvariantCulture);
+            string tStr = rawValue.ToString()?.Trim() ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(tStr)) return null;
+            if (TimeOnly.TryParse(tStr, CultureInfo.InvariantCulture, DateTimeStyles.None, out var tOnly))
+                return tOnly.ToString("HH:mm", CultureInfo.InvariantCulture);
+            return tStr;
+        }
 
         Type underlyingType = Nullable.GetUnderlyingType(targetType) ?? targetType;
         string strVal = rawValue.ToString()?.Trim() ?? string.Empty;
@@ -461,7 +494,8 @@ public static class TableMapper
     }
 
     internal static string NormalizeHeader(string header) =>
-        RuleRegistry.NormalizeIdentifier(header);
+        RuleRegistry.NormalizeIdentifier(
+            (header ?? string.Empty).Replace("reciept", "receipt", StringComparison.OrdinalIgnoreCase));
 
     private static DateOnly? ParseToDateOnly(object rawValue, string strVal)
     {

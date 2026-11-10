@@ -7,6 +7,7 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Reflection;
 using System.Runtime.CompilerServices;
 
 public static class SheetMapperHelper
@@ -319,6 +320,151 @@ public static class SheetMapperHelper
         }
 
         return distinctValues.OrderBy(x => x).ToList();
+    }
+
+    // =========================================================================
+    // SHARED MANAGER MAPPING UTILITIES
+    // =========================================================================
+
+    /// <summary>
+    /// Resolves a worksheet inside <paramref name="wbObj"/> by its alias list (case-insensitive),
+    /// returning null when none of the aliases exist. Never activates or selects the sheet.
+    /// </summary>
+    public static dynamic? ResolveSheetSafely(object wbObj, string[] aliases, string defaultName)
+    {
+        if (wbObj == null) return null;
+        dynamic wb = wbObj;
+        aliases ??= Array.Empty<string>();
+
+        string resolvedName = SheetOperations.ResolveSheetName(aliases, defaultName);
+        try
+        {
+            dynamic s = wb.Sheets[resolvedName];
+            if (s != null) return s;
+        }
+        catch { }
+
+        foreach (dynamic ws in wb.Sheets)
+        {
+            string name = ws.Name?.ToString() ?? string.Empty;
+            if (aliases.Any(a => string.Equals(a, name, StringComparison.OrdinalIgnoreCase)))
+            {
+                return ws;
+            }
+        }
+        return null;
+    }
+
+    /// <summary>
+    /// DEBUG-only audit dialog listing the location and dimensions of each inspected table after a populate pass.
+    /// Compiles to a no-op in Release builds and stays silent unless <see cref="DebugDialog.DebugEnabled"/> is on.
+    /// </summary>
+    public static void ShowPopulateDiagnostics(object wbObj, string auditTitle, string masterLabel, int masterCount, params string[] inspectTables)
+    {
+#if DEBUG
+        try
+        {
+            if (!DebugDialog.DebugEnabled || wbObj == null) return;
+
+            dynamic wb = wbObj;
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine($"=== {auditTitle.ToUpperInvariant()} ===");
+            sb.AppendLine($"Total {masterLabel} Loaded: {masterCount}");
+            sb.AppendLine();
+
+            foreach (var tName in inspectTables ?? Array.Empty<string>())
+            {
+                dynamic? tbl = null;
+                string sName = "Unknown";
+                foreach (dynamic ws in wb.Sheets)
+                {
+                    try
+                    {
+                        tbl = ws.ListObjects[tName];
+                        if (tbl != null) { sName = ws.Name?.ToString() ?? "Unknown"; break; }
+                    }
+                    catch { }
+                }
+
+                if (tbl != null)
+                {
+                    int cols = (int)tbl.ListColumns.Count;
+                    int rows = tbl.DataBodyRange != null ? (int)tbl.DataBodyRange.Rows.Count : 0;
+                    int startCol = (int)tbl.HeaderRowRange.Column;
+                    int startRow = (int)tbl.HeaderRowRange.Row;
+                    sb.AppendLine($"  [{tName}] on Sheet '{sName}':");
+                    sb.AppendLine($"      Dimensions : {rows} data row(s) × {cols} column(s)");
+                    sb.AppendLine($"      Coordinates: Row {startRow}, Columns {startCol} to {startCol + cols - 1}");
+                    sb.AppendLine();
+                }
+                else
+                {
+                    sb.AppendLine($"  [{tName}]: NOT FOUND on any worksheet");
+                    sb.AppendLine();
+                }
+            }
+
+            DebugDialog.ShowLog(auditTitle, sb.ToString());
+        }
+        catch { }
+#endif
+    }
+
+    /// <summary>Reads the first non-null property among <paramref name="propNames"/> (case-insensitive), converted to <typeparamref name="T"/>.</summary>
+    public static T GetProp<T>(object target, params string[] propNames)
+    {
+        if (target == null) return default!;
+        Type type = target.GetType();
+        foreach (var name in propNames)
+        {
+            var p = type.GetProperty(name, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
+            if (p != null)
+            {
+                object? val = p.GetValue(target);
+                if (val != null)
+                {
+                    if (val is T directVal) return directVal;
+                    Type tType = Nullable.GetUnderlyingType(typeof(T)) ?? typeof(T);
+                    if (tType == typeof(DateOnly) && val is DateTime dtVal)
+                        return (T)(object)DateOnly.FromDateTime(dtVal);
+                    try { return (T)Convert.ChangeType(val, tType); }
+                    catch { }
+                }
+            }
+        }
+        return default!;
+    }
+
+    /// <summary>Sets a property by name (case-insensitive) with tolerant DateOnly / TimeOnly / enum conversion. Silently ignores unknown properties.</summary>
+    public static void SetProp(object target, string propName, object? value)
+    {
+        if (target == null || value == null) return;
+        var p = target.GetType().GetProperty(propName, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
+        if (p != null && p.CanWrite)
+        {
+            try
+            {
+                Type uType = Nullable.GetUnderlyingType(p.PropertyType) ?? p.PropertyType;
+                if (uType == typeof(DateOnly) && value is DateTime dt)
+                    p.SetValue(target, DateOnly.FromDateTime(dt));
+                else if (uType == typeof(DateOnly) && value is DateOnly dOnly)
+                    p.SetValue(target, dOnly);
+                else if (uType == typeof(TimeOnly) && value is string st && TimeOnly.TryParse(st, out var to))
+                    p.SetValue(target, to);
+                else if (uType.IsEnum)
+                {
+                    if (Enum.TryParse(uType, value.ToString(), true, out var ev))
+                        p.SetValue(target, ev);
+                }
+                else if (uType.IsInstanceOfType(value))
+                    p.SetValue(target, value);
+                else
+                {
+                    p.SetValue(target, Convert.ChangeType(value, uType));
+                }
+            }
+            catch { }
+        }
     }
 
     internal static bool IsComError(object? val) =>
