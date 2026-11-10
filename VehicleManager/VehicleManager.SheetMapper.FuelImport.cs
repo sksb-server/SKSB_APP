@@ -24,6 +24,14 @@ internal static partial class SheetMapper
     // =========================================================================
     // FUEL STATEMENT IMPORTER (PETRONAS SMARTPAY & SHELL FLEET HUB)
     // =========================================================================
+    private static string BuildFuelSignature(OdometerLog log)
+    {
+        string id = string.IsNullOrWhiteSpace(log.VehiclePlate)
+            ? (log.FuelCardNumber ?? string.Empty).Trim()
+            : NormalizePlate(log.VehiclePlate);
+        return $"{log.Date:yyyyMMdd}_{id}_{log.Amount:F2}_{(log.ReceiptNumber ?? string.Empty).Trim()}_{log.CurrentOdometer}_{(log.StationName ?? string.Empty).Trim()}";
+    }
+
     internal static (int ImportedCount, int SkippedCount, decimal TotalAmount, string ProviderName) ImportFuelStatement(string filePath)
     {
         dynamic xlApp = ExcelDnaUtil.Application;
@@ -98,17 +106,10 @@ internal static partial class SheetMapper
 
         foreach (var ex in existingLogs)
         {
-            DateOnly d = GetProp<DateOnly>(ex, "Date");
-            string tm = GetProp<string>(ex, "Time") ?? string.Empty;
-            string pl = GetProp<string>(ex, "VehiclePlate") ?? string.Empty;
-            decimal amt = GetProp<decimal>(ex, "Amount", "TransactionAmount");
-            long id = GetProp<long>(ex, "FuelTransactionID", "TransactionID");
-
+            long id = GetProp<long>(ex, "FuelTransactionID", "TransactionID", "OdometerID");
             if (id > maxTxId) maxTxId = id;
-            if (d != default && amt > 0)
-            {
-                existingSignatures.Add($"{d:yyyyMMdd}_{tm.Trim()}_{NormalizePlate(pl)}_{amt:F2}");
-            }
+            if (ex.Date != default && ex.Amount > 0)
+                existingSignatures.Add(BuildFuelSignature(ex));
         }
 
         // 1. Build candidate log objects from statement
@@ -154,20 +155,20 @@ internal static partial class SheetMapper
             if (staffId > 0 && staffShortNameMap.TryGetValue(staffId, out var canonicalShortName))
                 staffName = canonicalShortName;
 
-            var log = new OdometerLog();
-            SetProp(log, "Date", raw.Date);
-            SetProp(log, "VehiclePlate", plate);
+            var log = new OdometerLog
+            {
+                Date = raw.Date,
+                VehiclePlate = plate,
+                CurrentOdometer = raw.Odometer > 0 ? (int)raw.Odometer : 0,
+                FuelCardNumber = resolvedCard,
+                StationName = raw.StationName ?? string.Empty,
+                Amount = raw.Amount,
+                ReceiptNumber = raw.ReceiptNumber ?? string.Empty
+            };
             if (!string.IsNullOrWhiteSpace(vType)) SetProp(log, "VehicleType", vType);
-            if (raw.Odometer > 0) SetProp(log, "CurrentOdometer", raw.Odometer);
-            SetProp(log, "CardNumber", resolvedCard);
-            SetProp(log, "FuelCardNumber", resolvedCard);
-            if (staffId > 0) SetProp(log, "StaffID", staffId);
-            if (!string.IsNullOrWhiteSpace(staffName)) SetProp(log, "StaffName", staffName);
-            SetProp(log, "StationName", raw.StationName);
-            SetProp(log, "Amount", raw.Amount);
-            SetProp(log, "TransactionAmount", raw.Amount);
-            SetProp(log, "Time", raw.Time);
-            SetProp(log, "ReceiptNumber", raw.ReceiptNumber);
+            if (staffId > 0) log.StaffID = staffId;
+            if (!string.IsNullOrWhiteSpace(staffName)) log.StaffName = staffName;
+            if (!string.IsNullOrWhiteSpace(raw.Time)) log.Remarks = $"Time: {raw.Time.Trim()}";
 
             candidateLogs.Add(log);
         }
@@ -175,14 +176,7 @@ internal static partial class SheetMapper
         // 2. Filter out duplicates while retaining clean non-duplicate records
         var cleanTransactions = TableRowManager.FilterDuplicates(
             incomingRecords: candidateLogs,
-            keySelector: log =>
-            {
-                DateOnly d = GetProp<DateOnly>(log, "Date");
-                string tm = GetProp<string>(log, "Time") ?? string.Empty;
-                string pl = NormalizePlate(GetProp<string>(log, "VehiclePlate"));
-                decimal amt = GetProp<decimal>(log, "Amount", "TransactionAmount");
-                return $"{d:yyyyMMdd}_{tm.Trim()}_{pl}_{amt:F2}";
-            },
+            keySelector: BuildFuelSignature,
             displaySelector: log =>
             {
                 DateOnly d = GetProp<DateOnly>(log, "Date");

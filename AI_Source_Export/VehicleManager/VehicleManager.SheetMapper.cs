@@ -229,7 +229,11 @@ internal static partial class SheetMapper
                 object? val = p.GetValue(target);
                 if (val != null)
                 {
-                    try { return (T)Convert.ChangeType(val, typeof(T)); }
+                    if (val is T directVal) return directVal;
+                    Type tType = Nullable.GetUnderlyingType(typeof(T)) ?? typeof(T);
+                    if (tType == typeof(DateOnly) && val is DateTime dtVal)
+                        return (T)(object)DateOnly.FromDateTime(dtVal);
+                    try { return (T)Convert.ChangeType(val, tType); }
                     catch { }
                 }
             }
@@ -248,6 +252,8 @@ internal static partial class SheetMapper
                 Type uType = Nullable.GetUnderlyingType(p.PropertyType) ?? p.PropertyType;
                 if (uType == typeof(DateOnly) && value is DateTime dt)
                     p.SetValue(target, DateOnly.FromDateTime(dt));
+                else if (uType == typeof(DateOnly) && value is DateOnly dOnly)
+                    p.SetValue(target, dOnly);
                 else if (uType == typeof(TimeOnly) && value is string st && TimeOnly.TryParse(st, out var to))
                     p.SetValue(target, to);
                 else if (uType.IsEnum)
@@ -255,6 +261,8 @@ internal static partial class SheetMapper
                     if (Enum.TryParse(uType, value.ToString(), true, out var ev))
                         p.SetValue(target, ev);
                 }
+                else if (uType.IsInstanceOfType(value))
+                    p.SetValue(target, value);
                 else
                 {
                     p.SetValue(target, Convert.ChangeType(value, uType));
