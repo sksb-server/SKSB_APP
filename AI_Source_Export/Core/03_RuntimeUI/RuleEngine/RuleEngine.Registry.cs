@@ -28,6 +28,7 @@ public sealed class PropertyRuleDescriptor
     public List<ColumnSyncAttribute> SyncRules { get; init; } = new();
     public ColumnDefaultAttribute? DefaultRule { get; init; }
     public List<ColumnStateGuardAttribute> StateGuards { get; init; } = new();
+    public string? DateMustBeGreaterThanHeader { get; init; }
 
     public bool HasDropdown =>
         Sources.Length > 0 ||
@@ -90,9 +91,9 @@ public static class RuleRegistry
     }
 
     private static void ScanTypeProperties(
-        Type targetType,
-        string tableName,
-        Dictionary<string, PropertyRuleDescriptor> colDict)
+    Type targetType,
+    string tableName,
+    Dictionary<string, PropertyRuleDescriptor> colDict)
     {
         foreach (var prop in targetType.GetProperties(BindingFlags.Public | BindingFlags.Instance))
         {
@@ -117,20 +118,27 @@ public static class RuleRegistry
             var excelColAttr = prop.GetCustomAttribute<ExcelColumnAttribute>();
             var ruleAttr = prop.GetCustomAttribute<ColumnRuleAttribute>();
             var defaultAttr = prop.GetCustomAttribute<ColumnDefaultAttribute>();
+            var dateGreaterAttr = prop.GetCustomAttribute<ColumnDateGreaterThanAttribute>();
             var syncAttrs = prop.GetCustomAttributes<ColumnSyncAttribute>().ToList();
             var guardAttrs = prop.GetCustomAttributes<ColumnStateGuardAttribute>()
                                  .OrderBy(g => g.Priority)
                                  .ToList();
 
+            // If no attributes exist at all, skip the property
             if (excelColAttr == null && ruleAttr == null && defaultAttr == null && syncAttrs.Count == 0 && guardAttrs.Count == 0)
                 continue;
 
+            // Prefer ExcelColumn header; fallback to the property name
             string headerName = excelColAttr != null && !string.IsNullOrWhiteSpace(excelColAttr.HeaderName)
                 ? excelColAttr.HeaderName
                 : prop.Name;
 
             string normHeader = NormalizeIdentifier(headerName);
-            bool isRequired = ruleAttr?.IsRequired ?? (excelColAttr?.IsRequired ?? false);
+
+            // If there's no ExcelColumn attribute, it is a UI-only column (never required to save)
+            bool isMappedToStorage = excelColAttr != null;
+            bool isRequired = isMappedToStorage && (ruleAttr?.IsRequired ?? excelColAttr.IsRequired);
+            bool isWarningOnly = !isMappedToStorage || (ruleAttr?.IsWarningOnly ?? false);
 
             var descriptor = new PropertyRuleDescriptor
             {
@@ -141,13 +149,14 @@ public static class RuleRegistry
                 PropertyType = prop.PropertyType,
                 Sources = ruleAttr?.Sources ?? Array.Empty<string>(),
                 IsRequired = isRequired,
-                IsWarningOnly = ruleAttr?.IsWarningOnly ?? false,
+                IsWarningOnly = isWarningOnly,
                 IsMultiSelect = ruleAttr?.IsMultiSelect ?? false,
                 AllowNonNegativeZero = ruleAttr?.AllowNonNegativeZero ?? true,
                 Transform = ruleAttr?.Transform ?? TransformKind.None,
                 SyncRules = syncAttrs,
                 DefaultRule = defaultAttr,
-                StateGuards = guardAttrs
+                StateGuards = guardAttrs,
+                DateMustBeGreaterThanHeader = dateGreaterAttr?.ReferenceHeader
             };
 
             colDict[normHeader] = descriptor;
@@ -252,8 +261,6 @@ public static class RuleRegistry
                         dynamic table = ws.ListObjects[t];
                         string tableName = table.Name?.ToString() ?? string.Empty;
 
-                        try { if ((bool)table.ShowTotals) table.ShowTotals = false; } catch { }
-
                         int headerRow = (int)table.HeaderRowRange.Row;
                         int startCol = (int)table.HeaderRowRange.Column;
                         int colCount = (int)table.ListColumns.Count;
@@ -270,23 +277,33 @@ public static class RuleRegistry
                             string archFormula = archCell.Formula?.ToString() ?? string.Empty;
                             if (archFormula.StartsWith("=")) continue;
 
+                            // Inside RuleRegistry.ApplyDropdownStylesToWorkbook:
                             if (rule.HasDropdown)
                             {
                                 try
                                 {
-                                    if (bodyRange != null)
+                                    // Pre-read the template's original format & style on the archetype cell
+                                    string origStyle = archCell.Style?.Name?.ToString() ?? string.Empty;
+                                    string origFmt = archCell.NumberFormat?.ToString() ?? string.Empty;
+                                    dynamic? origFmtLocal = null;
+                                    try { origFmtLocal = archCell.NumberFormatLocal; } catch { }
+
+                                    dynamic targetRange = (bodyRange != null) ? table.ListColumns[c].DataBodyRange : archCell;
+                                    if (targetRange != null)
                                     {
-                                        dynamic colBody = table.ListColumns[c].DataBodyRange;
-                                        if (colBody != null)
+                                        // Only set DropDown style if the cell doesn't already have a custom unlocked style
+                                        if (string.IsNullOrEmpty(origStyle) || origStyle.Equals("Normal", StringComparison.OrdinalIgnoreCase))
                                         {
-                                            colBody.Style = Commands.DropDownStyleName;
-                                            try { colBody.Validation.Delete(); } catch { }
+                                            targetRange.Style = Commands.DropDownStyleName;
                                         }
-                                    }
-                                    else
-                                    {
-                                        archCell.Style = Commands.DropDownStyleName;
-                                        try { archCell.Validation.Delete(); } catch { }
+                                        try { targetRange.Validation.Delete(); } catch { }
+
+                                        // Restore the template's cell-level NumberFormat (e.g. Date format) if the style reset it
+                                        if (!string.IsNullOrWhiteSpace(origFmt) && !origFmt.Equals("General", StringComparison.OrdinalIgnoreCase))
+                                        {
+                                            try { targetRange.NumberFormat = origFmt; } catch { }
+                                            try { if (origFmtLocal != null) targetRange.NumberFormatLocal = origFmtLocal; } catch { }
+                                        }
                                     }
                                 }
                                 catch { }
@@ -294,6 +311,9 @@ public static class RuleRegistry
                         }
                     }
                 }));
+
+                // Ensure operational protection (and =FALSE lock on calculated columns) is active on open
+                SheetProtections.ApplyStyleDrivenProtection(ws);
             }
 
             // Restore original sheet view so Excel doesn't jump

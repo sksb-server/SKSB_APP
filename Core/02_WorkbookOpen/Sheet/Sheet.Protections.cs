@@ -8,14 +8,21 @@ public static class SheetProtections
 {
     private const string ProtectionPassword = "SKSB_Internal_Guard";
 
-    private static readonly HashSet<string> UnlockedStyles = new(StringComparer.OrdinalIgnoreCase)
+    // Whitelist of styles that represent user-editable inputs
+    public static readonly HashSet<string> UnlockedStyles = new(StringComparer.OrdinalIgnoreCase)
     {
         "DropDown",
         "Unlocked",
         "StandardInput",
         "DisplayDate",
-        "DisplayRange"
+        "DisplayRange",
+        "Comma",        // Standard Excel Comma style (#,##0.00)
+        "Comma [0]",     // Comma style without decimals (#,##0)
+        "Cost"
     };
+
+    public static bool IsUnlockedStyle(string? styleName) =>
+        !string.IsNullOrWhiteSpace(styleName) && UnlockedStyles.Contains(styleName.Trim());
 
     public static bool IsProtected(dynamic worksheet)
     {
@@ -27,89 +34,102 @@ public static class SheetProtections
         try { worksheet.Unprotect(ProtectionPassword); } catch { }
     }
 
+    /// <summary>
+    /// Executes an action that modifies table structure by temporarily lifting protection.
+    /// </summary>
     public static void ExecuteWithBypass(dynamic worksheet, Action action)
     {
         if (worksheet == null || action == null) return;
-        bool wasProtected = IsProtected(worksheet);
-        if (wasProtected) Unprotect(worksheet);
-        try
-        {
-            action();
-        }
-        finally
-        {
-            if (wasProtected) ApplyStyleDrivenProtection(worksheet);
-        }
+        // Sheet protection is no longer used; lift any legacy protection and never re-apply it.
+        if (IsProtected(worksheet)) Unprotect(worksheet);
+        action();
     }
 
+    /// <summary>
+    /// Unlocks table structure for native sorting, while locking non-editable columns
+    /// using Excel Custom Data Validation (=FALSE) with a custom alert popup.
+    /// </summary>
     public static void ApplyStyleDrivenProtection(dynamic worksheet)
     {
+        if (SheetOperations.IsTemplateEditMode)
+        {
+            try { worksheet.Unprotect(ProtectionPassword); } catch { }
+            try
+            {
+                worksheet.Cells.Locked = false;
+                foreach (dynamic table in worksheet.ListObjects)
+                {
+                    table.Range.Locked = false;
+                    foreach (dynamic col in table.ListColumns)
+                    {
+                        try { col.Range.Validation.Delete(); } catch { }
+                    }
+                }
+            }
+            catch { }
+            return;
+        }
+
+        dynamic xlApp = ExcelDnaUtil.Application;
+        bool origUpdating = true;
+        try { origUpdating = (bool)xlApp.ScreenUpdating; xlApp.ScreenUpdating = false; } catch { }
+
         try
         {
-            dynamic xlApp = ExcelDnaUtil.Application;
-            xlApp.ScreenUpdating = false;
-
             try { worksheet.Unprotect(ProtectionPassword); } catch { }
 
-            // 1. Lock all background cells, headers, and sheet layout by default
-            worksheet.Cells.Locked = true;
-
-            // 2. Unlock top parameter cells (B1 Date, C1 Range)
-            UnlockIfStylePermits(worksheet.Cells[1, 2]);
-            UnlockIfStylePermits(worksheet.Cells[1, 3]);
-
-            // 3. Configure all ListObjects
+            // Configure all tables on the worksheet (no sheet protection is applied)
             foreach (dynamic table in worksheet.ListObjects)
             {
                 dynamic bodyRange = table.DataBodyRange;
                 int headerRow = (int)table.HeaderRowRange.Row;
                 int startCol = (int)table.HeaderRowRange.Column;
                 int colCount = (int)table.ListColumns.Count;
+                int bodyRows = bodyRange != null ? (int)bodyRange.Rows.Count : 1;
 
-                if (bodyRange != null)
+                for (int c = 1; c <= colCount; c++)
                 {
-                    // Clean up any legacy =FALSE validation rules from previous experiments
-                    for (int c = 1; c <= colCount; c++)
+                    int currentCol = startCol + c - 1;
+                    dynamic archetypeCell = worksheet.Cells[headerRow + 1, currentCol];
+                    string styleName = archetypeCell.Style?.Name?.ToString() ?? string.Empty;
+
+                    dynamic colBody = worksheet.Range[
+                        worksheet.Cells[headerRow + 1, currentCol],
+                        worksheet.Cells[headerRow + bodyRows, currentCol]
+                    ];
+
+                    if (!UnlockedStyles.Contains(styleName))
                     {
+                        // Apply custom =FALSE Stop alert to calculated / read-only columns
                         try
                         {
-                            dynamic colRange = table.ListColumns[c].Range;
-                            if (colRange.Validation?.Formula1 == "=FALSE")
+                            colBody.Validation.Delete();
+                            colBody.Validation.Add(
+                                Type: 7,       // xlValidateCustom
+                                AlertStyle: 1, // xlValidAlertStop
+                                Formula1: "=FALSE"
+                            );
+                            colBody.Validation.IgnoreBlank = true;
+                            colBody.Validation.ErrorMessage = "This column is auto-calculated and cannot be modified directly.";
+                            colBody.Validation.ErrorTitle = "Protected Field";
+                        }
+                        catch { }
+                    }
+                    else
+                    {
+                        // Clean up any stale =FALSE validation if the column style was changed to editable
+                        try
+                        {
+                            if (colBody.Validation?.Formula1 == "=FALSE")
                             {
-                                colRange.Validation.Delete();
+                                colBody.Validation.Delete();
                             }
                         }
                         catch { }
                     }
-
-                    // Unlock table data body so Excel's native header sort & filter commands work smoothly
-                    bodyRange.Locked = false;
-                }
-                else
-                {
-                    // Table with 0 data rows: unlock archetype row so users can begin entering data
-                    for (int c = 1; c <= colCount; c++)
-                    {
-                        worksheet.Cells[headerRow + 1, startCol + c - 1].Locked = false;
-                    }
                 }
             }
 
-            // 4. Apply sheet protection
-            worksheet.Protect(
-                Password: ProtectionPassword,
-                DrawingObjects: false,
-                Contents: true,
-                Scenarios: true,
-                UserInterfaceOnly: true,
-                AllowFormattingCells: false,
-                AllowFormattingColumns: true,
-                AllowFormattingRows: true,
-                AllowInsertingRows: true,
-                AllowDeletingRows: true,
-                AllowSorting: true,
-                AllowFiltering: true
-            );
         }
         catch (Exception ex)
         {
@@ -117,12 +137,7 @@ public static class SheetProtections
         }
         finally
         {
-            try
-            {
-                dynamic xlApp = ExcelDnaUtil.Application;
-                xlApp.ScreenUpdating = true;
-            }
-            catch { }
+            try { xlApp.ScreenUpdating = origUpdating; } catch { }
         }
     }
 

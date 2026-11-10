@@ -61,24 +61,57 @@ public class RibbonController : ExcelRibbon
                           onAction='OnSaveClicked' />
                 </group>
 
-                <!-- ROW MANAGEMENT GROUP: TOGGLE DIRECTION & MANUAL CLEANUP BUTTON -->
-                <group id='grpRowDirection' label='Row Management'>
-                  <toggleButton id='btnToggleInsertTop' 
-                                label='Insert at Top' 
-                                size='large' 
-                                imageMso='TableInsertRowsAbove' 
-                                screentip='Toggle Top/Bottom Auto-Insert'
-                                supertip='When enabled, typing in the first data row creates a new row at the top. When disabled, rows are appended at the bottom.'
-                                getPressed='GetInsertAtTopPressed'
-                                onAction='OnToggleInsertAtTopClicked' />
-                  <button id='btnCleanEmptyRows'
-                          label='Trim Empty Rows'
+                <!-- PORTAL INTEGRATION GROUP -->
+                <group id='grpFuelImport' label='Portal Integration'>
+                  <button id='btnImportFuelStatement'
+                          label='Import Fuel&#10;Statement'
                           size='large'
-                          imageMso='TableDeleteRows'
-                          screentip='Trim Redundant Empty Rows'
-                          supertip='Scans all tables on the active sheet and trims extra blank rows, leaving exactly one empty entry row based on the Insert at Top setting.'
-                          onAction='OnCleanEmptyRowsClicked' />
+                          imageMso='ImportExcel'
+                          screentip='Import Petronas / Shell Monthly Statement'
+                          supertip='Parses monthly PDF invoices or portal Excel files and appends fuel logs into OdometersTable.'
+                          onAction='OnImportFuelStatementClicked' />
                 </group>
+
+                <!-- ROW MANAGEMENT GROUP -->
+<group id='grpRowDirection' label='Row Management'>
+  <toggleButton id='btnToggleInsertTop' 
+                label='Insert at Top' 
+                size='large' 
+                imageMso='TableInsertRowsAbove' 
+                screentip='Toggle Top/Bottom Auto-Insert'
+                supertip='When enabled, typing in the first data row creates a new row at the top. When disabled, rows are appended at the bottom.'
+                getPressed='GetInsertAtTopPressed'
+                onAction='OnToggleInsertAtTopClicked' />
+  <button id='btnCleanEmptyRows'
+          label='Trim Empty Rows'
+          size='large'
+          imageMso='TableDeleteRows'
+          screentip='Trim Redundant Empty Rows'
+          supertip='Scans all tables on the active sheet and trims extra blank rows, leaving exactly one empty entry row.'
+          onAction='OnCleanEmptyRowsClicked' />
+  <button id='btnCleanDuplicateRows'
+          label='Remove Duplicates'
+          size='large'
+          imageMso='RemoveDuplicates'
+          screentip='Remove Duplicate Rows'
+          supertip='Scans all tables on the active sheet and removes identical duplicate rows, keeping the first occurrence.'
+          onAction='OnCleanDuplicateRowsClicked' />
+  <button id='btnDeleteTableRow'
+          label='Delete Row'
+          size='large'
+          imageMso='TableRowsDelete'
+          screentip='Delete Row'
+          supertip='Deletes selected row(s) in absolute master tables. Deletion is blocked on additive transaction tables.'
+          onAction='OnDeleteTableRowClicked' />
+<toggleButton id='btnToggleTotalRow' 
+              label='Total Row' 
+              size='large' 
+              imageMso='AutoSum' 
+              screentip='Toggle Total Row'
+              supertip='Shows or hides the summary total row at the bottom of the active table.'
+              getPressed='GetTotalRowPressed' 
+              onAction='OnToggleTotalRowClicked' />
+</group>
 
                 {debugGroupXml}
               </tab>
@@ -91,41 +124,92 @@ public class RibbonController : ExcelRibbon
 
     public void OnLoadClicked(IRibbonControl control)
     {
-        if (!Guard.IsVehicleWorkbook()) return;
+        dynamic xlApp = ExcelDnaUtil.Application;
+        bool origUpdating = true;
+        try { origUpdating = (bool)xlApp.ScreenUpdating; xlApp.ScreenUpdating = false; } catch { }
 
         try
         {
-            Events.SyncVehicleLookupsData(isInteractive: false);
-
-            var records = ServerSyncCommands.FetchVehicleRecords();
-            if (records == null || records.Count == 0)
+            var serverData = ServerSyncCommands.FetchVehicleRecords();
+            if (serverData != null)
             {
-                MessageBox.Show("No vehicle records found in database or local snapshot.",
-                    "Load Vehicles", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                return;
+                SheetMapper.PopulateWorksheet(serverData);
             }
-
-            ExcelAsyncUtil.QueueAsMacro(() =>
-            {
-                SheetMapper.PopulateWorksheet(records);
-            });
         }
-        catch (Exception ex)
+        finally
         {
-            MessageBox.Show($"Failed loading vehicle records:\n{ex.Message}", "Load Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            try { xlApp.ScreenUpdating = origUpdating; } catch { }
         }
     }
 
     public void OnSaveClicked(IRibbonControl control)
     {
-        if (!Guard.IsVehicleWorkbook()) return;
-
         ExcelAsyncUtil.QueueAsMacro(() =>
         {
             SaveEntry.Save(Events.VehicleSyncDescriptor);
         });
     }
 
+    // =========================================================================
+    // FUEL STATEMENT IMPORT CALLBACK
+    // =========================================================================
+    public void OnImportFuelStatementClicked(IRibbonControl control)
+    {
+        try
+        {
+            using var openFileDialog = new OpenFileDialog
+            {
+                Title = "Select PETRONAS SmartPay or Shell Fleet Hub Statement",
+                Filter = "All Statements (*.pdf;*.xlsx;*.xls;*.csv)|*.pdf;*.xlsx;*.xls;*.csv|PDF Invoices (*.pdf)|*.pdf|Excel / CSV (*.xlsx;*.xls;*.csv)|*.xlsx;*.xls;*.csv|All Files (*.*)|*.*",
+                FilterIndex = 1,
+                RestoreDirectory = true,
+                CheckFileExists = true,
+                Multiselect = false
+            };
+
+            if (openFileDialog.ShowDialog() != DialogResult.OK)
+                return;
+
+            string selectedFilePath = openFileDialog.FileName;
+            string fileNameOnly = Path.GetFileName(selectedFilePath);
+
+            // Queue as Excel Macro so COM worksheet manipulation runs safely on the UI thread
+            ExcelAsyncUtil.QueueAsMacro(() =>
+            {
+                var (imported, skipped, totalAmount, provider) = SheetMapper.ImportFuelStatement(selectedFilePath);
+
+                if (imported == 0 && skipped == 0)
+                {
+                    MessageBox.Show(
+                        $"No valid fuel transactions could be parsed from:\n{fileNameOnly}\n\n" +
+                        "Ensure the file is an original PDF invoice or portal export from PETRONAS SmartPay or Shell Fleet Hub.",
+                        "Import Unsuccessful",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Warning
+                    );
+                    return;
+                }
+
+                string summary =
+                    $"Provider Detected : {provider}\n" +
+                    $"Source File       : {fileNameOnly}\n\n" +
+                    $"  • New Logs Appended : {imported}\n" +
+                    $"  • Duplicates Skipped: {skipped}\n" +
+                    $"  • Net Fuel Expense  : RM {totalAmount:N2}\n\n" +
+                    "All records have been written to 'OdometersTable' via TableMapper.";
+
+                MessageBox.Show(summary, "Fuel Statement Import Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            });
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show($"Fuel import failed:\n{ex.Message}", "Import Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    // =========================================================================
+    // ROW MANAGEMENT CALLBACKS
+    // =========================================================================
     public bool GetInsertAtTopPressed(IRibbonControl control)
         => TableRowManager.IsInsertAtTopEnabled;
 
@@ -173,6 +257,139 @@ public class RibbonController : ExcelRibbon
             catch (Exception ex)
             {
                 MessageBox.Show($"Failed cleaning empty rows:\n{ex.Message}", "Row Cleanup Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        });
+    }
+
+    public void OnCleanDuplicateRowsClicked(IRibbonControl control)
+    {
+        ExcelAsyncUtil.QueueAsMacro(() =>
+        {
+            try
+            {
+                dynamic xlApp = ExcelDnaUtil.Application;
+                dynamic ws = xlApp.ActiveWorkbook?.ActiveSheet;
+                if (ws == null) return;
+
+                bool origUpdating = true;
+                try { origUpdating = (bool)xlApp.ScreenUpdating; xlApp.ScreenUpdating = false; } catch { }
+
+                int totalDuplicatesRemoved = 0;
+                var warnings = new System.Collections.Generic.List<string>();
+
+                try
+                {
+                    SheetProtections.ExecuteWithBypass((object)ws, new Action(() =>
+                    {
+                        foreach (dynamic table in ws.ListObjects)
+                        {
+                            totalDuplicatesRemoved += TableRowManager.CleanTableDuplicateRows(table, warnings);
+                        }
+                    }));
+                }
+                finally
+                {
+                    try { xlApp.ScreenUpdating = origUpdating; } catch { }
+                }
+
+                if (totalDuplicatesRemoved > 0)
+                {
+                    SheetOperations.ShowStatusConfirmation($"Removed {totalDuplicatesRemoved} duplicate row(s).");
+                    MessageBox.Show(
+                        $"Successfully removed {totalDuplicatesRemoved} duplicate row(s) from the active sheet.\n\n" +
+                        string.Join("\n", warnings),
+                        "Duplicates Removed",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Information
+                    );
+                }
+                else
+                {
+                    SheetOperations.ShowStatusConfirmation("No duplicate rows found on the active sheet.");
+                    MessageBox.Show(
+                        "No duplicate rows found in any tables on the active sheet.",
+                        "Clean Duplicates",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Information
+                    );
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Failed to remove duplicate rows:\n{ex.Message}", "Cleanup Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        });
+    }
+
+    public void OnDeleteTableRowClicked(IRibbonControl control)
+    {
+        ExcelAsyncUtil.QueueAsMacro(TableRowManager.DeleteSelectedRowCommand);
+    }
+
+    public bool GetTotalRowPressed(IRibbonControl control)
+    {
+        try
+        {
+            dynamic xlApp = ExcelDnaUtil.Application;
+            dynamic table = xlApp.ActiveCell?.ListObject;
+            if (table != null)
+            {
+                return (bool)table.ShowTotals;
+            }
+        }
+        catch { }
+        return false;
+    }
+
+    public void OnToggleTotalRowClicked(IRibbonControl control, bool isPressed)
+    {
+        ExcelAsyncUtil.QueueAsMacro(() =>
+        {
+            try
+            {
+                dynamic xlApp = ExcelDnaUtil.Application;
+                dynamic ws = xlApp.ActiveWorkbook?.ActiveSheet;
+                if (ws == null) return;
+
+                dynamic table = xlApp.ActiveCell?.ListObject;
+                if (table == null && ws.ListObjects.Count > 0)
+                {
+                    table = ws.ListObjects[1]; // Fallback to first table on sheet
+                }
+                if (table == null) return;
+
+                SheetProtections.ExecuteWithBypass((object)ws, new Action(() =>
+                {
+                    table.ShowTotals = isPressed;
+
+                    if (isPressed)
+                    {
+                        // 1. MUST unlock total row so native header sorting isn't blocked
+                        table.TotalsRowRange.Locked = false;
+
+                        // 2. Configure default calculation for Cost columns
+                        int colCount = (int)table.ListColumns.Count;
+                        for (int c = 1; c <= colCount; c++)
+                        {
+                            dynamic col = table.ListColumns[c];
+                            string header = col.Name?.ToString() ?? string.Empty;
+
+                            if (header.IndexOf("Cost", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                header.IndexOf("Amount", StringComparison.OrdinalIgnoreCase) >= 0)
+                            {
+                                col.TotalsCalculation = 1; // xlTotalsCalculationSum
+                                try { col.Total.NumberFormat = "#,##0.00"; } catch { }
+                            }
+                        }
+                    }
+                }));
+
+                _ribbonUi?.InvalidateControl(control.Id);
+                SheetOperations.ShowStatusConfirmation(isPressed ? "Total row enabled." : "Total row hidden.");
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error("Failed toggling Total Row", ex);
             }
         });
     }

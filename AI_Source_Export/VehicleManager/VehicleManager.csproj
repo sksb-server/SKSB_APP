@@ -13,6 +13,7 @@
 
 	<ItemGroup>
 		<PackageReference Include="ExcelDna.AddIn" Version="1.9.0" />
+		<PackageReference Include="PdfPig" Version="0.1.16" />
 	</ItemGroup>
 
 	<ItemGroup>

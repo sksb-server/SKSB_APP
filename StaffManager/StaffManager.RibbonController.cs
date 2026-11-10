@@ -1,5 +1,10 @@
 ﻿namespace SKSB_App.StaffManager;
 
+using System;
+using System.IO;
+using System.Linq;
+using System.Runtime.InteropServices;
+using System.Windows.Forms;
 using ExcelDna.Integration;
 using ExcelDna.Integration.CustomUI;
 using SKSB_App.Core.Diagnostics;
@@ -9,10 +14,6 @@ using SKSB_App.Core.RuntimeUI.TableRowManager;
 using SKSB_App.Core.Types;
 using SKSB_App.Core.WorkbookOpen.Sheet;
 using SKSB_App.Core.WorkbookSave.Entry;
-using System;
-using System.IO;
-using System.Runtime.InteropServices;
-using System.Windows.Forms;
 
 [ComVisible(true)]
 public class RibbonController : ExcelRibbon
@@ -65,7 +66,7 @@ public class RibbonController : ExcelRibbon
 
                 <group id='grpErpIntegration' label='SQL Payroll Integration'>
                   <button id='btnImportStaffs' 
-                          label='Import from SQL Payroll' 
+                          label='Import from&#10;SQL Payroll' 
                           size='large' 
                           imageMso='ImportExcel' 
                           screentip='Import from SQL Payroll'
@@ -73,23 +74,46 @@ public class RibbonController : ExcelRibbon
                           onAction='OnImportStaffsClicked' />
                 </group>
 
-                <group id='grpRowDirection' label='Row Management'>
-                  <toggleButton id='btnToggleInsertTop' 
-                                label='Insert at Top' 
-                                size='large' 
-                                imageMso='TableInsertRowsAbove' 
-                                screentip='Toggle Top/Bottom Auto-Insert'
-                                supertip='When enabled, typing in the first data row creates a new row at the top. When disabled, rows are appended at the bottom.'
-                                getPressed='GetInsertAtTopPressed'
-                                onAction='OnToggleInsertAtTopClicked' />
-                  <button id='btnCleanEmptyRows'
-                          label='Trim Empty Rows'
-                          size='large'
-                          imageMso='TableDeleteRows'
-                          screentip='Trim Redundant Empty Rows'
-                          supertip='Scans all tables on the active sheet and trims extra blank rows, leaving exactly one empty entry row.'
-                          onAction='OnCleanEmptyRowsClicked' />
-                </group>
+                <!-- ROW MANAGEMENT GROUP -->
+<group id='grpRowDirection' label='Row Management'>
+  <toggleButton id='btnToggleInsertTop' 
+                label='Insert at Top' 
+                size='large' 
+                imageMso='TableInsertRowsAbove' 
+                screentip='Toggle Top/Bottom Auto-Insert'
+                supertip='When enabled, typing in the first data row creates a new row at the top. When disabled, rows are appended at the bottom.'
+                getPressed='GetInsertAtTopPressed'
+                onAction='OnToggleInsertAtTopClicked' />
+  <button id='btnCleanEmptyRows'
+          label='Trim Empty Rows'
+          size='large'
+          imageMso='TableDeleteRows'
+          screentip='Trim Redundant Empty Rows'
+          supertip='Scans all tables on the active sheet and trims extra blank rows, leaving exactly one empty entry row.'
+          onAction='OnCleanEmptyRowsClicked' />
+  <button id='btnCleanDuplicateRows'
+          label='Remove Duplicates'
+          size='large'
+          imageMso='RemoveDuplicates'
+          screentip='Remove Duplicate Rows'
+          supertip='Scans all tables on the active sheet and removes identical duplicate rows, keeping the first occurrence.'
+          onAction='OnCleanDuplicateRowsClicked' />
+  <button id='btnDeleteTableRow'
+          label='Delete Row'
+          size='large'
+          imageMso='TableRowsDelete'
+          screentip='Delete Row'
+          supertip='Deletes selected row(s) in absolute master tables. Deletion is blocked on additive transaction tables.'
+          onAction='OnDeleteTableRowClicked' />
+<toggleButton id='btnToggleTotalRow' 
+              label='Total Row' 
+              size='large' 
+              imageMso='AutoSum' 
+              screentip='Toggle Total Row'
+              supertip='Shows or hides the summary total row at the bottom of the active table.'
+              getPressed='GetTotalRowPressed' 
+              onAction='OnToggleTotalRowClicked' />
+</group>
 
                 {debugGroupXml}
               </tab>
@@ -102,8 +126,6 @@ public class RibbonController : ExcelRibbon
 
     public void OnLoadClicked(IRibbonControl control)
     {
-        if (!Guard.IsStaffWorkbook()) return;
-
         try
         {
             Events.SyncStaffLookupsData(isInteractive: false);
@@ -129,8 +151,6 @@ public class RibbonController : ExcelRibbon
 
     public void OnSaveClicked(IRibbonControl control)
     {
-        if (!Guard.IsStaffWorkbook()) return;
-
         ExcelAsyncUtil.QueueAsMacro(() =>
         {
             SaveEntry.Save(Events.StaffSyncDescriptor);
@@ -173,12 +193,31 @@ public class RibbonController : ExcelRibbon
 
             ExcelAsyncUtil.QueueAsMacro(() =>
             {
-                if (importResult.ImportedStaffs.Count > 0)
-                {
-                    var (existingStaffs, _, _) = SheetMapper.ExtractStaffRecordsWithDiagnostics();
-                    var existingLookup = (existingStaffs ?? new List<StaffRecord>()).ToDictionary(w => w.StaffID);
+                var (existingStaffs, _, _) = SheetMapper.ExtractStaffRecordsWithDiagnostics();
 
-                    foreach (var imported in importResult.ImportedStaffs)
+                var cleanStaffs = TableRowManager.FilterDuplicates(
+                    incomingRecords: importResult.ImportedStaffs,
+                    keySelector: s => $"{s.StaffID}",
+                    displaySelector: s => $"Staff ID {s.StaffID} ({s.StaffDetails.StaffName})",
+                    entityLabel: "Staff Profile",
+                    duplicateWarnings: out var duplicateNotices,
+                    existingRecords: existingStaffs
+                );
+
+                if (cleanStaffs == null)
+                {
+                    SheetOperations.ShowStatusConfirmation("Staff import cancelled by user.");
+                    return;
+                }
+
+                if (cleanStaffs.Count > 0)
+                {
+                    var existingLookup = (existingStaffs ?? new List<StaffRecord>())
+                        .Where(w => w.StaffID > 0)
+                        .GroupBy(w => w.StaffID)
+                        .ToDictionary(g => g.Key, g => g.First());
+
+                    foreach (var imported in cleanStaffs)
                     {
                         if (existingLookup.TryGetValue(imported.StaffID, out var current))
                         {
@@ -187,7 +226,7 @@ public class RibbonController : ExcelRibbon
                         }
                     }
 
-                    SheetMapper.PopulateWorksheet(importResult.ImportedStaffs);
+                    SheetMapper.PopulateWorksheet(cleanStaffs);
                 }
 
                 using var summaryDialog = new ImportResultDialog(importResult.ToGenericReport(), fileNameOnly);
@@ -247,6 +286,139 @@ public class RibbonController : ExcelRibbon
             catch (Exception ex)
             {
                 MessageBox.Show($"Failed cleaning empty rows:\n{ex.Message}", "Row Cleanup Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        });
+    }
+
+    public void OnCleanDuplicateRowsClicked(IRibbonControl control)
+    {
+        ExcelAsyncUtil.QueueAsMacro(() =>
+        {
+            try
+            {
+                dynamic xlApp = ExcelDnaUtil.Application;
+                dynamic ws = xlApp.ActiveWorkbook?.ActiveSheet;
+                if (ws == null) return;
+
+                bool origUpdating = true;
+                try { origUpdating = (bool)xlApp.ScreenUpdating; xlApp.ScreenUpdating = false; } catch { }
+
+                int totalDuplicatesRemoved = 0;
+                var warnings = new System.Collections.Generic.List<string>();
+
+                try
+                {
+                    SheetProtections.ExecuteWithBypass((object)ws, new Action(() =>
+                    {
+                        foreach (dynamic table in ws.ListObjects)
+                        {
+                            totalDuplicatesRemoved += TableRowManager.CleanTableDuplicateRows(table, warnings);
+                        }
+                    }));
+                }
+                finally
+                {
+                    try { xlApp.ScreenUpdating = origUpdating; } catch { }
+                }
+
+                if (totalDuplicatesRemoved > 0)
+                {
+                    SheetOperations.ShowStatusConfirmation($"Removed {totalDuplicatesRemoved} duplicate row(s).");
+                    MessageBox.Show(
+                        $"Successfully removed {totalDuplicatesRemoved} duplicate row(s) from the active sheet.\n\n" +
+                        string.Join("\n", warnings),
+                        "Duplicates Removed",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Information
+                    );
+                }
+                else
+                {
+                    SheetOperations.ShowStatusConfirmation("No duplicate rows found on the active sheet.");
+                    MessageBox.Show(
+                        "No duplicate rows found in any tables on the active sheet.",
+                        "Clean Duplicates",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Information
+                    );
+                }
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Failed to remove duplicate rows:\n{ex.Message}", "Cleanup Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        });
+    }
+
+    public void OnDeleteTableRowClicked(IRibbonControl control)
+    {
+        ExcelAsyncUtil.QueueAsMacro(TableRowManager.DeleteSelectedRowCommand);
+    }
+
+    public bool GetTotalRowPressed(IRibbonControl control)
+    {
+        try
+        {
+            dynamic xlApp = ExcelDnaUtil.Application;
+            dynamic table = xlApp.ActiveCell?.ListObject;
+            if (table != null)
+            {
+                return (bool)table.ShowTotals;
+            }
+        }
+        catch { }
+        return false;
+    }
+
+    public void OnToggleTotalRowClicked(IRibbonControl control, bool isPressed)
+    {
+        ExcelAsyncUtil.QueueAsMacro(() =>
+        {
+            try
+            {
+                dynamic xlApp = ExcelDnaUtil.Application;
+                dynamic ws = xlApp.ActiveWorkbook?.ActiveSheet;
+                if (ws == null) return;
+
+                dynamic table = xlApp.ActiveCell?.ListObject;
+                if (table == null && ws.ListObjects.Count > 0)
+                {
+                    table = ws.ListObjects[1]; // Fallback to first table on sheet
+                }
+                if (table == null) return;
+
+                SheetProtections.ExecuteWithBypass((object)ws, new Action(() =>
+                {
+                    table.ShowTotals = isPressed;
+
+                    if (isPressed)
+                    {
+                        // 1. MUST unlock total row so native header sorting isn't blocked
+                        table.TotalsRowRange.Locked = false;
+
+                        // 2. Configure default calculation for Cost columns
+                        int colCount = (int)table.ListColumns.Count;
+                        for (int c = 1; c <= colCount; c++)
+                        {
+                            dynamic col = table.ListColumns[c];
+                            string header = col.Name?.ToString() ?? string.Empty;
+
+                            if (header.IndexOf("Cost", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                                header.IndexOf("Amount", StringComparison.OrdinalIgnoreCase) >= 0)
+                            {
+                                col.TotalsCalculation = 1; // xlTotalsCalculationSum
+                                try { col.Total.NumberFormat = "#,##0.00"; } catch { }
+                            }
+                        }
+                    }
+                }));
+
+                _ribbonUi?.InvalidateControl(control.Id);
+                SheetOperations.ShowStatusConfirmation(isPressed ? "Total row enabled." : "Total row hidden.");
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error("Failed toggling Total Row", ex);
             }
         });
     }

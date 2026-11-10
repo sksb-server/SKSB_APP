@@ -1,10 +1,12 @@
 ﻿namespace SKSB_App.Core.Integration.Database;
 
+using Dapper;
+using Npgsql;
+using SKSB_App.Core.Diagnostics;
 using System;
 using System.Collections.Generic;
 using System.Data;
-using Dapper;
-using Npgsql;
+using System.Text;
 
 public class PostgreSqlService
 {
@@ -53,9 +55,28 @@ public class PostgreSqlService
             action(db, trans);
             trans.Commit();
         }
-        catch
+        catch (PostgresException pgEx)
         {
             trans.Rollback();
+
+            var errSb = new StringBuilder();
+            errSb.AppendLine("==========================================================================");
+            errSb.AppendLine($" POSTGRESQL TRANSACTION ERROR [{pgEx.SqlState}]");
+            errSb.AppendLine("==========================================================================");
+            errSb.AppendLine($"Message  : {pgEx.Message}");
+            errSb.AppendLine($"Position : {pgEx.Position}");
+            errSb.AppendLine($"Table    : {pgEx.TableName}");
+            errSb.AppendLine($"Column   : {pgEx.ColumnName}");
+            errSb.AppendLine($"Where    : {pgEx.Where}");
+            errSb.AppendLine($"Routine  : {pgEx.Routine}");
+
+            AppLogger.Error(errSb.ToString(), pgEx);
+            throw;
+        }
+        catch (Exception ex)
+        {
+            trans.Rollback();
+            AppLogger.Error("ExecuteInTransaction general error", ex);
             throw;
         }
     }

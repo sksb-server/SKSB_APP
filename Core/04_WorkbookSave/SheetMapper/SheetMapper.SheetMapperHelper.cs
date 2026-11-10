@@ -1,13 +1,10 @@
 ﻿namespace SKSB_App.Core.WorkbookSave.SheetMapper;
 
 using ExcelDna.Integration;
-using global::SKSB_App.Core.Diagnostics;
-using global::SKSB_App.Core.WorkbookOpen.Sheet;
 using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.WorkbookOpen.Sheet;
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using System.Runtime.CompilerServices;
@@ -19,70 +16,27 @@ public static class SheetMapperHelper
         "dd/MM/yyyy", "d/M/yyyy", "dd-MM-yyyy", "d-M-yyyy", "yyyy-MM-dd"
     };
 
-    public static void ResizeTable(
-        dynamic table,
-        int dataRowCount,
-        int? explicitColSpan = null,
-        [CallerMemberName] string callerMember = "",
-        [CallerFilePath] string callerFile = "",
-        [CallerLineNumber] int callerLine = 0)
+    /// <summary>
+    /// Resizes a ListObject table cleanly, logging its physical range and row count before and after.
+    /// </summary>
+    public static void ResizeTable(dynamic table, int dataRowCount, int? explicitColSpan = null)
     {
         if (table == null) return;
-
-        string tableName = "Table";
-        try { tableName = table.Name?.ToString() ?? "Table"; } catch { }
-
-        string sourceFile = System.IO.Path.GetFileName(callerFile);
-        AppLogger.Info($"ResizeTable({tableName}, targetRows={dataRowCount}) requested by [{sourceFile}:{callerLine} {callerMember}]");
-
-        if (dataRowCount >= 500)
-        {
-            AppLogger.Warn($"[SUSPICIOUS RESIZE] Large row count ({dataRowCount}) requested for '{tableName}' by [{sourceFile}:{callerLine} {callerMember}]!\nStack: {new StackTrace(1, true)}");
-        }
-
-        using var _ = AppLogger.Scope($"ResizeTable({tableName}, targetRows={dataRowCount})");
-
         try
         {
             dynamic ws = table.Parent;
             if (ws == null) return;
 
-            bool wasProtected = false;
+            // Lift any legacy sheet protection; it is never re-applied.
             try
             {
-                wasProtected = (bool)ws.ProtectContents;
-                if (wasProtected) ws.Unprotect("SKSB_Internal_Guard");
+                if ((bool)ws.ProtectContents) ws.Unprotect("SKSB_Internal_Guard");
             }
             catch { }
 
-            try { if ((bool)table.ShowTotals) table.ShowTotals = false; } catch { }
-
             int headerRow = (int)table.HeaderRowRange.Row;
             int startCol = (int)table.HeaderRowRange.Column;
-
-            int scannedColSpan = 0;
-            while (true)
-            {
-                int c = startCol + scannedColSpan;
-                dynamic cell = ws.Cells[headerRow, c];
-                string val = cell.Value2?.ToString()?.Trim() ?? string.Empty;
-                if (string.IsNullOrEmpty(val)) break;
-
-                dynamic? otherTable = null;
-                try { otherTable = cell.ListObject; } catch { }
-                if (otherTable != null)
-                {
-                    string otherName = otherTable.Name?.ToString() ?? string.Empty;
-                    if (!string.Equals(otherName, tableName, StringComparison.OrdinalIgnoreCase))
-                    {
-                        break;
-                    }
-                }
-
-                scannedColSpan++;
-            }
-
-            int finalColSpan = explicitColSpan ?? Math.Max((int)table.ListColumns.Count, scannedColSpan);
+            int finalColSpan = explicitColSpan ?? (int)table.ListColumns.Count;
             if (finalColSpan < 1) finalColSpan = 1;
 
             int endCol = startCol + finalColSpan - 1;
@@ -92,46 +46,51 @@ public static class SheetMapperHelper
             int effectiveDataRows = Math.Max(1, dataRowCount);
             int endRow = headerRow + effectiveDataRows;
 
-            AppLogger.Info($"[{tableName}] HeaderRow={headerRow}, StartCol={startCol}, ColSpan={finalColSpan}, OldRows={oldRowCount} -> NewRows={effectiveDataRows}");
-
-            if (oldRowCount > effectiveDataRows)
+            // Skip COM Resize if dimensions are already identical
+            if (oldRowCount == effectiveDataRows && (int)table.ListColumns.Count == finalColSpan)
             {
-                int deleteStartRow = endRow + 1;
-                int deleteEndRow = headerRow + oldRowCount;
-                try
-                {
-                    dynamic excessTableCells = ws.Range[ws.Cells[deleteStartRow, startCol], ws.Cells[deleteEndRow, endCol]];
-                    excessTableCells.Delete(-4162); // xlShiftUp
-                    AppLogger.Info($"[{tableName}] Deleted excess rows {deleteStartRow}..{deleteEndRow} via xlShiftUp.");
-                }
-                catch (Exception exDel)
-                {
-                    AppLogger.Warn($"[{tableName}] excessTableCells.Delete warning: {exDel.Message}");
-                }
+                return;
             }
 
-            dynamic newRange = ws.Range[ws.Cells[headerRow, startCol], ws.Cells[endRow, endCol]];
+            // Cache Total Row state; disable during resize to avoid COM collisions, then restore
+            bool hadTotals = false;
+            try { hadTotals = (bool)table.ShowTotals; } catch { }
             try
             {
-                table.Resize(newRange);
-            }
-            catch (Exception exResize)
-            {
-                AppLogger.Error($"[{tableName}] table.Resize threw COM error", exResize);
-            }
+                if (hadTotals) { try { table.ShowTotals = false; } catch { } }
 
-            dynamic? postBody = table.DataBodyRange;
-            int postRows = postBody != null ? (int)postBody.Rows.Count : 0;
-            AppLogger.Info($"[{tableName}] Final DataBodyRange rows = {postRows}");
+                if (oldRowCount > effectiveDataRows)
+                {
+                    int clearStartRow = headerRow + effectiveDataRows + 1;
+                    int clearEndRow = headerRow + oldRowCount;
+                    if (clearStartRow <= clearEndRow)
+                    {
+                        dynamic staleRange = ws.Range[ws.Cells[clearStartRow, startCol], ws.Cells[clearEndRow, endCol]];
+                        staleRange.Clear();
+                    }
+                }
 
-            if (wasProtected)
+                dynamic newRange = ws.Range[ws.Cells[headerRow, startCol], ws.Cells[endRow, endCol]];
+                try
+                {
+                    table.Resize(newRange);
+                }
+                catch (Exception exResize)
+                {
+                    System.Diagnostics.Debug.WriteLine($"[{table.Name}] table.Resize threw COM error: {exResize.Message}");
+                }
+            }
+            finally
             {
-                try { SheetProtections.ApplyStyleDrivenProtection(ws); } catch { }
+                if (hadTotals)
+                {
+                    try { table.ShowTotals = true; } catch { }
+                }
             }
         }
         catch (Exception ex)
         {
-            AppLogger.Error($"ResizeTable({tableName}) outer exception", ex);
+            System.Diagnostics.Debug.WriteLine($"ResizeTable outer exception: {ex.Message}");
         }
     }
 
@@ -199,7 +158,7 @@ public static class SheetMapperHelper
                         for (int r = rMax; r >= 1; r--)
                         {
                             string val = CleanString(mat[r, cMin]);
-                            if (!string.IsNullOrWhiteSpace(val) && !val.Equals("Total", StringComparison.OrdinalIgnoreCase))
+                            if (!string.IsNullOrWhiteSpace(val))
                             {
                                 lastNonEmptyRow = r;
                                 break;
@@ -210,7 +169,7 @@ public static class SheetMapperHelper
                     int targetRows = Math.Max(1, lastNonEmptyRow);
                     if (currentRows > targetRows + 1)
                     {
-                        AppLogger.Info($"[ClampAllTables] Clamping '{table.Name}' from {currentRows} rows down to {targetRows} rows.");
+                        AppLogger.Warn($"[UNINTENDED EXPANSION DETECTED] Table '{table.Name}' was inflated to {currentRows} rows! Clamping down to {targetRows} data rows.");
                         ResizeTable(table, targetRows);
                     }
                 }
@@ -222,41 +181,95 @@ public static class SheetMapperHelper
         }
     }
 
-    internal static bool IsComError(object? val) =>
-        val == null ||
-        (val is int i && i < -2000000000) ||
-        (val is long l && l < -2000000000) ||
-        val.ToString()?.StartsWith("#") == true;
-
-    public static string CleanString(object? val)
+    /// <summary>
+    /// Synchronizes a distinct list of strings into an Excel ListObject (Table) and registers a Named Range.
+    /// Operates strictly on the target table's parent worksheet via COM to prevent active-sheet bleed-through.
+    /// </summary>
+    public static bool SyncReferenceTable(
+        dynamic workbook,
+        string tableName,
+        string namedRange,
+        IEnumerable<string> items)
     {
-        if (val == null || IsComError(val)) return string.Empty;
-        string s = val.ToString()?.Trim() ?? string.Empty;
-        if (long.TryParse(s, out long num) && num < -2000000000) return string.Empty;
-        return s;
+        if (workbook == null || string.IsNullOrWhiteSpace(tableName) || items == null) return false;
+
+        try
+        {
+            var distinctList = items
+                .Where(x => !string.IsNullOrWhiteSpace(x))
+                .Select(x => x.Trim())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(x => x)
+                .ToList();
+
+            dynamic? targetTable = null;
+            foreach (dynamic ws in workbook.Sheets)
+            {
+                try
+                {
+                    targetTable = ws.ListObjects[tableName];
+                    if (targetTable != null) break;
+                }
+                catch { }
+            }
+
+            if (targetTable == null)
+            {
+                AppLogger.Warn($"[SyncReferenceTable] Table '{tableName}' not found in workbook.");
+                return false;
+            }
+
+            dynamic sheet = targetTable.Parent;
+            int headerRow = (int)targetTable.HeaderRowRange.Row;
+            int col = (int)targetTable.HeaderRowRange.Column;
+
+            int rowCount = distinctList.Count;
+            int effectiveRows = Math.Max(1, rowCount);
+
+            // 1. Resize table boundary directly
+            ResizeTable(targetTable, effectiveRows);
+
+            dynamic dataRange = sheet.Range[
+                sheet.Cells[headerRow + 1, col],
+                sheet.Cells[headerRow + effectiveRows, col]
+            ];
+
+            // 2. Write data without touching any other worksheet
+            if (rowCount > 0)
+            {
+                object[,] data = new object[rowCount, 1];
+                for (int i = 0; i < rowCount; i++)
+                {
+                    data[i, 0] = distinctList[i];
+                }
+
+                try { dataRange.NumberFormat = "@"; } catch { }
+                dataRange.Value2 = data;
+
+                // 3. Register Excel Defined Name if requested
+                if (!string.IsNullOrWhiteSpace(namedRange))
+                {
+                    try { XlCall.Excel(XlCall.xlcDeleteName, namedRange); } catch { }
+                    string sName = (string)sheet.Name;
+                    int rStart = headerRow + 1;
+                    int rEnd = headerRow + rowCount;
+                    string refersTo = $"='{sName}'!R{rStart}C{col}:R{rEnd}C{col}";
+                    XlCall.Excel(XlCall.xlcDefineName, namedRange, refersTo, 3);
+                }
+            }
+            else
+            {
+                dataRange.Value2 = null;
+            }
+
+            return true;
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error($"[SyncReferenceTable] Failed on '{tableName}'", ex);
+            return false;
+        }
     }
-
-    public static DateOnly ParseDate(object? cell)
-    {
-        if (cell is double d) return DateOnly.FromDateTime(DateTime.FromOADate(d));
-
-        string clean = CleanString(cell);
-        if (string.IsNullOrWhiteSpace(clean)) return default;
-
-        if (double.TryParse(clean, NumberStyles.Any, CultureInfo.InvariantCulture, out double parsedD) && parsedD > 30000 && parsedD < 80000)
-            return DateOnly.FromDateTime(DateTime.FromOADate(parsedD));
-
-        if (DateOnly.TryParseExact(clean, UniversalDateFormats, CultureInfo.InvariantCulture, DateTimeStyles.None, out DateOnly dOnly))
-            return dOnly;
-
-        if (DateTime.TryParse(clean, new CultureInfo("en-GB"), DateTimeStyles.None, out DateTime dt))
-            return DateOnly.FromDateTime(dt);
-
-        return default;
-    }
-
-    public static string FormatDate(DateOnly date) =>
-        date == default ? string.Empty : date.ToString("dd/MM/yyyy");
 
     public static List<string> ExtractDistinctColumnValues(dynamic workbook, string tableName, int scanRowLimit = 100)
     {
@@ -284,6 +297,7 @@ public static class SheetMapperHelper
         {
             dynamic scanRange = sheet.Range[sheet.Cells[headerRow + 1, col], sheet.Cells[headerRow + scanRowLimit, col]];
             object[,] colGrid = scanRange.Value2;
+
             if (colGrid != null)
             {
                 int rCount = colGrid.GetLength(0);
@@ -307,77 +321,34 @@ public static class SheetMapperHelper
         return distinctValues.OrderBy(x => x).ToList();
     }
 
-    public static bool SyncReferenceTable(
-        dynamic workbook,
-        string tableName,
-        string namedRange,
-        IEnumerable<string> items)
+    internal static bool IsComError(object? val) =>
+        val == null ||
+        (val is int i && i < -2000000000) ||
+        (val is long l && l < -2000000000) ||
+        val.ToString()?.StartsWith("#") == true;
+
+    public static string CleanString(object? val)
     {
-        try
-        {
-            var distinctList = items
-                .Where(x => !string.IsNullOrWhiteSpace(x))
-                .Select(x => x.Trim())
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .OrderBy(x => x)
-                .ToList();
-
-            dynamic? targetTable = null;
-            foreach (dynamic ws in workbook.Sheets)
-            {
-                try
-                {
-                    targetTable = ws.ListObjects[tableName];
-                    if (targetTable != null) break;
-                }
-                catch { }
-            }
-
-            if (targetTable == null) return false;
-
-            dynamic sheet = targetTable.Parent;
-            dynamic headerRange = targetTable.HeaderRowRange;
-            int headerRow = (int)headerRange.Row;
-            int col = (int)headerRange.Column;
-
-            int clearStartRow = headerRow + 1;
-            var clearRef = new ExcelReference(clearStartRow - 1, clearStartRow + 999, col - 1, col - 1);
-            object[,] emptyGrid = new object[1001, 1];
-            for (int r = 0; r <= 1000; r++) emptyGrid[r, 0] = string.Empty;
-            clearRef.SetValue(emptyGrid);
-
-            int rowCount = distinctList.Count;
-            int effectiveRows = Math.Max(1, rowCount);
-            int endRow = headerRow + effectiveRows;
-
-            dynamic newRange = sheet.Range[sheet.Cells[headerRow, col], sheet.Cells[endRow, col]];
-            targetTable.Resize(newRange);
-
-            if (rowCount > 0)
-            {
-                object[,] data = new object[rowCount, 1];
-                for (int i = 0; i < rowCount; i++)
-                {
-                    data[i, 0] = distinctList[i];
-                }
-                var writeRef = new ExcelReference(clearStartRow - 1, clearStartRow + rowCount - 2, col - 1, col - 1);
-                writeRef.SetValue(data);
-
-                if (!string.IsNullOrWhiteSpace(namedRange))
-                {
-                    try { XlCall.Excel(XlCall.xlcDeleteName, namedRange); } catch { }
-                    string sName = (string)sheet.Name;
-                    string refersTo = $"='{sName}'!R{clearStartRow}C{col}:R{clearStartRow + rowCount - 1}C{col}";
-                    XlCall.Excel(XlCall.xlcDefineName, namedRange, refersTo, 3);
-                }
-            }
-
-            return true;
-        }
-        catch (Exception ex)
-        {
-            System.Diagnostics.Debug.WriteLine($"[SheetMapperHelper.SyncReferenceTable Error] {ex.Message}");
-            return false;
-        }
+        if (val == null || IsComError(val)) return string.Empty;
+        string s = val.ToString()?.Trim() ?? string.Empty;
+        if (long.TryParse(s, out long num) && num < -2000000000) return string.Empty;
+        return s;
     }
+
+    public static DateOnly ParseDate(object? cell)
+    {
+        if (cell is double d) return DateOnly.FromDateTime(DateTime.FromOADate(d));
+        string clean = CleanString(cell);
+        if (string.IsNullOrWhiteSpace(clean)) return default;
+        if (double.TryParse(clean, NumberStyles.Any, CultureInfo.InvariantCulture, out double parsedD) && parsedD > 30000 && parsedD < 80000)
+            return DateOnly.FromDateTime(DateTime.FromOADate(parsedD));
+        if (DateOnly.TryParseExact(clean, UniversalDateFormats, CultureInfo.InvariantCulture, DateTimeStyles.None, out DateOnly dOnly))
+            return dOnly;
+        if (DateTime.TryParse(clean, new CultureInfo("en-GB"), DateTimeStyles.None, out DateTime dt))
+            return DateOnly.FromDateTime(dt);
+        return default;
+    }
+
+    public static string FormatDate(DateOnly date) =>
+        date == default ? string.Empty : date.ToString("dd/MM/yyyy");
 }

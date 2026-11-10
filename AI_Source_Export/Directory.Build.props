@@ -77,9 +77,9 @@
   <!-- 3. AUTO-GENERATE AI CHAT EXPORT BUNDLE                        -->
   <!-- Triggers once per build cycle on Launcher                     -->
   <!-- ============================================================= -->
-  <Target Name="GenerateAIChatCodeBundle"
-          AfterTargets="Build"
-          Condition="'$(_AIChatBundleRan)' != 'true' and ('$(MSBuildProjectName)' == 'Launcher' or '$(MSBuildProjectName)' == 'SKSB_App')">
+	<Target Name="GenerateAIChatCodeBundle"
+		  AfterTargets="Build"
+		  Condition="'$(_AIChatBundleRan)' != 'true' and ('$(MSBuildProjectName)' == 'Launcher' or '$(MSBuildProjectName)' == 'SKSB_App')">
 
     <PropertyGroup>
       <_AIChatBundleRan>true</_AIChatBundleRan>
@@ -111,19 +111,18 @@
           SkipUnchangedFiles="false" />
 
     <!-- Consolidate into AI_Context_AllCode.txt using atomic write -->
-    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -Command &quot;$dest = '$(SingleBundleFile)'; $tmp = $dest + '.tmp'; New-Item -ItemType File -Path $tmp -Force | Out-Null; Get-ChildItem -Path '$(AIExportDir)' -Recurse -File | Where-Object { $_.FullName -ne $dest -and $_.FullName -ne $tmp -and $_.Extension -match '\.(cs|csproj|dna|props|targets|sql)$' } | ForEach-Object { '============================================================' | Out-File $tmp -Append -Encoding utf8; ('FILE: ' + $_.FullName.Replace('$(AIExportDir)\', '')) | Out-File $tmp -Append -Encoding utf8; '============================================================' | Out-File $tmp -Append -Encoding utf8; Get-Content $_.FullName | Out-File $tmp -Append -Encoding utf8; '`n' | Out-File $tmp -Append -Encoding utf8 }; Move-Item -Path $tmp -Destination $dest -Force;&quot;" IgnoreExitCode="true" />
+    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -Command &quot;$dest = '$(SingleBundleFile)'; $tmp = $dest + '.tmp'; New-Item -ItemType File -Path $tmp -Force | Out-Null; Get-ChildItem -Path '$(AIExportDir)' -Recurse -File | Where-Object { $_.FullName -ne $dest -and $_.FullName -ne $tmp -and $_.Extension -match '\.(cs|csproj|dna|props|targets|sql)$' } | ForEach-Object { '============================================================' | Out-File $tmp -Append -Encoding utf8; ('FILE: ' + $_.FullName.Replace('$(AIExportDir)\', '')) | Out-File $tmp -Append -Encoding utf8; '============================================================' | Out-File $tmp -Append -Encoding utf8; Get-Content $_.FullName -Encoding utf8 | Out-File $tmp -Append -Encoding utf8; '`n' | Out-File $tmp -Append -Encoding utf8 }; Move-Item -Path $tmp -Destination $dest -Force;&quot;" IgnoreExitCode="true" />
 
     <Message Importance="high" Text="[AI Export Ready] Unified bundle created at: $(SingleBundleFile)" />
   </Target>
 
-  <!-- ============================================================= -->
-  <!-- 4. AUTO-DEPLOY RELEASE PACKAGE TO SERVER (RELEASE ONLY)       -->
-  <!-- ============================================================= -->
-  <Target Name="AutoDeployReleaseToServer"
-          AfterTargets="Build"
-          Condition="'$(Configuration)' == 'Release' and ('$(MSBuildProjectName)' == 'Launcher' or '$(MSBuildProjectName)' == 'SKSB_App')">
-    <Message Importance="high" Text="[Release Deploy] Building and deploying SKSB package to server..." />
-    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)publish.ps1&quot;"
-          IgnoreExitCode="true" />
-  </Target>
+	<!-- ============================================================= -->
+	<!-- 4. AUTO-DEPLOY RELEASE PACKAGE TO SERVER (PUBLISH ONLY)       -->
+	<!-- ============================================================= -->
+	<Target Name="AutoDeployReleaseToServer"
+			AfterTargets="Publish"
+			Condition="'$(Configuration)' == 'Release' and ('$(MSBuildProjectName)' == 'Launcher' or '$(MSBuildProjectName)' == 'SKSB_App')">
+		<Message Importance="high" Text="[Release Deploy] Building and deploying SKSB package to server..." />
+		<Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)publish.ps1&quot;" />
+	</Target>
 </Project>

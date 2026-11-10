@@ -59,30 +59,34 @@ public static class PortalRouter
             string templateFileName = pair.Template();
             string templateBaseName = Path.GetFileNameWithoutExtension(templateFileName);
 
-            // 1. Bring existing window to front if already running
+            // 1. Check if an Excel window with this specific workbook is already open
             if (TryFocusExistingWorkbook(templateBaseName))
             {
-                return;
+                return; // Module already active and brought to front
             }
 
-            // 2. Resolve Template & Add-In paths
+            // 2. Resolve Template & Target Add-In paths
             string templatePath = ResolveTemplatePath(templateFileName);
             string addInPath = TemplateAddInPair.ResolveAddInPath(pair.AddIn());
 
+            // 3. Resolve Core Add-In path so it loads alongside every manager
+            string coreAddInName = ExcelRegistry.OfficeBitness.Equals(Bitness.Win32)
+                ? "Core-AddIn.xll"
+                : "Core-AddIn64.xll";
+            string coreAddInPath = TemplateAddInPair.ResolveAddInPath(coreAddInName);
+
             if (!File.Exists(templatePath))
-            {
                 throw new FileNotFoundException($"Template file not found at:\n{templatePath}", templatePath);
-            }
-
             if (!File.Exists(addInPath))
-            {
-                throw new FileNotFoundException($"Add-In file not found at:\n{addInPath}", addInPath);
-            }
+                throw new FileNotFoundException($"Module Add-in not found at:\n{addInPath}", addInPath);
+            if (!File.Exists(coreAddInPath))
+                throw new FileNotFoundException($"Core Add-in not found at:\n{coreAddInPath}", coreAddInPath);
 
+            // 4. Use /x to force an isolated Excel process, preventing add-in cross-contamination
             var startInfo = new ProcessStartInfo
             {
                 FileName = excelPath,
-                Arguments = $"/t \"{templatePath}\" \"{addInPath}\"",
+                Arguments = $"/x /t \"{templatePath}\" \"{coreAddInPath}\" \"{addInPath}\"",
                 UseShellExecute = true
             };
 

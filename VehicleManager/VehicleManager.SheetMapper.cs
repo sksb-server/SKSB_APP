@@ -1,16 +1,20 @@
 ﻿namespace SKSB_App.VehicleManager;
 
-using System;
-using System.Collections.Generic;
-using System.Linq;
 using ExcelDna.Integration;
 using SKSB_App.Core.Diagnostics;
+using SKSB_App.Core.RuntimeUI.RuleEngine;
 using SKSB_App.Core.Types;
 using SKSB_App.Core.WorkbookOpen.Sheet;
 using SKSB_App.Core.WorkbookSave.SheetMapper;
 using SKSB_App.Core.WorkbookSave.Validation;
+using System;
+using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
+using System.Reflection;
+using System.Text.RegularExpressions;
 
-internal static class SheetMapper
+internal static partial class SheetMapper
 {
     public const string MasterSheetName = "All Vehicles";
     public const string MasterTableName = "AllVehiclesTable";
@@ -24,6 +28,9 @@ internal static class SheetMapper
     private static readonly string[] InsuranceAliases = { "Insurances", "Insurance" };
     private static readonly string[] OdometerAliases = { "Odometers", "Odometer", "Fuel Logs", "Fuel" };
 
+    // =========================================================================
+    // 1. MASTER EXTRACTION PIPELINE
+    // =========================================================================
     internal static (List<VehicleRecord>? Data, List<string> Errors, List<string> Warnings) ExtractVehicleRecordsWithDiagnostics()
     {
         try
@@ -41,13 +48,18 @@ internal static class SheetMapper
             // 1. Extract Master Vehicle Records
             List<VehicleRecord> vehicles = TableMapper.ExtractFromTable<VehicleRecord>((object)masterWs, MasterTableName);
 
-            // 2. Extract Child Collections into parent vehicles
+            // 2. Extract Child Collections
             ExtractChildRecords((object)wb, vehicles);
 
-            // 3. Universally Validate ALL Tables Across All Worksheets (Statically Bound)
-            var (errors, warnings) = RulesExtractor.ValidateAllWorkbookTables((object)wb);
+            // 3. Extract & Validate Auxiliary Tables
+            var (auxErrors, auxWarnings) = ExtractAndPersistAuxiliaryTables((object)wb);
 
-            // Primary Key Integrity Check
+            // 4. Validate All Tables Across All Sheets
+            var (errors, warnings) = RulesExtractor.ValidateAllWorkbookTables((object)wb);
+            errors.AddRange(auxErrors);
+            warnings.AddRange(auxWarnings);
+
+            // 5. Primary Key Integrity Check
             var plateGroups = vehicles
                 .Where(v => !string.IsNullOrWhiteSpace(v.VehiclePlate))
                 .GroupBy(v => v.VehiclePlate, StringComparer.OrdinalIgnoreCase);
@@ -74,12 +86,16 @@ internal static class SheetMapper
         return data ?? new List<VehicleRecord>();
     }
 
+    // =========================================================================
+    // 2. MASTER POPULATE PIPELINE
+    // =========================================================================
     internal static void PopulateWorksheet(List<VehicleRecord> records)
     {
         if (records == null) return;
 
         dynamic xlApp = ExcelDnaUtil.Application;
         bool origEvents = true;
+        bool origUpdating = true;
         try { origEvents = (bool)xlApp.EnableEvents; xlApp.EnableEvents = false; } catch { }
 
         try
@@ -87,7 +103,7 @@ internal static class SheetMapper
             dynamic wb = xlApp.ActiveWorkbook;
             if (wb == null) return;
 
-            // 1. Populate Master Table (AllVehiclesTable)
+            // 1. Populate Master Table
             dynamic? masterWs = ResolveSheetSafely((object)wb, MasterSheetAliases, MasterSheetName);
             if (masterWs != null)
             {
@@ -103,15 +119,52 @@ internal static class SheetMapper
                 SheetProtections.ApplyStyleDrivenProtection(masterWs);
             }
 
-            // 2. Populate Child Tables (Maintenances, RoadTaxes, Inspections, Permits, Insurances, Odometers)
+            // 2. Populate Child Tables
             PopulateChildTables((object)wb, records);
 
-            // 3. Populate Auxiliary Tables (Workshops, InsuranceCompanies, FuelCards, FuelCompanyNames)
+            // 3. Populate Auxiliary Tables
             PopulateAuxiliaryTables((object)wb);
 
-#if DEBUG
-            ShowPopulateDiagnostics((object)wb, records);
-#endif
+            try
+            {
+                xlApp.CalculateFull();
+            }
+            catch (Exception exCalc)
+            {
+                System.Diagnostics.Debug.WriteLine($"[PopulateWorksheet Calculation Warning]: {exCalc.Message}");
+            }
+
+            string[] tableEvalOrder = new[]
+        {
+            "AllVehiclesTable",
+            "WorkshopsTable",
+            "InsuranceCompaniesTable",
+            "FuelCardsTable",
+            "MaintenancesTable",
+            "RoadTaxesTable",
+            "InspectionsTable",
+            "PermitsTable",
+            "InsurancesTable",
+            "OdometersTable",
+            "AllVehiclesTable"
+        };
+
+            foreach (string tName in tableEvalOrder)
+            {
+                foreach (dynamic sheet in wb.Worksheets)
+                {
+                    try
+                    {
+                        dynamic tbl = sheet.ListObjects[tName];
+                        if (tbl != null)
+                        {
+                            RuleEvaluator.EvaluateAndHealTable(sheet, tbl);
+                            break; // Found the table, move to the next one
+                        }
+                    }
+                    catch { } // Table not on this specific sheet, loop continues
+                }
+            }
         }
         catch (Exception ex)
         {
@@ -120,232 +173,13 @@ internal static class SheetMapper
         finally
         {
             try { xlApp.EnableEvents = origEvents; } catch { }
+            try { xlApp.ScreenUpdating = origUpdating; } catch { }
         }
     }
 
-    private static void ExtractChildRecords(object wbObj, List<VehicleRecord> vehicles)
-    {
-        dynamic wb = wbObj;
-        var vehicleMap = vehicles
-            .Where(v => !string.IsNullOrWhiteSpace(v.VehiclePlate))
-            .GroupBy(v => v.VehiclePlate, StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(g => g.Key, g => g.First(), StringComparer.OrdinalIgnoreCase);
-
-        // Maintenances
-        dynamic? wsMaint = ResolveSheetSafely((object)wb, MaintenanceAliases, "Maintenances");
-        if (wsMaint != null)
-        {
-            List<Maintenance> maintenances = TableMapper.ExtractFromTable<Maintenance>((object)wsMaint, "MaintenancesTable");
-            foreach (var m in maintenances)
-            {
-                if (vehicleMap.TryGetValue(m.VehiclePlate, out VehicleRecord? v) && v != null)
-                    v.Maintenances.Add(m);
-            }
-        }
-
-        // Road Taxes
-        dynamic? wsRt = ResolveSheetSafely((object)wb, RoadTaxAliases, "Road Taxes");
-        if (wsRt != null)
-        {
-            List<RoadTax> roadTaxes = TableMapper.ExtractFromTable<RoadTax>((object)wsRt, "RoadTaxesTable");
-            foreach (var rt in roadTaxes)
-            {
-                if (vehicleMap.TryGetValue(rt.VehiclePlate, out VehicleRecord? v) && v != null)
-                    v.RoadTaxes.Add(rt);
-            }
-        }
-
-        // Inspections
-        dynamic? wsInsp = ResolveSheetSafely((object)wb, InspectionAliases, "Inspections");
-        if (wsInsp != null)
-        {
-            List<Inspection> inspections = TableMapper.ExtractFromTable<Inspection>((object)wsInsp, "InspectionsTable");
-            foreach (var insp in inspections)
-            {
-                if (vehicleMap.TryGetValue(insp.VehiclePlate, out VehicleRecord? v) && v != null)
-                    v.Inspections.Add(insp);
-            }
-        }
-
-        // Permits
-        dynamic? wsPermit = ResolveSheetSafely((object)wb, PermitAliases, "Permits");
-        if (wsPermit != null)
-        {
-            List<VehiclePermit> permits = TableMapper.ExtractFromTable<VehiclePermit>((object)wsPermit, "PermitsTable");
-            foreach (var p in permits)
-            {
-                if (vehicleMap.TryGetValue(p.VehiclePlate, out VehicleRecord? v) && v != null)
-                    v.Permits.Add(p);
-            }
-        }
-
-        // Insurances
-        dynamic? wsIns = ResolveSheetSafely((object)wb, InsuranceAliases, "Insurances");
-        if (wsIns != null)
-        {
-            List<VehicleInsurance> insurances = TableMapper.ExtractFromTable<VehicleInsurance>((object)wsIns, "InsurancesTable");
-            foreach (var ins in insurances)
-            {
-                if (vehicleMap.TryGetValue(ins.VehiclePlate, out VehicleRecord? v) && v != null)
-                    v.Insurances.Add(ins);
-            }
-        }
-
-        // 3. FuelCardsTable & FuelCompanyNamesTable (Sheet: Odometers)
-        dynamic? wsOdo = ResolveSheetSafely((object)wb, OdometerAliases, "Odometers");
-        if (wsOdo != null)
-        {
-            try { wsOdo.Unprotect("SKSB_Internal_Guard"); } catch { }
-            var fuelCards = ServerSyncCommands.FetchFuelCards();
-            TableMapper.PopulateTableSafe<FuelCardRecord>((object)wsOdo, "FuelCardsTable", fuelCards);
-
-            // Populate directly into FuelCompanyNamesTable using COM (works regardless of active sheet)
-            var fuelCompanies = ServerSyncCommands.FetchFuelCompanies();
-            var companyRecords = fuelCompanies.Select(name => new FuelCompanyNameRecord { FuelCompanyName = name }).ToList();
-            TableMapper.PopulateTableSafe<FuelCompanyNameRecord>((object)wsOdo, companyRecords, "FuelCompanyNamesTable", "FuelCompaniesTable");
-            SheetProtections.ApplyStyleDrivenProtection(wsOdo);
-        }
-    }
-
-    private static void PopulateChildTables(object wbObj, List<VehicleRecord> records)
-    {
-        dynamic wb = wbObj;
-
-        // 1. MaintenancesTable
-        dynamic? wsMaint = ResolveSheetSafely((object)wb, MaintenanceAliases, "Maintenances");
-        if (wsMaint != null)
-        {
-            try { wsMaint.Unprotect("SKSB_Internal_Guard"); } catch { }
-            var allMaintenances = records.SelectMany(v => v.Maintenances.Select(m =>
-            {
-                if (string.IsNullOrWhiteSpace(m.VehiclePlate)) m.VehiclePlate = v.VehiclePlate;
-                if (m.VehicleType == VehicleType.None) m.VehicleType = v.VehicleDetail.Type;
-                return m;
-            })).ToList();
-
-            TableMapper.PopulateTableSafe<Maintenance>((object)wsMaint, "MaintenancesTable", allMaintenances);
-            SheetProtections.ApplyStyleDrivenProtection(wsMaint);
-        }
-
-        // 2. RoadTaxesTable
-        dynamic? wsRt = ResolveSheetSafely((object)wb, RoadTaxAliases, "Road Taxes");
-        if (wsRt != null)
-        {
-            try { wsRt.Unprotect("SKSB_Internal_Guard"); } catch { }
-            var allRoadTaxes = records.SelectMany(v => v.RoadTaxes.Select(rt =>
-            {
-                if (string.IsNullOrWhiteSpace(rt.VehiclePlate)) rt.VehiclePlate = v.VehiclePlate;
-                if (rt.VehicleType == VehicleType.None) rt.VehicleType = v.VehicleDetail.Type;
-                return rt;
-            })).ToList();
-
-            TableMapper.PopulateTableSafe<RoadTax>((object)wsRt, "RoadTaxesTable", allRoadTaxes);
-            SheetProtections.ApplyStyleDrivenProtection(wsRt);
-        }
-
-        // 3. InspectionsTable
-        dynamic? wsInsp = ResolveSheetSafely((object)wb, InspectionAliases, "Inspections");
-        if (wsInsp != null)
-        {
-            try { wsInsp.Unprotect("SKSB_Internal_Guard"); } catch { }
-            var allInspections = records.SelectMany(v => v.Inspections.Select(insp =>
-            {
-                if (string.IsNullOrWhiteSpace(insp.VehiclePlate)) insp.VehiclePlate = v.VehiclePlate;
-                if (insp.VehicleType == VehicleType.None) insp.VehicleType = v.VehicleDetail.Type;
-                return insp;
-            })).ToList();
-
-            TableMapper.PopulateTableSafe<Inspection>((object)wsInsp, "InspectionsTable", allInspections);
-            SheetProtections.ApplyStyleDrivenProtection(wsInsp);
-        }
-
-        // 4. PermitsTable
-        dynamic? wsPermit = ResolveSheetSafely((object)wb, PermitAliases, "Permits");
-        if (wsPermit != null)
-        {
-            try { wsPermit.Unprotect("SKSB_Internal_Guard"); } catch { }
-            var allPermits = records.SelectMany(v => v.Permits.Select(p =>
-            {
-                if (string.IsNullOrWhiteSpace(p.VehiclePlate)) p.VehiclePlate = v.VehiclePlate;
-                if (p.VehicleType == VehicleType.None) p.VehicleType = v.VehicleDetail.Type;
-                return p;
-            })).ToList();
-
-            TableMapper.PopulateTableSafe<VehiclePermit>((object)wsPermit, "PermitsTable", allPermits);
-            SheetProtections.ApplyStyleDrivenProtection(wsPermit);
-        }
-
-        // 5. InsurancesTable
-        dynamic? wsIns = ResolveSheetSafely((object)wb, InsuranceAliases, "Insurances");
-        if (wsIns != null)
-        {
-            try { wsIns.Unprotect("SKSB_Internal_Guard"); } catch { }
-            var allInsurances = records.SelectMany(v => v.Insurances.Select(ins =>
-            {
-                if (string.IsNullOrWhiteSpace(ins.VehiclePlate)) ins.VehiclePlate = v.VehiclePlate;
-                if (ins.VehicleType == VehicleType.None) ins.VehicleType = v.VehicleDetail.Type;
-                return ins;
-            })).ToList();
-
-            TableMapper.PopulateTableSafe<VehicleInsurance>((object)wsIns, "InsurancesTable", allInsurances);
-            SheetProtections.ApplyStyleDrivenProtection(wsIns);
-        }
-
-        // 6. OdometersTable
-        dynamic? wsOdo = ResolveSheetSafely((object)wb, OdometerAliases, "Odometers");
-        if (wsOdo != null)
-        {
-            try { wsOdo.Unprotect("SKSB_Internal_Guard"); } catch { }
-            var allOdoLogs = records.SelectMany(v => v.OdometerLogs.Select(o =>
-            {
-                if (string.IsNullOrWhiteSpace(o.VehiclePlate)) o.VehiclePlate = v.VehiclePlate;
-                if (o.VehicleType == VehicleType.None) o.VehicleType = v.VehicleDetail.Type;
-                return o;
-            })).ToList();
-
-            TableMapper.PopulateTableSafe<OdometerLog>((object)wsOdo, "OdometersTable", allOdoLogs);
-            SheetProtections.ApplyStyleDrivenProtection(wsOdo);
-        }
-    }
-
-    private static void PopulateAuxiliaryTables(object wbObj)
-    {
-        dynamic wb = wbObj;
-
-        // 1. WorkshopsTable (Sheet: Workshops)
-        dynamic? wsWorkshop = ResolveSheetSafely((object)wb, WorkshopAliases, "Workshops");
-        if (wsWorkshop != null)
-        {
-            try { wsWorkshop.Unprotect("SKSB_Internal_Guard"); } catch { }
-            var workshops = ServerSyncCommands.FetchWorkshops();
-            TableMapper.PopulateTableSafe<Workshop>((object)wsWorkshop, "WorkshopsTable", workshops);
-            SheetProtections.ApplyStyleDrivenProtection(wsWorkshop);
-        }
-
-        // 2. InsuranceCompaniesTable (Sheet: Insurances)
-        dynamic? wsIns = ResolveSheetSafely((object)wb, InsuranceAliases, "Insurances");
-        if (wsIns != null)
-        {
-            try { wsIns.Unprotect("SKSB_Internal_Guard"); } catch { }
-            var insuranceCompanies = ServerSyncCommands.FetchInsuranceCompanies();
-            TableMapper.PopulateTableSafe<InsuranceCompanyRecord>((object)wsIns, "InsuranceCompaniesTable", insuranceCompanies);
-            SheetProtections.ApplyStyleDrivenProtection(wsIns);
-        }
-
-        // 3. FuelCardsTable & FuelCompanyNamesTable (Sheet: Odometers)
-        dynamic? wsOdo = ResolveSheetSafely((object)wb, OdometerAliases, "Odometers");
-        if (wsOdo != null)
-        {
-            try { wsOdo.Unprotect("SKSB_Internal_Guard"); } catch { }
-            var fuelCards = ServerSyncCommands.FetchFuelCards();
-            TableMapper.PopulateTableSafe<FuelCardRecord>((object)wsOdo, "FuelCardsTable", fuelCards);
-
-            var fuelCompanies = ServerSyncCommands.FetchFuelCompanies();
-            SheetMapperHelper.SyncReferenceTable((object)wb, "FuelCompanyNamesTable", "", fuelCompanies);
-            SheetProtections.ApplyStyleDrivenProtection(wsOdo);
-        }
-    }
-
+    // =========================================================================
+    // 3. SHARED UTILITIES
+    // =========================================================================
     internal static dynamic? ResolveSheetSafely(object wbObj, string[] aliases, string defaultName)
     {
         dynamic wb = wbObj;
@@ -368,6 +202,68 @@ internal static class SheetMapper
         return null;
     }
 
+    internal static string NormalizePlate(string plate) =>
+        Regex.Replace(plate ?? string.Empty, @"[\s_\-]+", "").ToUpperInvariant();
+
+    internal static string FormatPlate(string raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return string.Empty;
+        string clean = NormalizePlate(raw);
+        var m = Regex.Match(clean, @"^([A-Z]{1,3})(\d{1,4})([A-Z]?)$");
+        if (m.Success)
+        {
+            return $"{m.Groups[1].Value} {m.Groups[2].Value} {m.Groups[3].Value}".Trim();
+        }
+        return clean;
+    }
+
+    internal static T GetProp<T>(object target, params string[] propNames)
+    {
+        if (target == null) return default!;
+        Type type = target.GetType();
+        foreach (var name in propNames)
+        {
+            var p = type.GetProperty(name, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
+            if (p != null)
+            {
+                object? val = p.GetValue(target);
+                if (val != null)
+                {
+                    try { return (T)Convert.ChangeType(val, typeof(T)); }
+                    catch { }
+                }
+            }
+        }
+        return default!;
+    }
+
+    internal static void SetProp(object target, string propName, object? value)
+    {
+        if (target == null || value == null) return;
+        var p = target.GetType().GetProperty(propName, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
+        if (p != null && p.CanWrite)
+        {
+            try
+            {
+                Type uType = Nullable.GetUnderlyingType(p.PropertyType) ?? p.PropertyType;
+                if (uType == typeof(DateOnly) && value is DateTime dt)
+                    p.SetValue(target, DateOnly.FromDateTime(dt));
+                else if (uType == typeof(TimeOnly) && value is string st && TimeOnly.TryParse(st, out var to))
+                    p.SetValue(target, to);
+                else if (uType.IsEnum)
+                {
+                    if (Enum.TryParse(uType, value.ToString(), true, out var ev))
+                        p.SetValue(target, ev);
+                }
+                else
+                {
+                    p.SetValue(target, Convert.ChangeType(value, uType));
+                }
+            }
+            catch { }
+        }
+    }
+
 #if DEBUG
     private static void ShowPopulateDiagnostics(object wbObj, List<VehicleRecord> records)
     {
@@ -383,17 +279,9 @@ internal static class SheetMapper
 
             string[] inspectTables =
             {
-                "AllVehiclesTable",
-                "MaintenancesTable",
-                "WorkshopsTable",
-                "RoadTaxesTable",
-                "InspectionsTable",
-                "PermitsTable",
-                "InsurancesTable",
-                "InsuranceCompaniesTable",
-                "OdometersTable",
-                "FuelCardsTable",
-                "FuelCompanyNamesTable"
+                "AllVehiclesTable", "MaintenancesTable", "WorkshopsTable", "RoadTaxesTable",
+                "InspectionsTable", "PermitsTable", "InsurancesTable", "InsuranceCompaniesTable",
+                "OdometersTable", "FuelCardsTable", "FuelCompanyNamesTable"
             };
 
             foreach (var tName in inspectTables)

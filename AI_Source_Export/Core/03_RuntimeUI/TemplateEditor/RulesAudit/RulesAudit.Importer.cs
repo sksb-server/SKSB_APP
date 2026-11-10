@@ -14,7 +14,6 @@ using System.Text;
 using System.Text.RegularExpressions;
 using System.Windows.Forms;
 
-
 public static class RulesAuditImporter
 {
     [ExcelCommand(Name = "ImportTemplateRulesFromMarkdown")]
@@ -36,7 +35,6 @@ public static class RulesAuditImporter
             }
 
             string dataDir = FolderRegistry.Data.EnsureExists();
-
             using var openFileDialog = new OpenFileDialog
             {
                 Title = "Select Rules Audit Markdown File to Import",
@@ -49,7 +47,6 @@ public static class RulesAuditImporter
             };
 
             if (openFileDialog.ShowDialog() != DialogResult.OK) return;
-
             string selectedFilePath = openFileDialog.FileName;
             diag.AppendLine($"Source File: {selectedFilePath}");
 
@@ -78,9 +75,7 @@ public static class RulesAuditImporter
             int appliedHeaderCells = 0;
             int appliedRulesCount = 0;
             int appliedCfCount = 0;
-
             var clearedSheetsCf = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            var missedSheets = new List<string>();
 
             bool origAlerts = true;
             try { origAlerts = (bool)xlApp.DisplayAlerts; xlApp.DisplayAlerts = false; } catch { }
@@ -92,20 +87,11 @@ public static class RulesAuditImporter
                     string line = rawLine.Replace(@"\vert{}", "|").Trim();
                     if (string.IsNullOrWhiteSpace(line)) continue;
 
-                    if (line.StartsWith("## STYLES"))
-                    {
-                        readingHeaderCells = false;
-                        readingCols = false;
-                        readingCf = false;
-                        continue;
-                    }
-
                     if (line.StartsWith("## SHEET_HEADER_CELLS:"))
                     {
                         currentSheet = RulesAuditHelper.ExtractHeaderVal(line, "Sheet");
                         currentWs = RulesAuditHelper.ResolveSheetSafely(wb, currentSheet);
-                        if (currentWs == null) missedSheets.Add($"Sheet: {currentSheet}");
-                        else { try { currentWs.Activate(); } catch { } }
+                        if (currentWs != null) { try { currentWs.Activate(); } catch { } }
 
                         readingHeaderCells = true;
                         readingCols = false;
@@ -119,8 +105,7 @@ public static class RulesAuditImporter
                     {
                         currentSheet = RulesAuditHelper.ExtractHeaderVal(line, "Sheet");
                         currentWs = RulesAuditHelper.ResolveSheetSafely(wb, currentSheet);
-                        if (currentWs == null) missedSheets.Add($"Table Sheet: {currentSheet}");
-                        else { try { currentWs.Activate(); } catch { } }
+                        if (currentWs != null) { try { currentWs.Activate(); } catch { } }
 
                         int.TryParse(RulesAuditHelper.ExtractHeaderVal(line, "ArchetypeRow"), out archetypeRow);
                         readingHeaderCells = false;
@@ -154,20 +139,17 @@ public static class RulesAuditImporter
                         headerColMap = BuildHeaderMap(line);
                         continue;
                     }
-
-                    if (readingCols && line.StartsWith("|") && line.IndexOf("Header", StringComparison.OrdinalIgnoreCase) >= 0 && line.IndexOf("NumberFormat", StringComparison.OrdinalIgnoreCase) >= 0)
+                    if (readingCols && line.StartsWith("|") && line.IndexOf("Header", StringComparison.OrdinalIgnoreCase) >= 0 && line.IndexOf("EngineType", StringComparison.OrdinalIgnoreCase) >= 0)
                     {
                         tableColMap = BuildHeaderMap(line);
                         continue;
                     }
-
                     if (readingCf && line.StartsWith("|") && line.IndexOf("AppliesTo", StringComparison.OrdinalIgnoreCase) >= 0)
                     {
                         cfColMap = BuildHeaderMap(line);
                         continue;
                     }
-
-                    if (line.StartsWith("| :---") || line.StartsWith("| Col |") || line.StartsWith("| CellAddress |") || line.StartsWith("| AppliesTo |") || line.StartsWith("| StyleName |"))
+                    if (line.StartsWith("| :---") || line.StartsWith("| Col |") || line.StartsWith("| CellAddress |") || line.StartsWith("| AppliesTo |"))
                     {
                         continue;
                     }
@@ -198,20 +180,17 @@ public static class RulesAuditImporter
                                 Commands.EnsureNamedStyleExists(xlApp, styleName);
                                 targetCell.Style = styleName;
                             }
-
                             if (!string.IsNullOrWhiteSpace(inCellFormula) && inCellFormula.StartsWith("="))
                             {
                                 try { targetCell.Formula2 = inCellFormula; }
                                 catch { targetCell.Formula = inCellFormula; }
                             }
-
                             ApplyNumberFormatSafely(targetCell, numFormat);
 
                             if (!string.IsNullOrWhiteSpace(nativeType) && !string.IsNullOrWhiteSpace(sourceOrNative))
                             {
                                 ApplyNativeValidationSafely(wb, currentWs, targetCell, nativeType, nativeAlert, sourceOrNative, nativeIgnoreBlank, diag, cellAddress);
                             }
-
                             appliedHeaderCells++;
                         }
                         catch (Exception exHdr)
@@ -225,14 +204,14 @@ public static class RulesAuditImporter
                     {
                         string colLetter = GetField(cells, tableColMap, "Col", 1);
                         int explicitRow = int.TryParse(GetField(cells, tableColMap, "Row", 2), out int rNum) ? rNum : archetypeRow;
-                        string styleName = GetField(cells, tableColMap, "Style", 5);
-                        string numFormat = GetField(cells, tableColMap, "NumberFormat", 6);
-                        string engineType = GetField(cells, tableColMap, "Type", 7);
-                        string inCellFormula = GetField(cells, tableColMap, "InCellFormula", 8);
-                        string sourceList = GetField(cells, tableColMap, "SourceList", 9);
-                        string syncFormula = GetField(cells, tableColMap, "SyncFormula", 10);
-                        string filterExpr = GetField(cells, tableColMap, "FilterExpr", 11);
-                        string transformExpr = GetField(cells, tableColMap, "TransformExpr", 12);
+                        string styleName = GetField(cells, tableColMap, "Style", 4);
+                        string numFormat = GetField(cells, tableColMap, "NumberFormat", 5);
+                        string engineType = GetField(cells, tableColMap, "EngineType", 6);
+                        string inCellFormula = GetField(cells, tableColMap, "InCellFormula", 7);
+                        string sourceList = GetField(cells, tableColMap, "Sources", 8);
+                        string syncFormula = GetField(cells, tableColMap, "Syncs", 9);
+                        string transformExpr = GetField(cells, tableColMap, "Transform", 10);
+                        string defaultRule = GetField(cells, tableColMap, "DefaultRule", 11);
                         bool isMulti = GetField(cells, tableColMap, "IsMulti", 13).Equals("TRUE", StringComparison.OrdinalIgnoreCase);
                         bool isWarning = GetField(cells, tableColMap, "IsWarning", 14).Equals("TRUE", StringComparison.OrdinalIgnoreCase);
                         string nativeType = GetField(cells, tableColMap, "NativeType", 15);
@@ -244,19 +223,23 @@ public static class RulesAuditImporter
                         {
                             int colIndex = RulesAuditHelper.ColumnLetterToIndex(colLetter);
                             dynamic archetypeCell = currentWs.Cells[explicitRow, colIndex];
+
                             try { archetypeCell.Validation.Delete(); } catch { }
 
-                            bool isCustomDropdown = engineType.Equals("CustomDropdown", StringComparison.OrdinalIgnoreCase) || !string.IsNullOrWhiteSpace(sourceList);
-                            if (isCustomDropdown)
+                            // If this is a C# Attribute column, avoid injecting legacy metadata.
+                            if (engineType.Equals("CSharpAttribute", StringComparison.OrdinalIgnoreCase))
+                            {
+                                Metadata.PurgeConfigIfPresent(archetypeCell);
+                            }
+                            else if (engineType.Equals("LegacyDropdown", StringComparison.OrdinalIgnoreCase) || !string.IsNullOrWhiteSpace(sourceList))
                             {
                                 Commands.EnsureNamedStyleExists(xlApp, Commands.DropDownStyleName);
                                 archetypeCell.Style = Commands.DropDownStyleName;
-
                                 var cfg = new Config
                                 {
                                     Source = sourceList,
                                     SyncLeft = syncFormula,
-                                    Filter = filterExpr,
+                                    Filter = defaultRule,
                                     Transform = transformExpr,
                                     IsMultiSelect = isMulti,
                                     IsWarningOnly = isWarning
@@ -360,7 +343,7 @@ public static class RulesAuditImporter
                 $"  Configured Parameter Cells : {appliedHeaderCells}\n" +
                 $"  Applied Table Column Rules : {appliedRulesCount}\n" +
                 $"  Applied Conditional Rules  : {appliedCfCount}\n\n" +
-                "All rules, validations, dropdown formulas, and lightweight visual warnings are active.",
+                "All rules, validations, formulas, and visual warnings are active.",
                 "Import Complete",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Information
@@ -405,7 +388,6 @@ public static class RulesAuditImporter
             {
                 fmt = "General";
             }
-
             string currentFmt = rangeObj.NumberFormat?.ToString() ?? string.Empty;
             if (!string.Equals(currentFmt, fmt, StringComparison.OrdinalIgnoreCase))
             {
@@ -442,8 +424,8 @@ public static class RulesAuditImporter
             int xlValType = RulesAuditHelper.GetValidationTypeCode(nativeType);
             int xlAlert = string.Equals(nativeAlert, "Warning", StringComparison.OrdinalIgnoreCase) ? 2 : 1;
             string raw = (formula1 ?? string.Empty).Trim();
-            if (string.IsNullOrWhiteSpace(raw)) return;
 
+            if (string.IsNullOrWhiteSpace(raw)) return;
             string unequals = raw.TrimStart('=').Trim();
             if (string.IsNullOrWhiteSpace(unequals)) return;
 
@@ -459,7 +441,6 @@ public static class RulesAuditImporter
                         if (nm != null) exists = true;
                     }
                     catch { exists = false; }
-
                     if (!exists)
                     {
                         diag.AppendLine($"  [Validation Notice] {cellLabel}: Skipped List because Name '{unequals}' does not exist in Name Manager.");
@@ -477,7 +458,7 @@ public static class RulesAuditImporter
                 string numStr = double.TryParse(unequals, NumberStyles.Any, CultureInfo.InvariantCulture, out double dVal)
                      ? (dVal == 0 ? "0" : dVal.ToString(CultureInfo.InvariantCulture))
                      : "0";
-                int op = (numStr == "0") ? 7 : 5; // 7 = xlGreaterEqual (>= 0), 5 = xlGreater (> 0)
+                int op = (numStr == "0") ? 7 : 5;
                 cell.Validation.Add(Type: xlValType, AlertStyle: xlAlert, Operator: op, Formula1: numStr);
             }
             else if (xlValType == 4) // Date

@@ -2,7 +2,9 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using ExcelDna.Integration;
+using SKSB_App.Core.RuntimeUI.DateFilter;
 using SKSB_App.Core.RuntimeUI.DropDown;
 using SKSB_App.Core.Types;
 using SKSB_App.Core.WorkbookOpen.Entry;
@@ -33,7 +35,17 @@ public class Events : IExcelAddIn
         PopulateWorksheet = list => SheetMapper.PopulateWorksheet(list),
         FetchFromServer = () => ServerSyncCommands.FetchStaffRecords(),
         SyncLookups = isInteractive => SyncStaffLookupsData(isInteractive),
-        ValidateOfflinePayload = list => list.Count > 0 && list.TrueForAll(s => s.StaffID > 0)
+        ValidateOfflinePayload = list => list != null && list.Count > 0 && list.TrueForAll(s => s.StaffID > 0),
+        FormatConflictSummary = (local, server) =>
+        {
+            int localVLic = local.Sum(s => s.VehicleLicenses?.Count ?? 0);
+            int localSLic = local.Sum(s => s.SkillLicenses?.Count ?? 0);
+            int serverVLic = server.Sum(s => s.VehicleLicenses?.Count ?? 0);
+            int serverSLic = server.Sum(s => s.SkillLicenses?.Count ?? 0);
+
+            return $"  Local Offline : {local.Count} staff(s), {localVLic} vehicle license(s), {localSLic} skill license(s)\n" +
+                   $"  Server Copy   : {server.Count} staff(s), {serverVLic} vehicle license(s), {serverSLic} skill license(s)";
+        }
     };
 
     public void AutoOpen()
@@ -71,7 +83,23 @@ public class Events : IExcelAddIn
         {
             try
             {
-                DataList.SyncProperty<VehicleRecord, string>(v => v.VehiclePlate, customListName: "VehiclePlateList");
+                // 1. Sync Staff Manager Enums to 'Lookups' sheet
+                EnumList.Sync(
+                    typeof(Department),
+                    typeof(ContractStatus),
+                    typeof(VehicleLicenseClass),
+                    typeof(VehicleLicenseStatus),
+                    typeof(SkillLicenseStatus),
+                    typeof(DateFilterScope)
+                );
+
+                // 2. Sync external Vehicle Plates to 'Data' sheet
+                DataList.SyncProperty<VehicleRecord, string>(
+                    v => v.VehiclePlate,
+                    customListName: "VehiclePlateList"
+                );
+
+                // 3. Populate and sync SkillLicenseTypesTable & SkillLicenseTypeList
                 SheetMapper.PopulateSkillLicenseTypesTable(showDialogIfFailed: isInteractive);
             }
             catch (Exception ex)
@@ -95,19 +123,7 @@ public class Events : IExcelAddIn
             {
                 try
                 {
-                    bool isOurWorkbook = false;
-                    foreach (dynamic sh in wb.Sheets)
-                    {
-                        string sName = sh.Name?.ToString() ?? string.Empty;
-                        if (sName.Equals("All Staffs", StringComparison.OrdinalIgnoreCase) ||
-                            sName.Equals("All Staff", StringComparison.OrdinalIgnoreCase))
-                        {
-                            isOurWorkbook = true;
-                            break;
-                        }
-                    }
-
-                    if (!isOurWorkbook)
+                    if (ourWorkbook != null && wb != null && wb != ourWorkbook)
                     {
                         wb.Saved = true;
                         cancel = false;
@@ -176,7 +192,6 @@ public class Events : IExcelAddIn
     [ExcelCommand(Name = "DelayedAutoLoadMacro")]
     public static void DelayedAutoLoadMacro()
     {
-        if (!Guard.IsStaffWorkbook()) return;
         dynamic xlApp = ExcelDnaUtil.Application;
         try
         {
@@ -194,6 +209,12 @@ public class Events : IExcelAddIn
         {
             foreach (dynamic sheet in wb.Worksheets)
             {
+                string sName = sheet.Name?.ToString() ?? string.Empty;
+                if (sName.Equals(SheetOperations.LookupsSheetName, StringComparison.OrdinalIgnoreCase) ||
+                    sName.Equals(SheetOperations.DataSheetName, StringComparison.OrdinalIgnoreCase))
+                {
+                    continue;
+                }
                 SheetProtections.ApplyStyleDrivenProtection(sheet);
             }
 

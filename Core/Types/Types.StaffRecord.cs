@@ -113,7 +113,22 @@ public record StaffDetails
     [DataList("StaffShortNameList")]
     [ExcelColumn("Short Name")]
     [ColumnRule(IsRequired = false, IsWarningOnly = true, Transform = TransformKind.ShortNameFirstLast)]
-    public string StaffShortName { get; set; } = string.Empty;
+    public string StaffShortName
+    {
+        get
+        {
+            if (!string.IsNullOrWhiteSpace(_staffShortName)) return _staffShortName;
+
+            if (string.IsNullOrWhiteSpace(StaffName)) return string.Empty;
+
+            var parts = StaffName.Trim().Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+            if (parts.Length <= 1) return StaffName.Trim();
+
+            return $"{parts[0]} {parts[^1]}";
+        }
+        set => _staffShortName = value;
+    }
+    private string _staffShortName = string.Empty;
 
     [ExcelColumn("Department", isRequired: true)]
     [ColumnRule("DepartmentList", IsRequired = true)]

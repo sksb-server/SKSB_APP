@@ -2,7 +2,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 using ExcelDna.Integration;
@@ -27,6 +26,10 @@ public class EntityTableBlock
 
 public static class SyncHelper
 {
+    /// <summary>
+    /// Writes entity table blocks directly to targetSheet via COM without activating the sheet or moving the screen.
+    /// Performs live verification immediately after write.
+    /// </summary>
     public static void SyncEntityBlocks(string targetSheet, List<EntityTableBlock> blocks)
     {
         if (blocks == null || blocks.Count == 0) return;
@@ -38,99 +41,83 @@ public static class SyncHelper
             try
             {
                 dynamic xlApp = ExcelDnaUtil.Application;
-                string activeSheetBefore = GetActiveSheetName(xlApp);
-                AppLogger.Info($"[SyncEntityBlocks Start] Requested Target: '{targetSheet}' | Current ActiveSheet: '{activeSheetBefore}'");
+                dynamic wb = xlApp.ActiveWorkbook;
+                if (wb == null) return;
 
-                EnsureSheetExists(targetSheet);
-                MakeSheetVisibleAndActive(targetSheet);
+                string activeSheetBefore = xlApp.ActiveSheet?.Name?.ToString() ?? "Unknown";
+                AppLogger.Info($"[SyncEntityBlocks Start] Target: '{targetSheet}' | User ActiveSheet: '{activeSheetBefore}'");
 
-                string activeSheetAfterSelect = GetActiveSheetName(xlApp);
-                AppLogger.Info($"[SyncEntityBlocks Post-Select] ActiveSheet is now: '{activeSheetAfterSelect}'");
-
-                // =========================================================================
-                // SAFETY SHIELD: Abort immediately if Excel failed to switch to targetSheet!
-                // =========================================================================
-                if (!string.Equals(activeSheetAfterSelect, targetSheet, StringComparison.OrdinalIgnoreCase))
+                dynamic ws = EnsureSheetExistsCom(wb, targetSheet);
+                if (ws == null)
                 {
-                    AppLogger.Error($"CRITICAL SAFETY ABORT: Refusing to write! Target was '{targetSheet}', but Excel is focused on '{activeSheetAfterSelect}'. Writing here would destroy operational data!");
+                    AppLogger.Error($"[SYNC FAILED] Could not locate or create '{targetSheet}'");
                     return;
                 }
 
-                XlCall.Excel(XlCall.xlcEcho, false);
+                // 1. Clear operational area on targetSheet (Cols A..CW, Rows 1..2500) without activating or selecting
+                dynamic clearRange = ws.Range[ws.Cells[1, 1], ws.Cells[2500, 100]];
+                clearRange.ClearContents();
 
-                // Clean columns 0-100 across rows 0-2500
-                AppLogger.Info($"Wiping canvas on '{activeSheetAfterSelect}' (Cols 0..100, Rows 0..2500)...");
-                var totalWipeRef = new ExcelReference(0, 2500, 0, 100);
-                object[,] emptyCanvas = new object[2501, 101];
-                for (int r = 0; r <= 2500; r++)
-                    for (int c = 0; c <= 100; c++)
-                        emptyCanvas[r, c] = string.Empty;
-                totalWipeRef.SetValue(emptyCanvas);
+                int currentCol = 1; // 1-based COM index
+                int totalBlocksWritten = 0;
+                int totalColumnsWritten = 0;
 
-                int currentCol = 0;
                 foreach (var block in blocks)
                 {
                     int rowCount = block.RowCount;
                     int colCount = block.ColCount;
                     if (rowCount == 0 || colCount == 0) continue;
 
-                    AppLogger.Info($"Writing EntityBlock '{block.EntityName}' ({rowCount} rows x {colCount} cols) at start col {currentCol} on sheet '{activeSheetAfterSelect}'");
+                    AppLogger.Info($"Writing EntityBlock '{block.EntityName}' ({rowCount} rows x {colCount} cols) at Col {currentCol} on '{targetSheet}' (Silent COM)");
 
-                    // 1. Write Column Headers (Row 0)
+                    // A. Write Headers (Row 1)
                     object[,] headerGrid = new object[1, colCount];
                     for (int c = 0; c < colCount; c++)
                     {
                         headerGrid[0, c] = block.ColumnNames[c];
                     }
-                    var headerRef = new ExcelReference(0, 0, currentCol, currentCol + colCount - 1);
-                    headerRef.SetValue(headerGrid);
+                    dynamic headerRange = ws.Range[ws.Cells[1, currentCol], ws.Cells[1, currentCol + colCount - 1]];
+                    headerRange.Value2 = headerGrid;
 
-                    // 2. Write 2D Data Grid (Rows 1..rowCount)
-                    var dataRef = new ExcelReference(1, rowCount, currentCol, currentCol + colCount - 1);
-                    dataRef.SetValue(block.Grid);
+                    // B. Write 2D Data Grid (Rows 2..rowCount+1)
+                    dynamic dataRange = ws.Range[ws.Cells[2, currentCol], ws.Cells[rowCount + 1, currentCol + colCount - 1]];
+                    dataRange.Value2 = block.Grid;
 
-                    // 3. Register Defined Names
+                    // C. Register Defined Names
                     for (int c = 0; c < colCount; c++)
                     {
                         string listName = block.ColumnNames[c];
-                        try { XlCall.Excel(XlCall.xlcDeleteName, listName); } catch { }
-                        int r1c1StartRow = 2;
-                        int r1c1EndRow = rowCount + 1;
-                        int r1c1Col = currentCol + c + 1;
-                        string refersTo = $"='{targetSheet}'!R{r1c1StartRow}C{r1c1Col}:R{r1c1EndRow}C{r1c1Col}";
-                        XlCall.Excel(XlCall.xlcDefineName, listName, refersTo, 3);
+                        try { wb.Names.Item(listName).Delete(); } catch { }
+
+                        int r1 = 2;
+                        int r2 = rowCount + 1;
+                        int cPos = currentCol + c;
+                        string refersTo = $"='{targetSheet}'!R{r1}C{cPos}:R{r2}C{cPos}";
+                        wb.Names.Add(Name: listName, RefersToR1C1: refersTo, Visible: true);
                     }
 
                     currentCol += colCount + 1;
+                    totalBlocksWritten++;
+                    totalColumnsWritten += colCount;
                 }
 
-                SheetOperations.MoveAuxiliarySheetsToEnd();
+                // =========================================================================
+                // VERIFICATION: Check whether data was written and Named Ranges are valid
+                // =========================================================================
+                bool verifySuccess = VerifyEntityBlocks(wb, ws, blocks);
+                AppLogger.Info($"[SYNC VERIFICATION RESULT] EntityBlocks on '{targetSheet}': {(verifySuccess ? "SUCCESS" : "FAILED / PARTIAL")} (Blocks={totalBlocksWritten}, Cols={totalColumnsWritten})");
 
-                if (!SheetOperations.IsTemplateEditMode)
+                // Confirm active sheet never shifted
+                string activeSheetAfter = xlApp.ActiveSheet?.Name?.ToString() ?? "Unknown";
+                if (!string.Equals(activeSheetBefore, activeSheetAfter, StringComparison.OrdinalIgnoreCase))
                 {
-                    try
-                    {
-                        XlCall.Excel(XlCall.xlcWorkbookSelect, new object[] { targetSheet });
-                        XlCall.Excel(XlCall.xlcWorkbookHide);
-                    }
-                    catch { }
-                }
-
-                // Return focus to original sheet
-                if (!string.IsNullOrWhiteSpace(activeSheetBefore) &&
-                    !string.Equals(activeSheetBefore, targetSheet, StringComparison.OrdinalIgnoreCase))
-                {
-                    AppLogger.Info($"Restoring user view to original sheet: '{activeSheetBefore}'");
-                    try { XlCall.Excel(XlCall.xlcWorkbookSelect, new object[] { activeSheetBefore }); } catch { }
+                    AppLogger.Warn($"[VIEWPORT SHIFT DETECTED] ActiveSheet changed from '{activeSheetBefore}' to '{activeSheetAfter}'. Restoring focus...");
+                    try { wb.Sheets[activeSheetBefore].Activate(); } catch { }
                 }
             }
             catch (Exception ex)
             {
                 AppLogger.Error($"SyncEntityBlocks on '{targetSheet}' threw exception", ex);
-            }
-            finally
-            {
-                XlCall.Excel(XlCall.xlcEcho, true);
             }
         });
     }
@@ -175,6 +162,10 @@ public static class SyncHelper
         }
     }
 
+    /// <summary>
+    /// Writes list mappings directly to targetSheet via COM in the background.
+    /// Avoids activating the auxiliary sheet and runs verification immediately afterwards.
+    /// </summary>
     public static void SyncNamedLists(
         string targetSheet,
         Dictionary<string, string[]> mappings,
@@ -189,196 +180,205 @@ public static class SyncHelper
             try
             {
                 dynamic xlApp = ExcelDnaUtil.Application;
-                string activeSheetBefore = GetActiveSheetName(xlApp);
-                AppLogger.Info($"[SyncNamedLists Start] Requested Target: '{targetSheet}' | Current ActiveSheet: '{activeSheetBefore}'");
+                dynamic wb = xlApp.ActiveWorkbook;
+                if (wb == null) return;
 
-                EnsureSheetExists(targetSheet);
-                MakeSheetVisibleAndActive(targetSheet);
+                string activeSheetBefore = xlApp.ActiveSheet?.Name?.ToString() ?? "Unknown";
+                AppLogger.Info($"[SyncNamedLists Start] Target: '{targetSheet}' | User ActiveSheet: '{activeSheetBefore}'");
 
-                string activeSheetAfterSelect = GetActiveSheetName(xlApp);
-                AppLogger.Info($"[SyncNamedLists Post-Select] ActiveSheet is now: '{activeSheetAfterSelect}'");
-
-                // =========================================================================
-                // SAFETY SHIELD: Abort immediately if Excel failed to switch to targetSheet!
-                // =========================================================================
-                if (!string.Equals(activeSheetAfterSelect, targetSheet, StringComparison.OrdinalIgnoreCase))
+                dynamic ws = EnsureSheetExistsCom(wb, targetSheet);
+                if (ws == null)
                 {
-                    AppLogger.Error($"CRITICAL SAFETY ABORT: Refusing to write! Target was '{targetSheet}', but Excel is focused on '{activeSheetAfterSelect}'. Aborting write to protect '{activeSheetAfterSelect}'!");
+                    AppLogger.Error($"[SYNC FAILED] Could not locate or create '{targetSheet}'");
                     return;
                 }
 
-                XlCall.Excel(XlCall.xlcEcho, false);
+                // Inside SyncHelper.SyncNamedLists (Core\02_WorkbookOpen\Sync\Sync.Helper.cs),
+                // replace the foreach loop (lines 166-222) with:
+                int maxColsToScan = 200;
+                object[,]? headerRowGrid = null;
+                if (writeMode == WriteMode.SmartOrganize)
+                {
+                    try
+                    {
+                        headerRowGrid = ws.Range[ws.Cells[1, 1], ws.Cells[1, maxColsToScan]].Value2 as object[,];
+                    }
+                    catch { }
+                }
 
-                int colZero = 0;
+                int colOneBased = 1;
                 foreach (var (listName, values) in mappings)
                 {
-                    int targetCol = colZero;
+                    int targetCol = colOneBased;
+
                     if (writeMode == WriteMode.SmartOrganize)
                     {
-                        targetCol = -1;
-                        int maxColsToScan = 200;
-                        for (int c = 0; c < maxColsToScan; c += 2)
+                        targetCol = 0;
+                        for (int c = 1; c <= maxColsToScan; c += 2)
                         {
-                            var headerCell = new ExcelReference(0, 0, c, c);
-                            object? cellVal = headerCell.GetValue();
-                            string existingHeader = cellVal?.ToString()?.Trim() ?? string.Empty;
+                            string existingHeader = headerRowGrid != null
+                                ? (headerRowGrid[1, c]?.ToString()?.Trim() ?? string.Empty)
+                                : (ws.Cells[1, c].Value2?.ToString()?.Trim() ?? string.Empty);
+
                             if (string.Equals(existingHeader, listName, StringComparison.OrdinalIgnoreCase))
                             {
                                 targetCol = c;
                                 break;
                             }
-                            if (string.IsNullOrEmpty(existingHeader) && targetCol == -1)
+                            if (string.IsNullOrEmpty(existingHeader) && targetCol == 0)
                             {
                                 targetCol = c;
                             }
                         }
-                        if (targetCol == -1) targetCol = 0;
+                        if (targetCol == 0) targetCol = 1;
+                        if (headerRowGrid != null && targetCol <= maxColsToScan)
+                        {
+                            headerRowGrid[1, targetCol] = listName;
+                        }
                     }
 
                     int rowCount = values.Length;
-                    AppLogger.Info($"Writing list '{listName}' ({rowCount} items) to Col {targetCol} on '{activeSheetAfterSelect}'");
 
-                    var wipeRef = new ExcelReference(0, 2000, targetCol, targetCol);
-                    object[,] clearGrid = new object[2001, 1];
-                    for (int r = 0; r <= 2000; r++) clearGrid[r, 0] = string.Empty;
-                    wipeRef.SetValue(clearGrid);
+                    // Clear target column and write header + values in a single contiguous 2D array write
+                    dynamic wipeRange = ws.Range[ws.Cells[1, targetCol], ws.Cells[Math.Max(2000, rowCount + 10), targetCol]];
+                    wipeRange.ClearContents();
 
-                    var headerRef = new ExcelReference(0, 0, targetCol, targetCol);
-                    headerRef.SetValue(new object[,] { { listName } });
+                    object[,] colPayload = new object[rowCount + 1, 1];
+                    colPayload[0, 0] = listName;
+                    for (int i = 0; i < rowCount; i++)
+                    {
+                        string v = values[i];
+                        colPayload[i + 1, 0] = double.TryParse(v, NumberStyles.Any, CultureInfo.InvariantCulture, out double dVal)
+                            ? dVal
+                            : v;
+                    }
+
+                    dynamic writeRange = ws.Range[ws.Cells[1, targetCol], ws.Cells[rowCount + 1, targetCol]];
+                    writeRange.Value2 = colPayload;
 
                     if (rowCount > 0)
                     {
-                        var valRef = new ExcelReference(1, rowCount, targetCol, targetCol);
-                        object[,] cellData = new object[rowCount, 1];
-                        for (int i = 0; i < rowCount; i++)
-                        {
-                            string v = values[i];
-                            if (double.TryParse(v, NumberStyles.Any, CultureInfo.InvariantCulture, out double dVal))
-                                cellData[i, 0] = dVal;
-                            else
-                                cellData[i, 0] = v;
-                        }
-                        valRef.SetValue(cellData);
-
-                        try { XlCall.Excel(XlCall.xlcDeleteName, listName); } catch { }
-                        int r1c1StartRow = 2;
-                        int r1c1EndRow = rowCount + 1;
-                        int r1c1Col = targetCol + 1;
-                        string refersTo = $"='{targetSheet}'!R{r1c1StartRow}C{r1c1Col}:R{r1c1EndRow}C{r1c1Col}";
-                        XlCall.Excel(XlCall.xlcDefineName, listName, refersTo, 3);
+                        try { wb.Names.Item(listName).Delete(); } catch { }
+                        string refersTo = $"='{targetSheet}'!R2C{targetCol}:R{rowCount + 1}C{targetCol}";
+                        wb.Names.Add(Name: listName, RefersToR1C1: refersTo, Visible: true);
                     }
 
                     if (writeMode == WriteMode.SequentialReset)
                     {
-                        colZero += 2;
+                        colOneBased += 2;
                     }
                 }
 
-                SheetOperations.MoveAuxiliarySheetsToEnd();
+                // =========================================================================
+                // VERIFICATION: Check whether columns and Defined Names exist
+                // =========================================================================
+                bool verifySuccess = VerifyNamedLists(wb, ws, mappings);
+                AppLogger.Info($"[SYNC VERIFICATION RESULT] NamedLists on '{targetSheet}': {(verifySuccess ? "SUCCESS" : "FAILED / PARTIAL")} (Total Lists={mappings.Count})");
 
-                // Return focus to original sheet
-                if (!string.IsNullOrWhiteSpace(activeSheetBefore) &&
-                    !string.Equals(activeSheetBefore, targetSheet, StringComparison.OrdinalIgnoreCase))
+                // Confirm active sheet was not shifted
+                string activeSheetAfter = xlApp.ActiveSheet?.Name?.ToString() ?? "Unknown";
+                if (!string.Equals(activeSheetBefore, activeSheetAfter, StringComparison.OrdinalIgnoreCase))
                 {
-                    AppLogger.Info($"Restoring view to: '{activeSheetBefore}'");
-                    try { XlCall.Excel(XlCall.xlcWorkbookSelect, new object[] { activeSheetBefore }); } catch { }
+                    AppLogger.Warn($"[VIEWPORT SHIFT DETECTED] ActiveSheet changed from '{activeSheetBefore}' to '{activeSheetAfter}'. Restoring focus...");
+                    try { wb.Sheets[activeSheetBefore].Activate(); } catch { }
                 }
             }
             catch (Exception ex)
             {
                 AppLogger.Error($"SyncNamedLists on '{targetSheet}' threw exception", ex);
             }
-            finally
-            {
-                XlCall.Excel(XlCall.xlcEcho, true);
-            }
         });
     }
 
-    private static void MakeSheetVisibleAndActive(string sheetName)
+    private static dynamic EnsureSheetExistsCom(dynamic wb, string sheetName)
     {
         try
         {
-            dynamic xlApp = ExcelDnaUtil.Application;
-            dynamic ws = xlApp.ActiveWorkbook.Sheets[sheetName];
-            if (ws != null)
+            foreach (dynamic ws in wb.Sheets)
             {
-                ws.Visible = -1;
-                ws.Activate();
-                AppLogger.Info($"MakeSheetVisibleAndActive: Activated '{sheetName}' via COM.");
-                return;
+                if (string.Equals(ws.Name?.ToString(), sheetName, StringComparison.OrdinalIgnoreCase))
+                {
+                    return ws;
+                }
             }
-        }
-        catch { }
 
-        try
-        {
-            XlCall.Excel(XlCall.xlcWorkbookSelect, new object[] { sheetName });
-            AppLogger.Info($"MakeSheetVisibleAndActive: Selected '{sheetName}' via C-API.");
+            AppLogger.Info($"Sheet '{sheetName}' not found. Adding silently at the end...");
+            int count = (int)wb.Sheets.Count;
+            dynamic newWs = wb.Sheets.Add(After: wb.Sheets[count]);
+            newWs.Name = sheetName;
+            return newWs;
         }
         catch (Exception ex)
         {
-            AppLogger.Error($"MakeSheetVisibleAndActive failed for '{sheetName}'", ex);
+            AppLogger.Error($"EnsureSheetExistsCom('{sheetName}') error", ex);
+            return null!;
         }
     }
 
-    private static void EnsureSheetExists(string sheetName)
+    private static bool VerifyEntityBlocks(dynamic wb, dynamic ws, List<EntityTableBlock> blocks)
     {
         try
         {
-            object sheetsObj = XlCall.Excel(XlCall.xlfGetWorkbook, 1);
-            if (sheetsObj is object[,] sheetArray)
+            foreach (var block in blocks)
             {
-                int dim1 = sheetArray.GetLength(1);
-                for (int c = 0; c < dim1; c++)
+                if (block.RowCount == 0 || block.ColCount == 0) continue;
+
+                foreach (var colName in block.ColumnNames)
                 {
-                    string raw = sheetArray[0, c]?.ToString() ?? string.Empty;
-                    int bIdx = raw.LastIndexOf(']');
-                    string clean = bIdx >= 0 ? raw.Substring(bIdx + 1) : raw;
-                    if (string.Equals(clean, sheetName, StringComparison.OrdinalIgnoreCase))
+                    dynamic? nameObj = null;
+                    try { nameObj = wb.Names.Item(colName); } catch { }
+                    if (nameObj == null)
                     {
-                        return;
+                        AppLogger.Error($"[VERIFY FAILURE] Defined Name '{colName}' was not found in Workbook Names!");
+                        return false;
+                    }
+
+                    dynamic range = nameObj.RefersToRange;
+                    if (range == null || (int)range.Rows.Count != block.RowCount)
+                    {
+                        AppLogger.Error($"[VERIFY FAILURE] Name '{colName}' points to invalid range rows: Expected {block.RowCount}");
+                        return false;
                     }
                 }
             }
-        }
-        catch { }
-
-        try
-        {
-            AppLogger.Info($"Sheet '{sheetName}' not found. Creating new sheet...");
-            XlCall.Excel(XlCall.xlcWorkbookInsert, 1);
-            object docInfo = XlCall.Excel(XlCall.xlfGetDocument, 76);
-            string fullName = docInfo?.ToString() ?? string.Empty;
-            string tempName = fullName.Contains(']')
-                ? fullName.Substring(fullName.LastIndexOf(']') + 1)
-                : fullName;
-            XlCall.Excel(XlCall.xlcWorkbookName, tempName, sheetName);
+            return true;
         }
         catch (Exception ex)
         {
-            AppLogger.Error($"EnsureSheetExists failed creating '{sheetName}'", ex);
+            AppLogger.Error("VerifyEntityBlocks exception", ex);
+            return false;
         }
     }
 
-    private static string GetActiveSheetName(dynamic xlApp)
+    private static bool VerifyNamedLists(dynamic wb, dynamic ws, Dictionary<string, string[]> mappings)
     {
         try
         {
-            return xlApp?.ActiveSheet?.Name?.ToString() ?? string.Empty;
+            foreach (var (listName, values) in mappings)
+            {
+                if (values.Length == 0) continue;
+
+                dynamic? nameObj = null;
+                try { nameObj = wb.Names.Item(listName); } catch { }
+                if (nameObj == null)
+                {
+                    AppLogger.Error($"[VERIFY FAILURE] Defined Name '{listName}' was not created!");
+                    return false;
+                }
+
+                dynamic range = nameObj.RefersToRange;
+                if (range == null || (int)range.Rows.Count != values.Length)
+                {
+                    AppLogger.Error($"[VERIFY FAILURE] Defined Name '{listName}' row count mismatch: Expected {values.Length}");
+                    return false;
+                }
+            }
+            return true;
         }
-        catch
+        catch (Exception ex)
         {
-            try
-            {
-                object doc = XlCall.Excel(XlCall.xlfGetDocument, 76);
-                string raw = doc?.ToString() ?? string.Empty;
-                return raw.Contains(']') ? raw.Substring(raw.LastIndexOf(']') + 1) : raw;
-            }
-            catch
-            {
-                return "Unknown";
-            }
+            AppLogger.Error("VerifyNamedLists exception", ex);
+            return false;
         }
     }
 }

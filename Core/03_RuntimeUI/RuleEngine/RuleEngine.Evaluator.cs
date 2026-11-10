@@ -29,11 +29,15 @@ public static class RuleEvaluator
     /// 3) [ColumnDefault] auto-defaults on blank cells (once the row has user input)
     /// 4) [ColumnStateGuard] state enforcement (e.g. forcing "Expired" if date < Today, or reverting "Expired" to "Active" if dates are valid)
     /// </summary>
+    /// <summary>
+    /// Live self-healing row evaluation: runs on SheetChange and Dropdown selection.
+    /// </summary>
     public static List<string> EvaluateAndHealRow(
         dynamic worksheet,
         dynamic table,
         int excelRow,
-        int? editedAbsoluteCol = null)
+        int? editedAbsoluteCol = null,
+        bool isAlreadyUnprotected = false) // <-- Added parameter to prevent redundant unprotecting
     {
         var notices = new List<string>();
         if (_isEvaluating || worksheet == null || table == null) return notices;
@@ -56,7 +60,13 @@ public static class RuleEvaluator
 
                 if (excelRow <= headerRow) return notices;
 
-                // Map table columns: RelativeIndex (1..colCount) <-> Header & Rule
+                // Ignore anything outside the DataBodyRange (e.g. the Total Row)
+                dynamic? bodyRange = table.DataBodyRange;
+                if (bodyRange == null) return notices;
+                int bodyFirstRow = (int)bodyRange.Row;
+                int bodyLastRow = bodyFirstRow + (int)bodyRange.Rows.Count - 1;
+                if (excelRow < bodyFirstRow || excelRow > bodyLastRow) return notices;
+
                 var colHeaders = new string[colCount + 1];
                 var colRules = new PropertyRuleDescriptor?[colCount + 1];
                 var rowValues = new string[colCount + 1];
@@ -74,27 +84,34 @@ public static class RuleEvaluator
                     rowValues[c] = CleanCellText(valObj);
                 }
 
-                // Check if row has any user input at all; if completely blank, do not auto-default yet
                 bool rowHasUserInput = false;
                 for (int c = 1; c <= colCount; c++)
                 {
                     int absCol = startCol + c - 1;
                     string f = worksheet.Cells[excelRow, absCol].Formula?.ToString() ?? string.Empty;
                     if (f.StartsWith("=")) continue;
-                    if (!string.IsNullOrWhiteSpace(rowValues[c]))
-                    {
-                        rowHasUserInput = true;
-                        break;
-                    }
+
+                    string clean = rowValues[c];
+                    if (string.IsNullOrWhiteSpace(clean)) continue;
+                    if (clean == "0" || clean == "0.00" || clean == "-" || clean == "\u2014" ||
+                        clean.Equals("None", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    var rule = colRules[c];
+                    if (rule?.DefaultRule?.Kind == DefaultKind.Literal &&
+                        string.Equals(clean, rule.DefaultRule.LiteralValue, StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    rowHasUserInput = true;
+                    break;
                 }
 
                 if (!rowHasUserInput) return notices;
 
-                SheetProtections.ExecuteWithBypass((object)worksheet, new Action(() =>
+                // Extract the heal logic into an Action
+                Action healAction = new Action(() =>
                 {
-                    // =========================================================================
                     // STEP 1: Apply Transform & Explicit Sync from the Edited Column
-                    // =========================================================================
                     if (editedAbsoluteCol.HasValue)
                     {
                         int relEdited = editedAbsoluteCol.Value - startCol + 1;
@@ -102,7 +119,6 @@ public static class RuleEvaluator
                         {
                             var editedRule = colRules[relEdited];
                             string currentText = rowValues[relEdited];
-
                             if (editedRule != null && !string.IsNullOrWhiteSpace(currentText))
                             {
                                 string transformed = ApplyTextTransform(currentText, editedRule.Transform);
@@ -112,8 +128,6 @@ public static class RuleEvaluator
                                     rowValues[relEdited] = transformed;
                                     currentText = transformed;
                                 }
-
-                                // Execute [ColumnSync] rules for the edited column
                                 if (editedRule.SyncRules.Count > 0)
                                 {
                                     ExecuteSyncRulesForColumn(wb, worksheet, table, excelRow, startCol, colCount, colHeaders, colRules, rowValues, rawObjects, editedRule, currentText);
@@ -122,45 +136,44 @@ public static class RuleEvaluator
                         }
                     }
 
-                    // =========================================================================
-                    // STEP 2: Fill Missing Partner Syncs Across the Row (If One Side is Blank)
-                    // =========================================================================
+                    // STEP 2: Fill Missing Partner Syncs Across the Row
                     for (int c = 1; c <= colCount; c++)
                     {
                         var rule = colRules[c];
                         string val = rowValues[c];
-                        if (rule == null || string.IsNullOrWhiteSpace(val) || rule.SyncRules.Count == 0)
-                            continue;
+                        if (rule == null || string.IsNullOrWhiteSpace(val) || rule.SyncRules.Count == 0) continue;
 
                         foreach (var sync in rule.SyncRules)
                         {
                             int targetRelCol = FindColumnByHeader(colHeaders, sync.TargetHeader);
-                            if (targetRelCol >= 1 && string.IsNullOrWhiteSpace(rowValues[targetRelCol]))
+                            if (targetRelCol < 1) continue;
+
+                            var targetRule = colRules[targetRelCol];
+                            string currentTargetVal = rowValues[targetRelCol];
+                            string? lookedUp = RuleDataCache.LookupValue(wb, val, sync.LookupSource, sync.ResultSource);
+
+                            if (!string.IsNullOrWhiteSpace(lookedUp))
                             {
-                                string? lookedUp = RuleDataCache.LookupValue(wb, val, sync.LookupSource, sync.ResultSource);
-                                if (!string.IsNullOrWhiteSpace(lookedUp))
+                                bool isMismatch = !string.IsNullOrWhiteSpace(currentTargetVal) && !RuleDataCache.ValuesMatch(currentTargetVal, lookedUp);
+                                if (string.IsNullOrWhiteSpace(currentTargetVal) || (isMismatch && (targetRule?.IsWarningOnly ?? false)))
                                 {
                                     int targetAbsCol = startCol + targetRelCol - 1;
-                                    WriteCellSafe(worksheet.Cells[excelRow, targetAbsCol], lookedUp, colRules[targetRelCol]);
+                                    WriteCellSafe(worksheet.Cells[excelRow, targetAbsCol], lookedUp, targetRule);
                                     rowValues[targetRelCol] = lookedUp;
                                     rawObjects[targetRelCol] = lookedUp;
+                                    if (isMismatch) notices.Add($"Row {excelRow} [{colHeaders[targetRelCol]}]: Auto-corrected '{currentTargetVal}' to '{lookedUp}' based on {colHeaders[c]} '{val}'.");
                                 }
                             }
                         }
                     }
 
-                    // =========================================================================
-                    // STEP 3: Apply [ColumnDefault] to Empty Cells in Active Row
-                    // =========================================================================
+                    // STEP 3: Apply [ColumnDefault]
                     for (int c = 1; c <= colCount; c++)
                     {
                         int absCol = startCol + c - 1;
                         var rule = colRules[c];
-                        if (rule?.DefaultRule == null || rule.DefaultRule.Kind == DefaultKind.None)
-                            continue;
-
-                        if (!string.IsNullOrWhiteSpace(rowValues[c]))
-                            continue;
+                        if (rule?.DefaultRule == null || rule.DefaultRule.Kind == DefaultKind.None) continue;
+                        if (!string.IsNullOrWhiteSpace(rowValues[c])) continue;
 
                         string cellFormula = worksheet.Cells[excelRow, absCol].Formula?.ToString() ?? string.Empty;
                         if (cellFormula.StartsWith("=")) continue;
@@ -175,26 +188,20 @@ public static class RuleEvaluator
                         }
                     }
 
-                    // =========================================================================
-                    // STEP 4: Enforce Self-Healing [ColumnStateGuard] Rules (e.g. Status)
-                    // =========================================================================
+                    // STEP 4: Enforce [ColumnStateGuard]
                     for (int c = 1; c <= colCount; c++)
                     {
                         int absCol = startCol + c - 1;
                         var rule = colRules[c];
-                        if (rule == null || rule.StateGuards.Count == 0)
-                            continue;
+                        if (rule == null || rule.StateGuards.Count == 0) continue;
 
                         string currentVal = rowValues[c];
                         string? enforcedValue = EvaluateStateGuardsForCell(colHeaders, rawObjects, rowValues, rule, currentVal, out string? guardReason);
-
-                        if (!string.IsNullOrWhiteSpace(enforcedValue) &&
-                            !RuleDataCache.ValuesMatch(currentVal, enforcedValue))
+                        if (!string.IsNullOrWhiteSpace(enforcedValue) && !RuleDataCache.ValuesMatch(currentVal, enforcedValue))
                         {
                             WriteCellSafe(worksheet.Cells[excelRow, absCol], enforcedValue, rule);
                             rowValues[c] = enforcedValue;
                             rawObjects[c] = enforcedValue;
-
                             if (!string.IsNullOrWhiteSpace(guardReason))
                             {
                                 SheetOperations.ShowStatusConfirmation(guardReason);
@@ -202,7 +209,17 @@ public static class RuleEvaluator
                             }
                         }
                     }
-                }));
+                });
+
+                // EXECUTION: Use existing bypass if batching, otherwise unprotect single row
+                if (isAlreadyUnprotected)
+                {
+                    healAction();
+                }
+                else
+                {
+                    SheetProtections.ExecuteWithBypass((object)worksheet, healAction);
+                }
             }
             finally
             {
@@ -222,28 +239,272 @@ public static class RuleEvaluator
     }
 
     /// <summary>
-    /// Runs EvaluateAndHealRow across every populated row in a table (used prior to Save/Extraction).
+    /// Bulk in-memory table healing: reads headers, formulas, and body values in 3 COM calls total,
+    /// evaluates all rules in RAM with O(1) dictionary lookups, and writes back ONLY modified cells.
     /// </summary>
     public static List<string> EvaluateAndHealTable(dynamic worksheet, dynamic table)
     {
         var allNotices = new List<string>();
-        if (worksheet == null || table == null) return allNotices;
+        if (_isEvaluating || worksheet == null || table == null) return allNotices;
 
         try
         {
+            _isEvaluating = true;
             dynamic? body = table.DataBodyRange;
             if (body == null) return allNotices;
 
             int startRow = (int)body.Row;
             int rowCount = (int)body.Rows.Count;
+            int headerRow = (int)table.HeaderRowRange.Row;
+            int startCol = (int)table.HeaderRowRange.Column;
+            int colCount = (int)table.ListColumns.Count;
+            if (rowCount <= 0 || colCount <= 0) return allNotices;
 
-            for (int r = 0; r < rowCount; r++)
+            string tableName = table.Name?.ToString() ?? string.Empty;
+            dynamic wb = worksheet.Parent;
+
+            // 1. Bulk-read headers (1 COM call)
+            object[,] headerGrid = TableMapper.GetRange2DValues(table.HeaderRowRange, 1, colCount);
+            var colHeaders = new string[colCount + 1];
+            var colRules = new PropertyRuleDescriptor?[colCount + 1];
+
+            for (int c = 1; c <= colCount; c++)
             {
-                var rowNotices = EvaluateAndHealRow(worksheet, table, startRow + r, null);
-                allNotices.AddRange(rowNotices);
+                string h = headerGrid[1, c]?.ToString()?.Trim() ?? string.Empty;
+                colHeaders[c] = h;
+                colRules[c] = RuleRegistry.GetRule(tableName, h);
+            }
+
+            // 2. Bulk-read archetype formulas on first data row to identify formula columns (1 COM call)
+            var isFormulaCol = new bool[colCount + 1];
+            try
+            {
+                dynamic archRange = worksheet.Range[
+                    worksheet.Cells[startRow, startCol],
+                    worksheet.Cells[startRow, startCol + colCount - 1]
+                ];
+                object? rawFormulas = archRange.Formula;
+                if (rawFormulas is object[,] fMat)
+                {
+                    for (int c = 1; c <= colCount; c++)
+                    {
+                        string f = fMat[1, c]?.ToString() ?? string.Empty;
+                        isFormulaCol[c] = f.StartsWith("=");
+                    }
+                }
+                else if (rawFormulas is string singleF)
+                {
+                    isFormulaCol[1] = singleF.StartsWith("=");
+                }
+            }
+            catch { }
+
+            // 3. Bulk-read entire DataBodyRange into memory (1 COM call)
+            object[,] dataGrid = TableMapper.GetRange2DValues(body, rowCount, colCount);
+
+            // 4. Pre-build O(1) lookup dictionaries for all SyncRules on this table
+            var lookupDictCache = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
+            Dictionary<string, string> GetLookupMap(string lookupSrc, string resultSrc)
+            {
+                string cacheKey = $"{lookupSrc}||{resultSrc}";
+                if (!lookupDictCache.TryGetValue(cacheKey, out var map))
+                {
+                    map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                    var keys = RuleDataCache.GetSourceItems(wb, lookupSrc, preserveDuplicates: true);
+                    var vals = RuleDataCache.GetSourceItems(wb, resultSrc, preserveDuplicates: true);
+                    int len = Math.Min(keys.Count, vals.Count);
+                    for (int i = 0; i < len; i++)
+                    {
+                        string k = keys[i].Trim();
+                        if (!string.IsNullOrEmpty(k) && !map.ContainsKey(k))
+                        {
+                            map[k] = vals[i];
+                            string normKey = k.Replace(" ", "_");
+                            if (!map.ContainsKey(normKey)) map[normKey] = vals[i];
+                        }
+                    }
+                    lookupDictCache[cacheKey] = map;
+                }
+                return map;
+            }
+
+            // Pre-compute max AutoIncrement ID per column in memory (0 COM calls)
+            var maxAutoIdByCol = new long[colCount + 1];
+            for (int c = 1; c <= colCount; c++)
+            {
+                if (colRules[c]?.DefaultRule?.Kind == DefaultKind.AutoIncrement)
+                {
+                    long maxId = 0;
+                    for (int r = 1; r <= rowCount; r++)
+                    {
+                        string s = CleanCellText(dataGrid[r, c]);
+                        if (long.TryParse(s, NumberStyles.Any, CultureInfo.InvariantCulture, out long val) && val > maxId)
+                            maxId = val;
+                    }
+                    maxAutoIdByCol[c] = maxId;
+                }
+            }
+
+            // Track dirty cells to write back only what changed
+            var dirtyWrites = new List<(int ExcelRow, int AbsCol, object Value, PropertyRuleDescriptor? Rule)>();
+
+            // 5. Pure In-Memory Row Healing Loop
+            for (int r = 1; r <= rowCount; r++)
+            {
+                int excelRow = startRow + r - 1;
+                var rowValues = new string[colCount + 1];
+                var rawObjects = new object?[colCount + 1];
+                bool rowHasUserInput = false;
+                for (int c = 1; c <= colCount; c++)
+                {
+                    object? valObj = dataGrid[r, c];
+                    rawObjects[c] = valObj;
+                    string clean = CleanCellText(valObj);
+                    rowValues[c] = clean;
+
+                    if (isFormulaCol[c] || string.IsNullOrWhiteSpace(clean)) continue;
+                    if (clean == "0" || clean == "0.00" || clean == "-" || clean == "\u2014" ||
+                        clean.Equals("None", StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    var rule = colRules[c];
+                    if (rule?.DefaultRule?.Kind == DefaultKind.Literal &&
+                        string.Equals(clean, rule.DefaultRule.LiteralValue, StringComparison.OrdinalIgnoreCase))
+                        continue;
+
+                    rowHasUserInput = true;
+                }
+
+                if (!rowHasUserInput) continue;
+
+                // STEP 0: Apply [ColumnRule(Transform = ...)] in memory
+                for (int c = 1; c <= colCount; c++)
+                {
+                    var rule = colRules[c];
+                    string val = rowValues[c];
+                    if (isFormulaCol[c] || rule == null || rule.Transform == TransformKind.None || string.IsNullOrWhiteSpace(val))
+                        continue;
+
+                    string transformed = ApplyTextTransform(val, rule.Transform);
+                    if (!string.Equals(val, transformed, StringComparison.Ordinal))
+                    {
+                        dirtyWrites.Add((excelRow, startCol + c - 1, transformed, rule));
+                        rowValues[c] = transformed;
+                        rawObjects[c] = transformed;
+                    }
+                }
+
+                // STEP A: Fill Missing Partner Syncs Across the Row
+                for (int c = 1; c <= colCount; c++)
+                {
+                    var rule = colRules[c];
+                    string val = rowValues[c];
+                    if (rule == null || string.IsNullOrWhiteSpace(val) || rule.SyncRules.Count == 0) continue;
+
+                    foreach (var sync in rule.SyncRules)
+                    {
+                        int targetRelCol = FindColumnByHeader(colHeaders, sync.TargetHeader);
+                        if (targetRelCol < 1 || isFormulaCol[targetRelCol]) continue;
+
+                        var targetRule = colRules[targetRelCol];
+                        string currentTargetVal = rowValues[targetRelCol];
+
+                        var map = GetLookupMap(sync.LookupSource, sync.ResultSource);
+                        if (!map.TryGetValue(val.Trim(), out string? lookedUp))
+                            map.TryGetValue(val.Trim().Replace(" ", "_"), out lookedUp);
+
+                        if (!string.IsNullOrWhiteSpace(lookedUp))
+                        {
+                            bool isMismatch = !string.IsNullOrWhiteSpace(currentTargetVal) &&
+                                              !RuleDataCache.ValuesMatch(currentTargetVal, lookedUp);
+
+                            if (string.IsNullOrWhiteSpace(currentTargetVal) || (isMismatch && (targetRule?.IsWarningOnly ?? false)))
+                            {
+                                dirtyWrites.Add((excelRow, startCol + targetRelCol - 1, lookedUp, targetRule));
+                                rowValues[targetRelCol] = lookedUp;
+                                rawObjects[targetRelCol] = lookedUp;
+                                if (isMismatch)
+                                {
+                                    allNotices.Add($"Row {excelRow} [{colHeaders[targetRelCol]}]: Auto-corrected '{currentTargetVal}' to '{lookedUp}' based on {colHeaders[c]} '{val}'.");
+                                }
+                            }
+                        }
+                    }
+                }
+
+                // STEP B: Apply [ColumnDefault] in memory
+                for (int c = 1; c <= colCount; c++)
+                {
+                    var rule = colRules[c];
+                    if (isFormulaCol[c] || rule?.DefaultRule == null || rule.DefaultRule.Kind == DefaultKind.None) continue;
+                    if (!string.IsNullOrWhiteSpace(rowValues[c])) continue;
+
+                    object? defaultVal = rule.DefaultRule.Kind == DefaultKind.AutoIncrement
+                        ? ++maxAutoIdByCol[c]
+                        : ComputeDefaultValue(wb, table, c, colHeaders, rawObjects, rowValues, rule.DefaultRule);
+
+                    if (defaultVal != null)
+                    {
+                        dirtyWrites.Add((excelRow, startCol + c - 1, defaultVal, rule));
+                        rawObjects[c] = defaultVal;
+                        rowValues[c] = FormatDisplayValue(defaultVal, rule);
+                        allNotices.Add($"Row {excelRow} [{colHeaders[c]}]: Defaulted to '{rowValues[c]}'.");
+                    }
+                }
+
+                // STEP C: Enforce [ColumnStateGuard] in memory
+                for (int c = 1; c <= colCount; c++)
+                {
+                    var rule = colRules[c];
+                    if (isFormulaCol[c] || rule == null || rule.StateGuards.Count == 0) continue;
+
+                    string currentVal = rowValues[c];
+                    string? enforcedValue = EvaluateStateGuardsForCell(colHeaders, rawObjects, rowValues, rule, currentVal, out string? guardReason);
+
+                    if (!string.IsNullOrWhiteSpace(enforcedValue) && !RuleDataCache.ValuesMatch(currentVal, enforcedValue))
+                    {
+                        dirtyWrites.Add((excelRow, startCol + c - 1, enforcedValue, rule));
+                        rowValues[c] = enforcedValue;
+                        rawObjects[c] = enforcedValue;
+                        if (!string.IsNullOrWhiteSpace(guardReason))
+                        {
+                            allNotices.Add($"Row {excelRow} [{colHeaders[c]}]: {guardReason}");
+                        }
+                    }
+                }
+            }
+
+            // 6. Write to Excel ONLY if at least one cell was actually healed
+            if (dirtyWrites.Count > 0)
+            {
+                dynamic xlApp = ExcelDnaUtil.Application;
+                bool origEvents = true;
+                try { origEvents = (bool)xlApp.EnableEvents; xlApp.EnableEvents = false; } catch { }
+
+                // Lift any legacy sheet protection; it is never re-applied.
+                if (SheetProtections.IsProtected(worksheet)) SheetProtections.Unprotect(worksheet);
+
+                try
+                {
+                    foreach (var (excelRow, absCol, val, rule) in dirtyWrites)
+                    {
+                        WriteCellSafe(worksheet.Cells[excelRow, absCol], val, rule);
+                    }
+                }
+                finally
+                {
+                    try { xlApp.EnableEvents = origEvents; } catch { }
+                }
             }
         }
-        catch { }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[RuleEvaluator.EvaluateAndHealTable Error] {ex.Message}");
+        }
+        finally
+        {
+            _isEvaluating = false;
+        }
 
         return allNotices;
     }
@@ -547,6 +808,12 @@ public static class RuleEvaluator
 
         foreach (var guard in rule.StateGuards)
         {
+            if (!string.IsNullOrWhiteSpace(guard.SkipIfCurrentEquals) &&
+            RuleDataCache.ValuesMatch(currentVal, guard.SkipIfCurrentEquals))
+            {
+                return null; // Keeps currentVal exactly as it is (e.g., "Reserved" or "Decommissioned")
+            }
+
             bool condTrue = EvaluateCondition(guard.Condition, guard.ReferenceHeaders, guard.ExpectedValue, colHeaders, rawObjects, rowValues);
             if (condTrue)
             {
@@ -578,7 +845,8 @@ public static class RuleEvaluator
         string? expectedValue,
         string[] colHeaders,
         object?[] rawObjects,
-        string[] rowValues)
+        string[] rowValues,
+        string? currentCellVal = null)
     {
         if (referenceHeaders == null || referenceHeaders.Length == 0) return false;
         DateOnly today = DateOnly.FromDateTime(DateTime.Today);
@@ -606,6 +874,15 @@ public static class RuleEvaluator
                 case StateConditionKind.ColumnEquals:
                     if (RuleDataCache.ValuesMatch(str, expectedValue))
                         return true;
+                    break;
+
+                case StateConditionKind.DateGreaterThan:
+                    if (RuleDataCache.TryParseDate(currentCellVal, out DateOnly thisDate) &&
+                        RuleDataCache.TryParseDate(str, out DateOnly refDate))
+                    {
+                        if (refDate >= thisDate)
+                            return true;
+                    }
                     break;
             }
         }

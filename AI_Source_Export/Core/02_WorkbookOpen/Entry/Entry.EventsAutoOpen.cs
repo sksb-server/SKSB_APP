@@ -1,6 +1,7 @@
 ﻿namespace SKSB_App.Core.WorkbookOpen.Entry;
 
 using System;
+using System.Diagnostics;
 using ExcelDna.Integration;
 using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.RuntimeUI.DropDown;
@@ -14,25 +15,26 @@ using DropDownCommands = SKSB_App.Core.RuntimeUI.DropDown.Commands;
 public class EventsAutoOpen : IExcelAddIn
 {
     private static dynamic? _xlAppRoot;
-
     private delegate void SheetDoubleClickDelegate(dynamic sh, dynamic target, ref bool cancel);
     private delegate void SheetSelectionChangeDelegate(dynamic sh, dynamic target);
     private delegate void SheetChangeDelegate(dynamic sh, dynamic target);
+    private delegate void SheetActivateDelegate(dynamic sh);
 
     private static SheetDoubleClickDelegate? _doubleClickHandler;
     private static SheetSelectionChangeDelegate? _selectionHandler;
     private static SheetChangeDelegate? _changeHandler;
+    private static SheetActivateDelegate? _activateHandler;
 
-    // Cross-ALC process-wide state keys so Core-AddIn and Manager-AddIn never duplicate work
     private static string HookedPidKey => $"SKSB_EVENTS_HOOKED_{Environment.ProcessId}";
     private static string LastCheckedWorkbookKey => $"SKSB_LAST_CHECKED_WB_{Environment.ProcessId}";
     private static string LastTemplateModeKey => $"SKSB_TEMPLATE_MODE_{Environment.ProcessId}";
 
     public void AutoOpen()
     {
+        Dapper.DefaultTypeMap.MatchNamesWithUnderscores = true;
+
         RuleRegistry.EnsureInitialized();
 
-        // If another add-in (e.g. Core-AddIn-packed.xll) already hooked COM sheet events in this process, do not double-hook!
         if (Environment.GetEnvironmentVariable(HookedPidKey) == "1")
         {
             AppLogger.Info($"[Coexistence] Core COM events already active in PID {Environment.ProcessId} (XLL: {ExcelDnaUtil.XllPath}).");
@@ -61,7 +63,7 @@ public class EventsAutoOpen : IExcelAddIn
             try
             {
                 double nowSerial = Convert.ToDouble(XlCall.Excel(XlCall.xlfNow));
-                XlCall.Excel(XlCall.xlcOnTime, nowSerial + (1.0 / 86400.0), "DelayedTemplateCheckMacro");
+                XlCall.Excel(XlCall.xlcOnTime, nowSerial + (3.0 / 86400.0), "DelayedTemplateCheckMacro");
             }
             catch (Exception ex)
             {
@@ -75,7 +77,7 @@ public class EventsAutoOpen : IExcelAddIn
         AppLogger.Info("EventsAutoOpen.AutoClose triggered.");
         Environment.SetEnvironmentVariable(HookedPidKey, null);
         Environment.SetEnvironmentVariable(LastCheckedWorkbookKey, null);
-        Arrow.HideAll();
+        Arrow.Teardown();
         UnEventHooks();
     }
 
@@ -85,7 +87,6 @@ public class EventsAutoOpen : IExcelAddIn
         try
         {
             RuleRegistry.EnsureInitialized();
-
             dynamic xlApp = ExcelDnaUtil.Application;
             dynamic? wb = null;
             try { wb = xlApp?.ActiveWorkbook; } catch { }
@@ -93,8 +94,6 @@ public class EventsAutoOpen : IExcelAddIn
 
             string wbName = wb.Name?.ToString() ?? "Workbook";
             string? alreadyCheckedWb = Environment.GetEnvironmentVariable(LastCheckedWorkbookKey);
-
-            // Cross-ALC guard: If DelayedTemplateCheckMacro already ran for this workbook, skip!
             if (string.Equals(alreadyCheckedWb, wbName, StringComparison.OrdinalIgnoreCase))
             {
                 AppLogger.Info($"[Coexistence] DelayedTemplateCheckMacro already completed for '{wbName}', skipping duplicate run.");
@@ -104,26 +103,49 @@ public class EventsAutoOpen : IExcelAddIn
 
             using var _ = AppLogger.Scope($"DelayedTemplateCheckMacro({wbName})");
 
+            dynamic? activeSheetBefore = xlApp.ActiveSheet;
+            string activeSheetName = activeSheetBefore?.Name?.ToString() ?? string.Empty;
+
             bool isTemplate = SheetOperations.IsMasterTemplateFile();
             SheetOperations.IsTemplateEditMode = isTemplate;
             Environment.SetEnvironmentVariable(LastTemplateModeKey, isTemplate ? "1" : "0");
-
             AppLogger.Info($"Workbook='{wbName}', IsMasterTemplateFile={isTemplate}");
 
-            // Clamp any runaway 1000-row tables before styling
-            SheetMapperHelper.ClampAllTablesToActualData(wb);
-            RuleRegistry.ApplyDropdownStylesToWorkbook(wb);
+            bool origUpdating = true;
+            bool origEvents = true;
+            try { origUpdating = (bool)xlApp.ScreenUpdating; xlApp.ScreenUpdating = false; } catch { }
+            try { origEvents = (bool)xlApp.EnableEvents; xlApp.EnableEvents = false; } catch { }
 
-            if (isTemplate)
+            try
             {
-                SheetOperations.SetAuxiliarySheetsVisibility(visible: true);
-                EnumList.SyncAllCoreEnums();
-                DataList.SyncAllTemplateData();
-                SKSB_App.Core.RuntimeUI.TemplateEditor.RibbonController.RefreshRibbonUI();
+                SheetMapperHelper.ClampAllTablesToActualData(wb);
+                RuleRegistry.ApplyDropdownStylesToWorkbook(wb);
+
+                if (isTemplate)
+                {
+                    SheetOperations.SetAuxiliarySheetsVisibility(visible: true);
+                    EnumList.SyncAllCoreEnums();
+                    DataList.SyncAllTemplateData();
+                    SKSB_App.Core.RuntimeUI.TemplateEditor.RibbonController.RefreshRibbonUI();
+                }
+                else
+                {
+                    SheetOperations.SetAuxiliarySheetsVisibility(visible: false);
+                }
             }
-            else
+            finally
             {
-                SheetOperations.SetAuxiliarySheetsVisibility(visible: false);
+                if (activeSheetBefore != null && !string.IsNullOrEmpty(activeSheetName))
+                {
+                    if (!activeSheetName.Equals(SheetOperations.LookupsSheetName, StringComparison.OrdinalIgnoreCase) &&
+                        !activeSheetName.Equals(SheetOperations.DataSheetName, StringComparison.OrdinalIgnoreCase))
+                    {
+                        try { activeSheetBefore.Activate(); } catch { }
+                    }
+                }
+
+                try { xlApp.EnableEvents = origEvents; } catch { }
+                try { xlApp.ScreenUpdating = origUpdating; } catch { }
             }
         }
         catch (Exception ex)
@@ -137,13 +159,11 @@ public class EventsAutoOpen : IExcelAddIn
     {
         try
         {
-            // Do not run until initial DelayedTemplateCheckMacro has completed
             if (string.IsNullOrEmpty(Environment.GetEnvironmentVariable(LastCheckedWorkbookKey)))
                 return;
 
             bool isTemplate = SheetOperations.IsMasterTemplateFile();
             bool prevMode = Environment.GetEnvironmentVariable(LastTemplateModeKey) == "1";
-
             SheetOperations.IsTemplateEditMode = isTemplate;
 
             if (prevMode != isTemplate)
@@ -165,20 +185,30 @@ public class EventsAutoOpen : IExcelAddIn
         try
         {
             if (_xlAppRoot != null) return;
-
             dynamic xlApp = ExcelDnaUtil.Application;
             _xlAppRoot = xlApp;
+
+#if DEBUG
+            // DIAGNOSTIC 1: Intercept all sheet activations with stack trace
+            _activateHandler = new SheetActivateDelegate(sh =>
+            {
+                string sName = sh?.Name?.ToString() ?? "Unknown";
+                AppLogger.Warn($"[SHEET ACTIVATION DETECTED] Switched active tab to: '{sName}'\nStack:\n{new StackTrace(1, true)}");
+            });
+            _xlAppRoot.SheetActivate += _activateHandler;
+#endif
+
+            // DIAGNOSTIC 2: Intercept all selection changes to pinpoint horizontal viewport scrolling
+            _selectionHandler = new SheetSelectionChangeDelegate(OnSheetSelectionChange);
+            _xlAppRoot.SheetSelectionChange += _selectionHandler;
 
             _doubleClickHandler = new SheetDoubleClickDelegate(OnSheetBeforeDoubleClick);
             _xlAppRoot.SheetBeforeDoubleClick += _doubleClickHandler;
 
-            _selectionHandler = new SheetSelectionChangeDelegate(OnSheetSelectionChange);
-            _xlAppRoot.SheetSelectionChange += _selectionHandler;
-
             _changeHandler = new SheetChangeDelegate(OnSheetChange);
             _xlAppRoot.SheetChange += _changeHandler;
 
-            AppLogger.Info("Application Sheet Events hooked successfully.");
+            AppLogger.Info("Application Sheet Events hooked successfully with full navigation diagnostics.");
         }
         catch (Exception ex)
         {
@@ -192,6 +222,7 @@ public class EventsAutoOpen : IExcelAddIn
         {
             if (_xlAppRoot != null)
             {
+                if (_activateHandler != null) { _xlAppRoot.SheetActivate -= _activateHandler; _activateHandler = null; }
                 if (_doubleClickHandler != null) { _xlAppRoot.SheetBeforeDoubleClick -= _doubleClickHandler; _doubleClickHandler = null; }
                 if (_selectionHandler != null) { _xlAppRoot.SheetSelectionChange -= _selectionHandler; _selectionHandler = null; }
                 if (_changeHandler != null) { _xlAppRoot.SheetChange -= _changeHandler; _changeHandler = null; }
@@ -209,6 +240,16 @@ public class EventsAutoOpen : IExcelAddIn
             return;
         }
 
+        string sheetName = sh?.Name?.ToString() ?? "Sheet";
+        string addr = target.Address?.ToString() ?? "Unknown";
+        int col = (int)target.Column;
+        int row = (int)target.Row;
+
+#if DEBUG
+        // Log selection changes to capture horizontal panning
+        AppLogger.Info($"[SELECTION CHANGE] Sheet='{sheetName}', Range={addr}, Col={col}, Row={row}");
+#endif
+
         dynamic singleCell = target.Cells[1, 1];
         if (DropDownCommands.IsDropdownCell(singleCell))
         {
@@ -223,7 +264,45 @@ public class EventsAutoOpen : IExcelAddIn
     {
         try
         {
-            if (target == null || target.Cells.Count > 1) return;
+            if (target == null) return;
+
+            if (SheetOperations.IsTemplateEditMode)
+            {
+                return;
+            }
+
+            // 1. Guard Table Headers from modification
+            dynamic xlApp = ExcelDnaUtil.Application;
+            bool hitProtectedStructure = false;
+            try
+            {
+                foreach (dynamic tbl in sh.ListObjects)
+                {
+                    if (xlApp.Intersect(target, tbl.HeaderRowRange) != null)
+                    {
+                        hitProtectedStructure = true;
+                        break;
+                    }
+                }
+            }
+            catch { }
+
+            if (hitProtectedStructure)
+            {
+                bool origEvents = true;
+                try { origEvents = (bool)xlApp.EnableEvents; xlApp.EnableEvents = false; } catch { }
+                try { xlApp.Undo(); } catch { }
+                try { xlApp.EnableEvents = origEvents; } catch { }
+                SheetOperations.ShowStatusConfirmation("Table headers are protected to allow sorting and cannot be modified.");
+                return;
+            }
+
+            // 2. Handle Multi-Cell Deletes (e.g., selecting an entire row and hitting Delete)
+            if (target.Cells.Count > 1)
+            {
+                TableRowManager.HandleSheetChange(target);
+                return;
+            }
 
             dynamic singleCell = target.Cells[1, 1];
             string sheetName = sh?.Name?.ToString() ?? "Sheet";

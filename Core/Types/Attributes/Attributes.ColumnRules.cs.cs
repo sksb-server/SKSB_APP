@@ -31,7 +31,8 @@ public enum StateConditionKind
     None,
     DateExpired,        // True if ANY ReferenceHeaders date < Today
     ColumnNotEmpty,     // True if ANY ReferenceHeaders cell is not blank (e.g. Sold Date != "")
-    ColumnEquals        // True if ReferenceHeaders cell equals ExpectedValue
+    ColumnEquals,       // True if ReferenceHeaders cell equals ExpectedValue
+    DateGreaterThan
 }
 
 public enum TransformKind
@@ -124,6 +125,7 @@ public sealed class ColumnStateGuardAttribute : Attribute
     public bool DisallowForcedValueWhenFalse { get; set; } = true;
     public string FallbackValueWhenFalse { get; set; } = "Active";
     public string? ExpectedValue { get; set; }
+    public string? SkipIfCurrentEquals { get; set; }
 
     public ColumnStateGuardAttribute(
         int priority,
@@ -137,5 +139,19 @@ public sealed class ColumnStateGuardAttribute : Attribute
         ForcedValueWhenTrue = forcedValueWhenTrue;
         FallbackValueWhenFalse = fallbackValueWhenFalse;
         ReferenceHeaders = referenceHeaders ?? Array.Empty<string>();
+    }
+}
+
+/// <summary>
+/// Enforces that a date column must be strictly greater (later) than a referenced date column.
+/// </summary>
+[AttributeUsage(AttributeTargets.Property, AllowMultiple = false, Inherited = true)]
+public sealed class ColumnDateGreaterThanAttribute : Attribute
+{
+    public string ReferenceHeader { get; }
+
+    public ColumnDateGreaterThanAttribute(string referenceHeader)
+    {
+        ReferenceHeader = referenceHeader;
     }
 }

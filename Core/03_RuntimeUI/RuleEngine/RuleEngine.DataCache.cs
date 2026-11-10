@@ -10,9 +10,9 @@ using SKSB_App.Core.WorkbookSave.SheetMapper;
 public static class RuleDataCache
 {
     private static readonly string[] RecognizedDatePatterns =
-    {
-        "yyyy-MM-dd", "yyyy/MM/dd", "dd/MM/yyyy", "d/M/yyyy", "dd-MM-yyyy", "d-M-yyyy", "M/d/yyyy"
-    };
+{
+    "yyyy-MM-dd", "yyyy/MM/dd", "dd/MM/yyyy", "d/M/yyyy", "dd-MM-yyyy", "d-M-yyyy", "MM/dd/yyyy", "M/d/yyyy"
+};
 
     /// <summary>
     /// Extracts clean string values from a source expression (either "TableName[ColName]" or a Defined Name like "VehicleTypeList").
@@ -26,39 +26,51 @@ public static class RuleDataCache
 
         string clean = sourceExpr.Trim().TrimStart('=');
 
-        // 1. Table[Column] Reference (e.g., "AllVehiclesTable[Vehicle Plate]")
-        int openBracket = clean.IndexOf('[');
-        int closeBracket = clean.LastIndexOf(']');
-        if (openBracket > 0 && closeBracket > openBracket)
+        // 1. COMPOUND / CONCAT EXPRESSION: e.g. "AllVehiclesTable[Brand] + ' ' + AllVehiclesTable[Model]"
+        if (clean.Contains("[") && (clean.Contains("+") || clean.Contains("&")))
         {
-            string tableName = clean.Substring(0, openBracket).Trim();
-            string colName = clean.Substring(openBracket + 1, closeBracket - openBracket - 1).Trim('[', ']', ' ');
-
-            var colValues = ReadTableColumnValues(wb, tableName, colName);
-            return FilterList(colValues, preserveDuplicates);
+            var compoundList = EvaluateCompoundExpression(wb, clean);
+            return FilterList(compoundList, preserveDuplicates);
         }
 
-        // 2. Workbook Defined Name (e.g., "StaffIDList", "VehicleTypeList")
-        try
+        // 2. SINGLE Table[Column] Reference
+        if (!clean.Contains("(") && clean.EndsWith("]") && clean.IndexOf('[') > 0)
         {
-            dynamic? nameObj = null;
-            try { nameObj = wb.Names.Item(clean); } catch { }
-            if (nameObj != null)
+            int openBracket = clean.IndexOf('[');
+            int closeBracket = clean.LastIndexOf(']');
+            if (openBracket > 0 && closeBracket > openBracket)
             {
-                dynamic? range = null;
-                try { range = nameObj.RefersToRange; } catch { }
-                if (range != null)
-                {
-                    object? rawVal = range.Value2;
-                    var rawList = ExtractRawArrayToList(rawVal);
-                    var filtered = FilterList(rawList, preserveDuplicates);
-                    if (filtered.Count > 0) return filtered;
-                }
+                string tableName = clean.Substring(0, openBracket).Trim();
+                string colName = clean.Substring(openBracket + 1, closeBracket - openBracket - 1).Trim('[', ']', ' ');
+                var colValues = ReadTableColumnValues(wb, tableName, colName);
+                return FilterList(colValues, preserveDuplicates);
             }
         }
-        catch { }
 
-        // 3. Fallback: Direct C# Enum Reflection if Defined Name ends with "List" (e.g., "VehicleTypeList" -> enum VehicleType)
+        // 3. DIRECT DEFINED NAME LOOKUP (Zero Evaluate / Zero Scratch-Cell Mutation!)
+        if (!clean.Contains("(") && !clean.Contains("["))
+        {
+            try
+            {
+                dynamic? nameObj = null;
+                try { nameObj = wb.Names.Item(clean); } catch { }
+                if (nameObj != null)
+                {
+                    dynamic? targetRange = null;
+                    try { targetRange = nameObj.RefersToRange; } catch { }
+                    if (targetRange != null)
+                    {
+                        object? rawVal = targetRange.Value2;
+                        var rawList = ExtractRawArrayToList(rawVal);
+                        var filtered = FilterList(rawList, preserveDuplicates);
+                        if (filtered.Count > 0) return filtered;
+                    }
+                }
+            }
+            catch { }
+        }
+
+        // 4. Try as C# Enum Name directly in memory (Fastest, zero COM)
         if (clean.EndsWith("List", StringComparison.OrdinalIgnoreCase))
         {
             string enumCandidate = clean.Substring(0, clean.Length - 4);
@@ -299,7 +311,7 @@ public static class RuleDataCache
             return raw;
 
         return raw
-            .Where(s => !string.IsNullOrWhiteSpace(s) && !s.StartsWith("[") && s != "0" && s != "—")
+            .Where(s => !string.IsNullOrWhiteSpace(s) && !s.StartsWith("[") && s != "0" && s != "-" && s != "\u2014")
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
     }
@@ -317,5 +329,80 @@ public static class RuleDataCache
         return Enum.GetNames(enumType)
             .Where(n => !n.Equals("None", StringComparison.OrdinalIgnoreCase))
             .ToList();
+    }
+
+    private static List<string> EvaluateCompoundExpression(dynamic wb, string expr)
+    {
+        // Split on '+' or '&'
+        var parts = expr.Split(new[] { '+', '&' }, StringSplitOptions.TrimEntries);
+        var tokenColumns = new List<(bool IsColumn, string Table, string Col, string Literal)>();
+        int maxRows = 0;
+
+        foreach (var part in parts)
+        {
+            string token = part.Trim();
+            if (token.StartsWith("[") || token.Contains("["))
+            {
+                int ob = token.IndexOf('[');
+                int cb = token.LastIndexOf(']');
+                string tName = ob > 0 ? token.Substring(0, ob).Trim() : string.Empty;
+                string cName = token.Substring(ob + 1, cb - ob - 1).Trim('[', ']', ' ');
+
+                var vals = ReadTableColumnValues(wb, tName, cName);
+                if (vals.Count > maxRows) maxRows = vals.Count;
+                tokenColumns.Add((true, tName, cName, string.Empty));
+            }
+            else
+            {
+                // Literal string token like ' ' or "-"
+                string literal = token.Trim('\'', '\"');
+                tokenColumns.Add((false, string.Empty, string.Empty, literal));
+            }
+        }
+
+        if (maxRows == 0) return new List<string>();
+
+        // Cache each distinct column's rows in memory
+        var columnData = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (isCol, tbl, col, _) in tokenColumns)
+        {
+            if (isCol)
+            {
+                string key = $"{tbl}[{col}]";
+                if (!columnData.ContainsKey(key))
+                {
+                    columnData[key] = ReadTableColumnValues(wb, tbl, col);
+                }
+            }
+        }
+
+        var combined = new List<string>(maxRows);
+        for (int r = 0; r < maxRows; r++)
+        {
+            var sb = new System.Text.StringBuilder();
+            foreach (var (isCol, tbl, col, literal) in tokenColumns)
+            {
+                if (isCol)
+                {
+                    var list = columnData[$"{tbl}[{col}]"];
+                    if (r < list.Count && !string.IsNullOrWhiteSpace(list[r]))
+                    {
+                        sb.Append(list[r]);
+                    }
+                }
+                else
+                {
+                    sb.Append(literal);
+                }
+            }
+
+            string resultStr = sb.ToString().Trim();
+            if (!string.IsNullOrWhiteSpace(resultStr))
+            {
+                combined.Add(resultStr);
+            }
+        }
+
+        return combined;
     }
 }

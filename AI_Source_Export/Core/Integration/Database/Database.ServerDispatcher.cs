@@ -78,10 +78,8 @@ public static class ServerDispatcher
         {
             var latestRoadTax = v.RoadTaxes.OrderByDescending(r => r.ExpiryDate).FirstOrDefault();
             var roadTaxExpiry = v.VehicleDetail.RoadTaxExpiry ?? latestRoadTax?.ExpiryDate;
-
             var latestInspection = v.Inspections.OrderByDescending(i => i.ExpiryDate).FirstOrDefault();
             var inspectionExpiry = v.VehicleDetail.InspectionExpiry ?? latestInspection?.ExpiryDate;
-
             return new
             {
                 VehiclePlate = v.VehiclePlate.Trim().ToUpperInvariant(),
@@ -92,6 +90,14 @@ public static class ServerDispatcher
                 RoadTaxExpiry = roadTaxExpiry?.ToDateTime(TimeOnly.MinValue),
                 InspectionExpiry = inspectionExpiry?.ToDateTime(TimeOnly.MinValue),
                 CurrentOdometer = v.VehicleDetail.CurrentOdometer,
+                BoughtDate = v.VehicleDetail.BoughtDate.HasValue
+                    ? (DateTime?)v.VehicleDetail.BoughtDate.Value.ToDateTime(TimeOnly.MinValue)
+                    : null,
+                BoughtPrice = v.VehicleDetail.BoughtPrice,
+                SoldDate = v.VehicleDetail.SoldDate.HasValue
+                    ? (DateTime?)v.VehicleDetail.SoldDate.Value.ToDateTime(TimeOnly.MinValue)
+                    : null,
+                SoldPrice = v.VehicleDetail.SoldPrice,
                 Status = v.VehicleStatus.ToString()
             };
         }).ToList();
@@ -111,7 +117,6 @@ public static class ServerDispatcher
                 OdometerOut = m.OdometerOut,
                 RepairCost = m.RepairCost,
                 WorkshopName = m.WorkshopName,
-                WorkshopAddress = m.WorkshopAddress,
                 Status = m.MaintenanceStatus.ToString(),
                 Remarks = m.Remarks,
                 TyreCost = m.TyreCost,
@@ -128,38 +133,138 @@ public static class ServerDispatcher
             };
         })).ToList();
 
+        var inspectionRecords = validVehicles.SelectMany(v => v.Inspections.Select(i =>
+        {
+            if (string.IsNullOrWhiteSpace(i.VehiclePlate)) i.VehiclePlate = v.VehiclePlate;
+            return new
+            {
+                InspectionId = i.InspectionID,
+                VehiclePlate = i.VehiclePlate.Trim().ToUpperInvariant(),
+                ScheduleDateIn = i.ScheduleDateIn.ToDateTime(TimeOnly.MinValue),
+                DateOut = i.DateOut.ToDateTime(TimeOnly.MinValue),
+                ExpiryDate = i.ExpiryDate.ToDateTime(TimeOnly.MinValue),
+                Amount = i.Amount,
+                Status = i.Status.ToString(),
+                Address = i.Address ?? string.Empty,
+                Remarks = i.Remarks ?? string.Empty
+            };
+        })).ToList();
+
+        var roadTaxRecords = validVehicles.SelectMany(v => v.RoadTaxes.Select(rt =>
+        {
+            if (string.IsNullOrWhiteSpace(rt.VehiclePlate)) rt.VehiclePlate = v.VehiclePlate;
+            return new
+            {
+                RoadTaxId = rt.RoadTaxID,
+                VehiclePlate = rt.VehiclePlate.Trim().ToUpperInvariant(),
+                VehicleType = rt.VehicleType.ToString(),
+                RenewDate = rt.RenewDate.ToDateTime(TimeOnly.MinValue),
+                ExpiryDate = rt.ExpiryDate.ToDateTime(TimeOnly.MinValue),
+                Amount = rt.Amount,
+                Status = rt.Status.ToString(),
+                Remarks = rt.Remarks ?? string.Empty
+            };
+        })).ToList();
+
+        var permitRecords = validVehicles.SelectMany(v => v.Permits.Select(p =>
+        {
+            if (string.IsNullOrWhiteSpace(p.VehiclePlate)) p.VehiclePlate = v.VehiclePlate;
+            return new
+            {
+                PermitId = p.PermitID,
+                VehiclePlate = p.VehiclePlate.Trim().ToUpperInvariant(),
+                VehicleType = p.VehicleType.ToString(),
+                PermitType = p.PermitType.ToString(),
+                RenewDate = p.RenewDate.ToDateTime(TimeOnly.MinValue),
+                ExpiryDate = p.ExpiryDate.ToDateTime(TimeOnly.MinValue),
+                Amount = p.Amount,
+                Status = p.Status.ToString(),
+                Remarks = p.Remarks ?? string.Empty
+            };
+        })).ToList();
+
+        var insuranceRecords = validVehicles.SelectMany(v => v.Insurances.Select(ins =>
+        {
+            if (string.IsNullOrWhiteSpace(ins.VehiclePlate)) ins.VehiclePlate = v.VehiclePlate;
+            return new
+            {
+                InsuranceId = ins.InsuranceID,
+                VehiclePlate = ins.VehiclePlate.Trim().ToUpperInvariant(),
+                VehicleType = ins.VehicleType.ToString(),
+                InsuranceCompany = ins.InsuranceCompany ?? string.Empty,
+                InsuranceType = ins.InsuranceType.ToString(),
+                RenewDate = ins.RenewDate.ToDateTime(TimeOnly.MinValue),
+                ExpiryDate = ins.ExpiryDate.ToDateTime(TimeOnly.MinValue),
+                Amount = ins.Amount,
+                Status = ins.Status.ToString(),
+                Remarks = ins.Remarks ?? string.Empty,
+                InsuranceNumber = ins.InsuranceNumber ?? string.Empty // <-- Added
+            };
+        })).ToList();
+
+        var odoRecords = validVehicles.SelectMany(v => v.OdometerLogs.Select(o =>
+        {
+            if (string.IsNullOrWhiteSpace(o.VehiclePlate)) o.VehiclePlate = v.VehiclePlate;
+            return new
+            {
+                OdometerId = o.OdometerID,
+                Date = o.Date.ToDateTime(TimeOnly.MinValue),
+                VehiclePlate = o.VehiclePlate.Trim().ToUpperInvariant(),
+                VehicleType = o.VehicleType.ToString(),
+                StaffId = o.StaffID,                               // <-- Updated from DrivenBy
+                Project = o.Project ?? string.Empty,
+                OdometerBefore = o.OdometerBefore,
+                CurrentOdometer = o.CurrentOdometer,
+                FuelCardNumber = o.FuelCardNumber ?? string.Empty,
+                FuelCompany = o.FuelCompany ?? string.Empty,
+                StationName = o.StationName ?? string.Empty,
+                ReceiptNumber = o.ReceiptNumber ?? string.Empty,
+                Amount = o.Amount,
+                Remarks = o.Remarks ?? string.Empty
+            };
+        })).ToList();
+
+        // 2. Define UPSERT queries
         const string sqlMasterUpsert = @"
-        INSERT INTO vehicle_master (
-            vehicle_plate, vin, vehicle_type, brand, model,
-            road_tax_expiry, inspection_expiry, current_odometer, status
-        )
-        VALUES (
-            @VehiclePlate, @Vin, @VehicleType, @Brand, @Model,
-            @RoadTaxExpiry, @InspectionExpiry, @CurrentOdometer, @Status
-        )
-        ON CONFLICT (vehicle_plate) DO UPDATE SET
-            vin               = COALESCE(NULLIF(EXCLUDED.vin, ''), vehicle_master.vin),
-            vehicle_type      = EXCLUDED.vehicle_type,
-            brand             = COALESCE(NULLIF(EXCLUDED.brand, ''), vehicle_master.brand),
-            model             = COALESCE(NULLIF(EXCLUDED.model, ''), vehicle_master.model),
-            road_tax_expiry   = EXCLUDED.road_tax_expiry,
-            inspection_expiry = EXCLUDED.inspection_expiry,
-            current_odometer  = CASE WHEN EXCLUDED.current_odometer > 0 THEN EXCLUDED.current_odometer ELSE vehicle_master.current_odometer END,
-            status            = EXCLUDED.status,
-            updated_at        = CURRENT_TIMESTAMP;";
+INSERT INTO vehicle_master (
+    vehicle_plate, vin, vehicle_type, brand, model,
+    road_tax_expiry, inspection_expiry, current_odometer,
+    bought_date, bought_price, sold_date, sold_price,
+    status
+)
+VALUES (
+    @VehiclePlate, @Vin, @VehicleType, @Brand, @Model,
+    @RoadTaxExpiry, @InspectionExpiry, @CurrentOdometer,
+    @BoughtDate, @BoughtPrice, @SoldDate, @SoldPrice,
+    @Status
+)
+ON CONFLICT (vehicle_plate) DO UPDATE SET
+    vin               = COALESCE(NULLIF(EXCLUDED.vin, ''), vehicle_master.vin),
+    vehicle_type      = EXCLUDED.vehicle_type,
+    brand             = COALESCE(NULLIF(EXCLUDED.brand, ''), vehicle_master.brand),
+    model             = COALESCE(NULLIF(EXCLUDED.model, ''), vehicle_master.model),
+    road_tax_expiry   = EXCLUDED.road_tax_expiry,
+    inspection_expiry = EXCLUDED.inspection_expiry,
+    current_odometer  = CASE WHEN EXCLUDED.current_odometer > 0 THEN EXCLUDED.current_odometer ELSE vehicle_master.current_odometer END,
+    bought_date       = EXCLUDED.bought_date,
+    bought_price      = EXCLUDED.bought_price,
+    sold_date         = EXCLUDED.sold_date,
+    sold_price        = EXCLUDED.sold_price,
+    status            = EXCLUDED.status,
+    updated_at        = CURRENT_TIMESTAMP;";
 
         const string sqlMaintenanceUpsert = @"
         INSERT INTO vehicle_maintenance (
             maintenance_id, vehicle_plate, service_type, date_in, estimated_return,
             date_completed, odometer_in, odometer_out, repair_cost, workshop_name,
-            workshop_address, status, remarks,
+            status, remarks,
             tyre_cost, brake_cost, clutch_cost, service_cost, fuel_pump_cost,
             aircond_cost, wiring_cost, battery_cost, towing_cost, cushion_cost, parts_cost
         )
         VALUES (
             @MaintenanceId, @VehiclePlate, @ServiceType, @DateIn, @EstimatedReturn,
             @DateCompleted, @OdometerIn, @OdometerOut, @RepairCost, @WorkshopName,
-            @WorkshopAddress, @Status, @Remarks,
+            @Status, @Remarks,
             @TyreCost, @BrakeCost, @ClutchCost, @ServiceCost, @FuelPumpCost,
             @AircondCost, @WiringCost, @BatteryCost, @TowingCost, @CushionCost, @PartsCost
         )
@@ -173,7 +278,6 @@ public static class ServerDispatcher
             odometer_out     = EXCLUDED.odometer_out,
             repair_cost      = EXCLUDED.repair_cost,
             workshop_name    = EXCLUDED.workshop_name,
-            workshop_address = EXCLUDED.workshop_address,
             status           = EXCLUDED.status,
             remarks          = EXCLUDED.remarks,
             tyre_cost        = EXCLUDED.tyre_cost,
@@ -189,20 +293,127 @@ public static class ServerDispatcher
             parts_cost       = EXCLUDED.parts_cost,
             updated_at       = CURRENT_TIMESTAMP;";
 
+        const string sqlInspectionUpsert = @"
+            INSERT INTO vehicle_inspections (
+                inspection_id, vehicle_plate, schedule_date_in, date_out,
+                expiry_date, amount, status, address, remarks, updated_at
+            ) VALUES (
+                @InspectionId, @VehiclePlate, @ScheduleDateIn, @DateOut,
+                @ExpiryDate, @Amount, @Status, @Address, @Remarks, CURRENT_TIMESTAMP
+            )
+            ON CONFLICT (inspection_id) DO UPDATE SET
+                vehicle_plate    = EXCLUDED.vehicle_plate,
+                schedule_date_in = EXCLUDED.schedule_date_in,
+                date_out         = EXCLUDED.date_out,
+                expiry_date      = EXCLUDED.expiry_date,
+                amount           = EXCLUDED.amount,
+                status           = EXCLUDED.status,
+                address          = EXCLUDED.address,
+                remarks          = EXCLUDED.remarks,
+                updated_at       = CURRENT_TIMESTAMP;";
+
+        const string sqlRoadTaxUpsert = @"
+INSERT INTO vehicle_road_taxes (
+    road_tax_id, vehicle_plate, vehicle_type, renew_date, expiry_date, amount, status, remarks, updated_at
+) VALUES (
+    @RoadTaxId, @VehiclePlate, @VehicleType, @RenewDate, @ExpiryDate, @Amount, @Status, @Remarks, CURRENT_TIMESTAMP
+)
+ON CONFLICT (road_tax_id) DO UPDATE SET
+    vehicle_plate = EXCLUDED.vehicle_plate,
+    vehicle_type  = EXCLUDED.vehicle_type,
+    renew_date    = EXCLUDED.renew_date,
+    expiry_date   = EXCLUDED.expiry_date,
+    amount        = EXCLUDED.amount,
+    status        = EXCLUDED.status,
+    remarks       = EXCLUDED.remarks,
+    updated_at    = CURRENT_TIMESTAMP;";
+
+        const string sqlPermitUpsert = @"
+INSERT INTO vehicle_permits (
+    permit_id, vehicle_plate, vehicle_type, permit_type, renew_date, expiry_date, amount, status, remarks, updated_at
+) VALUES (
+    @PermitId, @VehiclePlate, @VehicleType, @PermitType, @RenewDate, @ExpiryDate, @Amount, @Status, @Remarks, CURRENT_TIMESTAMP
+)
+ON CONFLICT (permit_id) DO UPDATE SET
+    vehicle_plate = EXCLUDED.vehicle_plate,
+    vehicle_type  = EXCLUDED.vehicle_type,
+    permit_type   = EXCLUDED.permit_type,
+    renew_date    = EXCLUDED.renew_date,
+    expiry_date   = EXCLUDED.expiry_date,
+    amount        = EXCLUDED.amount,
+    status        = EXCLUDED.status,
+    remarks       = EXCLUDED.remarks,
+    updated_at    = CURRENT_TIMESTAMP;";
+
+        const string sqlInsuranceUpsert = @"
+INSERT INTO vehicle_insurances (
+    insurance_id, vehicle_plate, vehicle_type, insurance_company, insurance_type, 
+    renew_date, expiry_date, amount, status, remarks, updated_at, insurance_number
+) VALUES (
+    @InsuranceId, @VehiclePlate, @VehicleType, @InsuranceCompany, @InsuranceType, 
+    @RenewDate, @ExpiryDate, @Amount, @Status, @Remarks, CURRENT_TIMESTAMP, @InsuranceNumber
+)
+ON CONFLICT (insurance_id) DO UPDATE SET
+    vehicle_plate     = EXCLUDED.vehicle_plate,
+    vehicle_type      = EXCLUDED.vehicle_type,
+    insurance_company = EXCLUDED.insurance_company,
+    insurance_type    = EXCLUDED.insurance_type,
+    renew_date        = EXCLUDED.renew_date,
+    expiry_date       = EXCLUDED.expiry_date,
+    amount            = EXCLUDED.amount,
+    status            = EXCLUDED.status,
+    remarks           = EXCLUDED.remarks,
+    insurance_number  = EXCLUDED.insurance_number, -- <-- Added
+    updated_at        = CURRENT_TIMESTAMP;";
+
+        const string sqlOdometerUpsert = @"
+INSERT INTO vehicle_odometers (
+    odometer_id, date, vehicle_plate, vehicle_type, staff_id, project,
+    odometer_before, current_odometer, fuel_card_number, fuel_company,
+    station_name, receipt_number, amount, remarks, updated_at
+) VALUES (
+    @OdometerId, @Date, @VehiclePlate, @VehicleType, @StaffId, @Project,
+    @OdometerBefore, @CurrentOdometer, @FuelCardNumber, @FuelCompany,
+    @StationName, @ReceiptNumber, @Amount, @Remarks, CURRENT_TIMESTAMP
+)
+ON CONFLICT (odometer_id) DO UPDATE SET
+    date             = EXCLUDED.date,
+    vehicle_plate    = EXCLUDED.vehicle_plate,
+    vehicle_type     = EXCLUDED.vehicle_type,
+    staff_id         = EXCLUDED.staff_id,
+    project          = EXCLUDED.project,
+    odometer_before  = EXCLUDED.odometer_before,
+    current_odometer = EXCLUDED.current_odometer,
+    fuel_card_number = EXCLUDED.fuel_card_number,
+    fuel_company     = EXCLUDED.fuel_company,
+    station_name     = EXCLUDED.station_name,
+    receipt_number   = EXCLUDED.receipt_number,
+    amount           = EXCLUDED.amount,
+    remarks          = EXCLUDED.remarks,
+    updated_at       = CURRENT_TIMESTAMP;";
+
+        // 3. Execute in Transaction
         Db.ExecuteInTransaction((conn, trans) =>
         {
             if (isFullBatch)
             {
+                conn.Execute("DELETE FROM vehicle_inspections WHERE vehicle_plate != ALL(@ActivePlates);", new { ActivePlates = activePlates }, trans);
+                conn.Execute("DELETE FROM vehicle_road_taxes WHERE vehicle_plate != ALL(@ActivePlates);", new { ActivePlates = activePlates }, trans);
+                conn.Execute("DELETE FROM vehicle_permits WHERE vehicle_plate != ALL(@ActivePlates);", new { ActivePlates = activePlates }, trans);
+                conn.Execute("DELETE FROM vehicle_insurances WHERE vehicle_plate != ALL(@ActivePlates);", new { ActivePlates = activePlates }, trans);
+                conn.Execute("DELETE FROM vehicle_odometers WHERE vehicle_plate != ALL(@ActivePlates);", new { ActivePlates = activePlates }, trans);
                 conn.Execute("DELETE FROM vehicle_maintenance WHERE vehicle_plate != ALL(@ActivePlates);", new { ActivePlates = activePlates }, trans);
                 conn.Execute("DELETE FROM vehicle_master WHERE vehicle_plate != ALL(@ActivePlates);", new { ActivePlates = activePlates }, trans);
             }
 
             conn.Execute(sqlMasterUpsert, masterRecords, trans);
 
-            if (maintenanceRecords.Any())
-            {
-                conn.Execute(sqlMaintenanceUpsert, maintenanceRecords, trans);
-            }
+            if (maintenanceRecords.Any()) conn.Execute(sqlMaintenanceUpsert, maintenanceRecords, trans);
+            if (inspectionRecords.Any()) conn.Execute(sqlInspectionUpsert, inspectionRecords, trans);
+            if (roadTaxRecords.Any()) conn.Execute(sqlRoadTaxUpsert, roadTaxRecords, trans);
+            if (permitRecords.Any()) conn.Execute(sqlPermitUpsert, permitRecords, trans);
+            if (insuranceRecords.Any()) conn.Execute(sqlInsuranceUpsert, insuranceRecords, trans);
+            if (odoRecords.Any()) conn.Execute(sqlOdometerUpsert, odoRecords, trans);
         });
 
 #if DEBUG
@@ -229,6 +440,11 @@ public static class ServerDispatcher
         var workshopList = workshops?.ToList() ?? new List<Workshop>();
         var insuranceList = insuranceCompanies?.ToList() ?? new List<InsuranceCompanyRecord>();
         var cardList = fuelCards?.ToList() ?? new List<FuelCardRecord>();
+        var companyNames = fuelCompanies?
+            .Where(n => !string.IsNullOrWhiteSpace(n))
+            .Select(n => n.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray() ?? Array.Empty<string>();
 
         Db.ExecuteInTransaction((conn, trans) =>
         {
@@ -261,6 +477,31 @@ public static class ServerDispatcher
                         updated_at = CURRENT_TIMESTAMP;", insuranceList, trans);
             }
 
+            // Fuel Companies Lookup - Sync
+            if (compList.Count > 0)
+            {
+                // A. Delete only companies removed from Excel that are NO LONGER referenced by any fuel card
+                const string sqlReconcile = @"
+                    DELETE FROM lookup_fuel_companies 
+                    WHERE fuel_company_name != ALL(@ActiveNames);";
+
+                conn.Execute(sqlReconcile, new { ActiveNames = companyNames }, transaction: trans);
+
+                // B. Insert newly added companies
+                const string sqlUpsert = @"
+                    INSERT INTO lookup_fuel_companies (fuel_company_name)
+                    VALUES (@Name)
+                    ON CONFLICT (fuel_company_name) DO NOTHING;";
+
+                var payload = companyNames.Select(n => new { Name = n });
+                conn.Execute(sqlUpsert, payload, transaction: trans);
+            }
+            else
+            {
+                // If the table was deliberately wiped completely
+                conn.Execute("DELETE FROM lookup_fuel_companies;", transaction: trans);
+            }
+
             // Fuel Cards
             if (cardList.Count > 0)
             {
@@ -272,21 +513,6 @@ public static class ServerDispatcher
                         card_owner_id = EXCLUDED.card_owner_id,
                         card_owner_name = EXCLUDED.card_owner_name,
                         updated_at = CURRENT_TIMESTAMP;", cardList, trans);
-            }
-
-            // Fuel Companies Lookup - Sync
-            if (compList.Count > 0)
-            {
-                conn.Execute("DELETE FROM lookup_fuel_companies WHERE fuel_company_name != ALL(@Names);", new { Names = compList.ToArray() }, trans);
-                var compPayload = compList.Select(n => new { Name = n });
-                conn.Execute(@"
-                    INSERT INTO lookup_fuel_companies (fuel_company_name) 
-                    VALUES (@Name) 
-                    ON CONFLICT (fuel_company_name) DO NOTHING;", compPayload, trans);
-            }
-            else
-            {
-                conn.Execute("DELETE FROM lookup_fuel_companies;", transaction: trans);
             }
         });
     }

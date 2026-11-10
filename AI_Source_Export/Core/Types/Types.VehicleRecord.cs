@@ -1,17 +1,17 @@
 ﻿namespace SKSB_App.Core.Types;
 
+using SKSB_App.Core.RuntimeUI.DateFilter;
+using SKSB_App.Core.Types.Attributes;
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using SKSB_App.Core.RuntimeUI.DateFilter;
-using SKSB_App.Core.Types.Attributes;
-
-// Backward-compatibility aliases
-using RoadTaxRecord = RoadTax;
+using System.Text.Json.Serialization;
+using FuelCompanyLookup = FuelCompanyNameRecord;
 using InspectionRecord = Inspection;
 using InsuranceRecord = VehicleInsurance;
 using OdometerRecord = OdometerLog;
-using FuelCompanyLookup = FuelCompanyNameRecord;
+// Backward-compatibility aliases
+using RoadTaxRecord = RoadTax;
 
 // =========================================================================
 // 1. VEHICLE DOMAIN ENUMS (Generates Lookups Named Ranges)
@@ -19,122 +19,60 @@ using FuelCompanyLookup = FuelCompanyNameRecord;
 
 public enum VehicleType
 {
-    None,
-    Car,
-    Hilux,
-    Van,
-    Lorry,
-    Tipper_Lorry,
-    Roro_Lorry,
-    Crane_Lorry,
-    Skylift,
-    Backhoe,
-    Excavator,
-    Roller,
-    Compressor,
-    Generator,
-    Motorcycle,
-    Machinery
+    None, Car, Hilux, Van, Lorry, Tipper_Lorry, Roro_Lorry, Crane_Lorry,
+    Skylift, Backhoe, Excavator, Roller, Compressor, Generator, Motorcycle, Machinery
 }
 
 public enum VehicleStatus
 {
-    Active,
-    In_Shop,
-    Expired,
-    Reserved,
-    Decommissioned,
-    None
+    Active, In_Shop, Expired, Reserved, Decommissioned, Suspended, None
 }
 
 public enum ServiceType
 {
-    Regular_Service,
-    Breakdown_Repair,
-    Tyre_Service,
-    Battery_Replacement,
-    Aircond_Service,
-    Bodywork_Paint,
-    Puspakom_Prep,
-    Accident_Repair,
-    Other,
-    None
+    Regular_Service, Breakdown_Repair, Tyre_Service, Battery_Replacement,
+    Aircond_Service, Bodywork_Paint, Puspakom_Prep, Accident_Repair, Other, None
 }
 
 public enum MaintenanceStatus
 {
-    Scheduled,
-    In_Progress,
-    Done,
-    Completed,
-    Cancelled,
-    None
+    Scheduled, In_Progress, Completed, Cancelled, None
 }
 
 public enum VehiclePermitType
 {
-    None,
-    APAD_Carrier_A,
-    APAD_Carrier_C,
-    APAD_Carrier_KA,
-    APAD_Decontrolled,
-    SPAN_Permit,
-    Bomba_Compliance,
-    JKR_JPJ_Special,
-    Other
+    None, APAD_Carrier_A, APAD_Carrier_C, APAD_Carrier_KA, APAD_Decontrolled,
+    SPAN_Permit, Bomba_Compliance, JKR_JPJ_Special, Other
 }
 
 public enum VehiclePermitStatus
 {
-    Active,
-    Expired,
-    Pending_Renewal,
-    Cancelled,
-    None
+    Active, Expired, Pending_Renewal, Cancelled, None
 }
 
 public enum RoadTaxStatus
 {
-    Active,
-    Expired,
-    Pending_Renewal,
-    None
+    Active, Expired, Pending_Renewal, None
 }
 
 public enum InspectionStatus
 {
-    Scheduled,
-    Completed,
-    Expired,
-    Failed,
-    None
+    Scheduled, Completed, Expired, Failed, None
 }
 
 public enum InsuranceType
 {
-    Comprehensive,
-    Third_Party_Fire_Theft,
-    Third_Party,
-    None
+    Comprehensive, Third_Party_Fire_Theft, Third_Party, None
 }
 
 public enum InsuranceStatus
 {
-    Active,
-    Expired,
-    Cancelled,
-    None
+    Active, Expired, Cancelled, None
 }
 
 public enum FuelCompany
 {
-    Petronas,
-    Shell,
-    Caltex,
-    Petron,
-    BHPetrol,
-    Other,
-    None
+    Petronas, Shell, Caltex, Petron, BHPetrol, Other, None
 }
 
 // =========================================================================
@@ -145,21 +83,20 @@ public enum FuelCompany
 public record VehicleRecord
 {
     [DataList("VehiclePlateList")]
-    [ExcelColumn("Vehicle Plate", isRequired: true)]
+    [ExcelColumn("Vehicle Plate")]
     [ColumnRule(IsRequired = true, Transform = TransformKind.UpperCase)]
     public string VehiclePlate { get; set; } = string.Empty;
 
     [DataDetail]
     public VehicleDetail VehicleDetail { get; set; } = new();
 
-    [ExcelColumn("Status", isRequired: true)]
-    [ColumnRule("VehicleStatusList", IsRequired = true)]
+    [ExcelColumn("Status")]
+    [ColumnRule("VehicleStatusList", IsWarningOnly = true)]
     [ColumnDefault(DefaultKind.Literal, literalValue: "Active")]
-    [ColumnStateGuard(1, StateConditionKind.ColumnNotEmpty, "Decommissioned", "Active", "Sold Date")]
+    [ColumnStateGuard(1, StateConditionKind.ColumnNotEmpty, "Decommissioned", "Active", "Sold Date", DisallowForcedValueWhenFalse = true)]
     [ColumnStateGuard(2, StateConditionKind.DateExpired, "Expired", "Active", "Road Tax Expiry", "Inspection Expiry", "Insurance Expiry", "Permit Expiry")]
     public VehicleStatus VehicleStatus { get; set; } = VehicleStatus.Active;
 
-    // Child Collections matching legacy manager names exactly
     public List<Maintenance> Maintenances { get; set; } = new();
     public List<VehiclePermit> Permits { get; set; } = new();
     public List<RoadTax> RoadTaxes { get; set; } = new();
@@ -167,7 +104,6 @@ public record VehicleRecord
     public List<VehicleInsurance> Insurances { get; set; } = new();
     public List<OdometerLog> OdometerLogs { get; set; } = new();
 
-    // Convenience alias for Odometers
     public List<OdometerLog> Odometers
     {
         get => OdometerLogs;
@@ -176,9 +112,11 @@ public record VehicleRecord
 
     public VehicleStatus EvaluateStatus(DateOnly asOfDate)
     {
+        // 1. Sold Date reached -> Decommissioned
         if (VehicleDetail.SoldDate.HasValue && VehicleDetail.SoldDate.Value <= asOfDate)
             return VehicleStatus.Decommissioned;
 
+        // 2. Active maintenance ticket -> In_Shop
         bool inWorkshop = Maintenances.Any(m =>
             m.MaintenanceStatus == MaintenanceStatus.In_Progress ||
             (m.DateIn <= asOfDate && (!m.DateCompleted.HasValue || m.DateCompleted.Value > asOfDate)));
@@ -186,6 +124,7 @@ public record VehicleRecord
         if (inWorkshop)
             return VehicleStatus.In_Shop;
 
+        // 3. Compliance expiration -> Expired
         bool roadTaxExpired = VehicleDetail.RoadTaxExpiry.HasValue && VehicleDetail.RoadTaxExpiry.Value < asOfDate;
         bool inspectionExpired = VehicleDetail.InspectionExpiry.HasValue && VehicleDetail.InspectionExpiry.Value < asOfDate;
         bool insuranceExpired = VehicleDetail.InsuranceExpiry.HasValue && VehicleDetail.InsuranceExpiry.Value < asOfDate;
@@ -194,17 +133,23 @@ public record VehicleRecord
         if (roadTaxExpired || inspectionExpired || insuranceExpired || permitExpired)
             return VehicleStatus.Expired;
 
-        return VehicleStatus == VehicleStatus.Reserved ? VehicleStatus.Reserved : VehicleStatus.Active;
+        // 4. Preserve Manual Administrative Overrides
+        if (VehicleStatus == VehicleStatus.Suspended)
+            return VehicleStatus.Suspended;
+
+        if (VehicleStatus == VehicleStatus.Reserved)
+            return VehicleStatus.Reserved;
+
+        return VehicleStatus.Active;
     }
 }
 
 public record VehicleDetail
 {
-    // Restored for backward compatibility with VehicleManager.ServerSyncCommands
-    public string VehiclePlate { get; set; } = string.Empty;
+    // ❌ REMOVED: VehiclePlate (Properly exists only as the Primary Key in VehicleRecord now)
 
     [DataList("VehicleTypeList")]
-    [ExcelColumn("Vehicle Type", isRequired: true)]
+    [ExcelColumn("Vehicle Type")]
     [ColumnRule("VehicleTypeList", IsRequired = true)]
     public VehicleType Type { get; set; } = VehicleType.Lorry;
 
@@ -284,9 +229,10 @@ public record Maintenance
     [ColumnSync("Vehicle Type", "AllVehiclesTable[Vehicle Plate]", "AllVehiclesTable[Vehicle Type]")]
     public string VehiclePlate { get; set; } = string.Empty;
 
-    [ExcelColumn("Vehicle Type")]
+    [JsonIgnore] // 1. Prevents duplicate saves to DB / JSON snapshots
+    [ExcelColumn("Vehicle Type")] // 2. Maps the property to the Excel table column
     [ColumnRule("VehicleTypeList", IsRequired = false, IsWarningOnly = true)]
-    [ColumnSync("Vehicle Plate", "AllVehiclesTable[Vehicle Type]", "AllVehiclesTable[Vehicle Plate]")]
+    [ColumnSync("Vehicle Plate", "AllVehiclesTable[Vehicle Type]", "AllVehiclesTable[Vehicle Plate]")] // 3. Two-way sync
     public VehicleType VehicleType { get; set; } = VehicleType.None;
 
     [ExcelColumn("Service Type", isRequired: true)]
@@ -321,62 +267,64 @@ public record Maintenance
     [ColumnSync("Workshop Address", "WorkshopsTable[Workshop Name]", "WorkshopsTable[Workshop Address]")]
     public string WorkshopName { get; set; } = string.Empty;
 
+    [JsonIgnore] // 1. Prevents duplicate saves to DB / JSON snapshots
     [ExcelColumn("Workshop Address")]
-    [ColumnRule("WorkshopsTable[Workshop Address]", IsRequired = false, IsWarningOnly = true)]
+    [ColumnRule("WorkshopsTable[Workshop Address]", IsWarningOnly = true, IsRequired = false)]
     [ColumnSync("Workshop Name", "WorkshopsTable[Workshop Address]", "WorkshopsTable[Workshop Name]")]
     public string WorkshopAddress { get; set; } = string.Empty;
 
     [ExcelColumn("Status", isRequired: true)]
     [ColumnRule("MaintenanceStatusList", IsRequired = true)]
     [ColumnDefault(DefaultKind.Literal, literalValue: "In_Progress")]
-    [ColumnStateGuard(1, StateConditionKind.ColumnNotEmpty, "Completed", "In_Progress", "Date Completed")]
+    [ColumnStateGuard(1, StateConditionKind.DateExpired, "Completed", "In_Progress", "Date Completed", SkipIfCurrentEquals = "Cancelled", DisallowForcedValueWhenFalse = true)]
+    [ColumnStateGuard(2, StateConditionKind.DateExpired, "In_Progress", "Scheduled", "Date in", SkipIfCurrentEquals = "Cancelled")]
     public MaintenanceStatus MaintenanceStatus { get; set; } = MaintenanceStatus.In_Progress;
 
     [ExcelColumn("Repair Total Cost")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
     public decimal RepairCost { get; set; } = 0.00m;
 
-    [ExcelColumn("Tyre Cost")]
+    [ExcelColumn("Tyre")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
     public decimal TyreCost { get; set; } = 0.00m;
 
-    [ExcelColumn("Brake Cost")]
+    [ExcelColumn("Brake")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
     public decimal BrakeCost { get; set; } = 0.00m;
 
-    [ExcelColumn("Clutch Cost")]
+    [ExcelColumn("Clutch")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
     public decimal ClutchCost { get; set; } = 0.00m;
 
-    [ExcelColumn("Service Cost")]
+    [ExcelColumn("Service")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
     public decimal ServiceCost { get; set; } = 0.00m;
 
-    [ExcelColumn("Fuel Pump Cost")]
+    [ExcelColumn("Fuel Pump")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
     public decimal FuelPumpCost { get; set; } = 0.00m;
 
-    [ExcelColumn("Aircond Cost")]
+    [ExcelColumn("Aircond")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
     public decimal AircondCost { get; set; } = 0.00m;
 
-    [ExcelColumn("Wiring Cost")]
+    [ExcelColumn("Wiring")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
     public decimal WiringCost { get; set; } = 0.00m;
 
-    [ExcelColumn("Battery Cost")]
+    [ExcelColumn("Battery")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
     public decimal BatteryCost { get; set; } = 0.00m;
 
-    [ExcelColumn("Towing Cost")]
+    [ExcelColumn("Towing")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
     public decimal TowingCost { get; set; } = 0.00m;
 
-    [ExcelColumn("Cushion Cost")]
+    [ExcelColumn("Cushion")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
     public decimal CushionCost { get; set; } = 0.00m;
 
-    [ExcelColumn("Parts Cost")]
+    [ExcelColumn("Parts")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
     public decimal PartsCost { get; set; } = 0.00m;
 
@@ -411,11 +359,11 @@ public record Workshop
     [ColumnRule(IsRequired = false)]
     public string WorkshopOwner { get; set; } = string.Empty;
 
-    [ExcelColumn("Primary Contact")]
+    [ExcelColumn("Workshop Primary Contact")]
     [ColumnRule(IsRequired = false)]
     public string PrimaryContact { get; set; } = string.Empty;
 
-    [ExcelColumn("Secondary Contact")]
+    [ExcelColumn("Workshop Secondary Contact")]
     [ColumnRule(IsRequired = false)]
     public string SecondaryContact { get; set; } = string.Empty;
 }
@@ -437,14 +385,38 @@ public record VehicleInsurance
     [ColumnSync("Vehicle Type", "AllVehiclesTable[Vehicle Plate]", "AllVehiclesTable[Vehicle Type]")]
     public string VehiclePlate { get; set; } = string.Empty;
 
-    [ExcelColumn("Vehicle Type")]
+    [JsonIgnore] // 1. Prevents duplicate saves to DB / JSON snapshots
+    [ExcelColumn("Vehicle Type")] // 2. Maps the property to the Excel table column
     [ColumnRule("VehicleTypeList", IsRequired = false, IsWarningOnly = true)]
-    [ColumnSync("Vehicle Plate", "AllVehiclesTable[Vehicle Type]", "AllVehiclesTable[Vehicle Plate]")]
+    [ColumnSync("Vehicle Plate", "AllVehiclesTable[Vehicle Type]", "AllVehiclesTable[Vehicle Plate]")] // 3. Two-way sync
     public VehicleType VehicleType { get; set; } = VehicleType.None;
+
+    // 1. Primary Mapped Column (Stored in Database)
+    [ExcelColumn("Insurance Number")]
+    [ColumnRule(IsRequired = true)]
+    public string InsuranceNumber { get; set; } = string.Empty;
 
     [ExcelColumn("Insurance Company", isRequired: true)]
     [ColumnRule("InsuranceCompaniesTable[Insurance Company]", IsRequired = true)]
+    [ColumnSync("Company Contact Number", "InsuranceCompaniesTable[Insurance Company]", "InsuranceCompaniesTable[Company Contact Number]")]
+    [ColumnSync("Insurance Agent", "InsuranceCompaniesTable[Insurance Company]", "InsuranceCompaniesTable[Insurance Agent]")]
     public string InsuranceCompany { get; set; } = string.Empty;
+
+    // 2. Unmapped Helper Column (UI / Display only)
+    [JsonIgnore]
+    [ExcelColumn("Company Contact Number")]
+    [ColumnRule("InsuranceCompaniesTable[Company Contact Number]", IsRequired = false, IsWarningOnly = true)]
+    [ColumnSync("Insurance Company", "InsuranceCompaniesTable[Company Contact Number]", "InsuranceCompaniesTable[Insurance Company]")]
+    [ColumnSync("Insurance Agent", "InsuranceCompaniesTable[Company Contact Number]", "InsuranceCompaniesTable[Insurance Agent]")]
+    public string CompanyContactNumber { get; set; } = string.Empty;
+
+    // 3. Unmapped Helper Column (UI / Display only)
+    [JsonIgnore]
+    [ExcelColumn("Insurance Agent")]
+    [ColumnRule("InsuranceCompaniesTable[Insurance Agent]", IsRequired = false, IsWarningOnly = true)]
+    [ColumnSync("Insurance Company", "InsuranceCompaniesTable[Insurance Agent]", "InsuranceCompaniesTable[Insurance Company]")]
+    [ColumnSync("Company Contact Number", "InsuranceCompaniesTable[Insurance Agent]", "InsuranceCompaniesTable[Company Contact Number]")]
+    public string InsuranceAgent { get; set; } = string.Empty;
 
     [ExcelColumn("Insurance Type")]
     [ColumnRule("InsuranceTypeList", IsRequired = false)]
@@ -459,9 +431,10 @@ public record VehicleInsurance
     [ExcelColumn("Expiry Date", isRequired: true)]
     [ColumnRule(IsRequired = true)]
     [ColumnDefault(DefaultKind.DateOffsetDays, referenceHeader: "Renewal Date", offset: 365)]
+    [ColumnDateGreaterThan("Renewal Date")]
     public DateOnly ExpiryDate { get; set; } = DateOnly.FromDateTime(DateTime.Today.AddDays(365));
 
-    [ExcelColumn("Amount")]
+    [ExcelColumn("Cost")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
     public decimal Amount { get; set; } = 0.00m;
 
@@ -518,9 +491,10 @@ public record VehiclePermit
     [ColumnSync("Vehicle Type", "AllVehiclesTable[Vehicle Plate]", "AllVehiclesTable[Vehicle Type]")]
     public string VehiclePlate { get; set; } = string.Empty;
 
-    [ExcelColumn("Vehicle Type")]
+    [JsonIgnore] // 1. Prevents duplicate saves to DB / JSON snapshots
+    [ExcelColumn("Vehicle Type")] // 2. Maps the property to the Excel table column
     [ColumnRule("VehicleTypeList", IsRequired = false, IsWarningOnly = true)]
-    [ColumnSync("Vehicle Plate", "AllVehiclesTable[Vehicle Type]", "AllVehiclesTable[Vehicle Plate]")]
+    [ColumnSync("Vehicle Plate", "AllVehiclesTable[Vehicle Type]", "AllVehiclesTable[Vehicle Plate]")] // 3. Two-way sync
     public VehicleType VehicleType { get; set; } = VehicleType.None;
 
     [ExcelColumn("Permit Type")]
@@ -536,9 +510,10 @@ public record VehiclePermit
     [ExcelColumn("Expiry Date", isRequired: true)]
     [ColumnRule(IsRequired = true)]
     [ColumnDefault(DefaultKind.DateOffsetDays, referenceHeader: "Renewal Date", offset: 365)]
+    [ColumnDateGreaterThan("Renewal Date")]
     public DateOnly ExpiryDate { get; set; } = DateOnly.FromDateTime(DateTime.Today.AddDays(365));
 
-    [ExcelColumn("Amount")]
+    [ExcelColumn("Cost")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
     public decimal Amount { get; set; } = 0.00m;
 
@@ -566,9 +541,10 @@ public record RoadTax
     [ColumnSync("Vehicle Type", "AllVehiclesTable[Vehicle Plate]", "AllVehiclesTable[Vehicle Type]")]
     public string VehiclePlate { get; set; } = string.Empty;
 
-    [ExcelColumn("Vehicle Type")]
+    [JsonIgnore] // 1. Prevents duplicate saves to DB / JSON snapshots
+    [ExcelColumn("Vehicle Type")] // 2. Maps the property to the Excel table column
     [ColumnRule("VehicleTypeList", IsRequired = false, IsWarningOnly = true)]
-    [ColumnSync("Vehicle Plate", "AllVehiclesTable[Vehicle Type]", "AllVehiclesTable[Vehicle Plate]")]
+    [ColumnSync("Vehicle Plate", "AllVehiclesTable[Vehicle Type]", "AllVehiclesTable[Vehicle Plate]")] // 3. Two-way sync
     public VehicleType VehicleType { get; set; } = VehicleType.None;
 
     [ExcelColumn("Renewal Date", isRequired: true)]
@@ -579,9 +555,10 @@ public record RoadTax
     [ExcelColumn("Expiry Date", isRequired: true)]
     [ColumnRule(IsRequired = true)]
     [ColumnDefault(DefaultKind.DateOffsetDays, referenceHeader: "Renewal Date", offset: 365)]
+    [ColumnDateGreaterThan("Renewal Date")]
     public DateOnly ExpiryDate { get; set; } = DateOnly.FromDateTime(DateTime.Today.AddDays(365));
 
-    [ExcelColumn("Amount")]
+    [ExcelColumn("Cost")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
     public decimal Amount { get; set; } = 0.00m;
 
@@ -609,9 +586,10 @@ public record Inspection
     [ColumnSync("Vehicle Type", "AllVehiclesTable[Vehicle Plate]", "AllVehiclesTable[Vehicle Type]")]
     public string VehiclePlate { get; set; } = string.Empty;
 
-    [ExcelColumn("Vehicle Type")]
+    [JsonIgnore] // 1. Prevents duplicate saves to DB / JSON snapshots
+    [ExcelColumn("Vehicle Type")] // 2. Maps the property to the Excel table column
     [ColumnRule("VehicleTypeList", IsRequired = false, IsWarningOnly = true)]
-    [ColumnSync("Vehicle Plate", "AllVehiclesTable[Vehicle Type]", "AllVehiclesTable[Vehicle Plate]")]
+    [ColumnSync("Vehicle Plate", "AllVehiclesTable[Vehicle Type]", "AllVehiclesTable[Vehicle Plate]")] // 3. Two-way sync
     public VehicleType VehicleType { get; set; } = VehicleType.None;
 
     [ExcelColumn("Schedule Date In")]
@@ -627,17 +605,22 @@ public record Inspection
     [ExcelColumn("Expiry Date", isRequired: true)]
     [ColumnRule(IsRequired = true)]
     [ColumnDefault(DefaultKind.DateOffsetMonths, referenceHeader: "Date Out", offset: 6)]
+    [ColumnDateGreaterThan("Date Out")]
     public DateOnly ExpiryDate { get; set; } = DateOnly.FromDateTime(DateTime.Today.AddMonths(6));
 
-    [ExcelColumn("Amount")]
+    [ExcelColumn("Cost")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
     public decimal Amount { get; set; } = 0.00m;
 
-    [ExcelColumn("Status", isRequired: true)]
-    [ColumnRule("InspectionStatusList", IsRequired = true)]
+    [ExcelColumn("Status")]
+    [ColumnRule("InspectionStatusList")]
     [ColumnDefault(DefaultKind.Literal, literalValue: "Scheduled")]
     [ColumnStateGuard(1, StateConditionKind.DateExpired, "Expired", "Completed", "Expiry Date")]
     public InspectionStatus Status { get; set; } = InspectionStatus.Scheduled;
+
+    [ExcelColumn("Address")]
+    [ColumnRule(IsRequired = false)]
+    public string Address { get; set; } = string.Empty;
 
     [ExcelColumn("Remarks")]
     [ColumnRule(IsRequired = false)]
@@ -666,14 +649,24 @@ public record OdometerLog
     [ColumnSync("Vehicle Type", "AllVehiclesTable[Vehicle Plate]", "AllVehiclesTable[Vehicle Type]")]
     public string VehiclePlate { get; set; } = string.Empty;
 
-    [ExcelColumn("Vehicle Type")]
+    [JsonIgnore] // 1. Prevents duplicate saves to DB / JSON snapshots
+    [ExcelColumn("Vehicle Type")] // 2. Maps the property to the Excel table column
     [ColumnRule("VehicleTypeList", IsRequired = false, IsWarningOnly = true)]
-    [ColumnSync("Vehicle Plate", "AllVehiclesTable[Vehicle Type]", "AllVehiclesTable[Vehicle Plate]")]
+    [ColumnSync("Vehicle Plate", "AllVehiclesTable[Vehicle Type]", "AllVehiclesTable[Vehicle Plate]")] // 3. Two-way sync
     public VehicleType VehicleType { get; set; } = VehicleType.None;
 
-    [ExcelColumn("Driven By")]
-    [ColumnRule("StaffNameList", IsRequired = false, IsWarningOnly = true, IsMultiSelect = true)]
-    public string DrivenBy { get; set; } = string.Empty;
+    // 1. Stored Primary Foreign Key
+    [ExcelColumn("Staff ID")]
+    [ColumnRule("StaffIDList", IsRequired = false, IsWarningOnly = true)]
+    [ColumnSync("Staff Name", "StaffIDList", "StaffShortNameList")]
+    public long StaffID { get; set; } = 0;
+
+    // 2. Unmapped Helper Column (Two-Way Auto-Evaluated in Excel)
+    [JsonIgnore]
+    [ExcelColumn("Staff Name")]
+    [ColumnRule("StaffShortNameList", IsRequired = false, IsWarningOnly = true)]
+    [ColumnSync("Staff ID", "StaffShortNameList", "StaffIDList")]
+    public string StaffName { get; set; } = string.Empty;
 
     [ExcelColumn("Project")]
     [ColumnRule("ProjectIDList", IsRequired = false, IsWarningOnly = true)]
@@ -684,7 +677,7 @@ public record OdometerLog
     public int OdometerBefore { get; set; } = 0;
 
     [ExcelColumn("Current Odometer")]
-    [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
+    [ColumnRule(IsRequired = true, AllowNonNegativeZero = true)]
     public int CurrentOdometer { get; set; } = 0;
 
     [ExcelColumn("Fuel Card Number")]
@@ -704,7 +697,7 @@ public record OdometerLog
     [ColumnRule(IsRequired = false)]
     public string ReceiptNumber { get; set; } = string.Empty;
 
-    [ExcelColumn("Amount")]
+    [ExcelColumn("Transaction Amount")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
     public decimal Amount { get; set; } = 0.00m;
 
@@ -721,20 +714,22 @@ public record FuelCardRecord
     [ColumnRule(IsRequired = true)]
     public string FuelCardNumber { get; set; } = string.Empty;
 
-    [ExcelColumn("Fuel Company Name", isRequired: true)]
+    [ExcelColumn("Fuel Company Names")]
     [ColumnRule("FuelCompanyNamesTable[Fuel Company Name]", IsRequired = true)]
     public string FuelCompanyName { get; set; } = string.Empty;
 
     [ExcelColumn("Card Owner ID", isRequired: true)]
     [ColumnRule("AllVehiclesTable[Vehicle Plate]", "StaffIDList", IsRequired = true)]
-    [ColumnSync("Card Owner Name", "AllVehiclesTable[Vehicle Plate]", "AllVehiclesTable[Vehicle Type]")]
-    [ColumnSync("Card Owner Name", "StaffIDList", "StaffNameList")]
+    [ColumnSync("Card Owner Name", "AllVehiclesTable[Vehicle Plate]", "AllVehiclesTable[Brand] + ' ' + AllVehiclesTable[Model]")]
+    [ColumnSync("Card Owner Name", "StaffIDList", "StaffShortNameList")]
     public string CardOwnerID { get; set; } = string.Empty;
 
-    [ExcelColumn("Card Owner Name", isRequired: true)]
-    [ColumnRule("VehicleTypeList", "StaffNameList", IsRequired = true)]
-    [ColumnSync("Card Owner ID", "StaffNameList", "StaffIDList")]
-    [ColumnSync("Card Owner ID", "AllVehiclesTable[Vehicle Type]", "AllVehiclesTable[Vehicle Plate]")]
+    [JsonIgnore]
+    [ExcelColumn("Card Owner Name")]
+    [ColumnRule("AllVehiclesTable[Brand] + ' ' + AllVehiclesTable[Model]", "StaffShortNameList", IsRequired = false, IsWarningOnly = true)]
+    // Two-way sync: Picking the name looks up the ID/Plate and fills Card Owner ID
+    [ColumnSync("Card Owner ID", "AllVehiclesTable[Brand] + ' ' + AllVehiclesTable[Model]", "AllVehiclesTable[Vehicle Plate]")]
+    [ColumnSync("Card Owner ID", "StaffShortNameList", "StaffIDList")]
     public string CardOwnerName { get; set; } = string.Empty;
 }
 
@@ -742,7 +737,7 @@ public record FuelCardRecord
 public record FuelCompanyNameRecord
 {
     [DataList("FuelCompanyNameList")]
-    [ExcelColumn("Fuel Company Name", isRequired: true)]
+    [ExcelColumn("Fuel Company Names", isRequired: true)]
     [ColumnRule(IsRequired = true)]
     public string FuelCompanyName { get; set; } = string.Empty;
 }

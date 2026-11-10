@@ -2,13 +2,15 @@
 
 using System;
 using System.Collections.Generic;
+using System.Drawing;
 using System.IO;
+using System.Linq;
 using System.Text;
 using System.Windows.Forms;
 using ExcelDna.Integration;
 using SKSB_App.Core.Bootstrap.Storage;
 using SKSB_App.Core.RuntimeUI.DropDown;
-
+using SKSB_App.Core.RuntimeUI.RuleEngine;
 
 public static class RulesAuditExporter
 {
@@ -17,6 +19,7 @@ public static class RulesAuditExporter
     {
         try
         {
+            RuleRegistry.EnsureInitialized();
             dynamic xlApp = ExcelDnaUtil.Application;
             dynamic wb = xlApp.ActiveWorkbook;
             if (wb == null)
@@ -34,6 +37,7 @@ public static class RulesAuditExporter
 
             string targetFileName = $"{baseName}_Rules.md";
             var sb = new StringBuilder();
+
             sb.AppendLine($"# {baseName} Rules Audit");
             sb.AppendLine($"**Workbook:** `{rawWbName}`");
             sb.AppendLine($"**Generated:** {DateTime.Now:dd-MM-yyyy HH:mm:ss}");
@@ -45,6 +49,7 @@ public static class RulesAuditExporter
             foreach (dynamic ws in wb.Sheets)
             {
                 string sheetName = ws.Name?.ToString() ?? "Sheet";
+
                 if (sheetName.Equals("Lookups", StringComparison.OrdinalIgnoreCase) ||
                     sheetName.Equals("Data", StringComparison.OrdinalIgnoreCase))
                 {
@@ -107,8 +112,8 @@ public static class RulesAuditExporter
                     sb.AppendLine($"## TABLE: Sheet=`{sheetName}` | Table=`{tableName}` | HeaderRow={headerRow} | ArchetypeRow={archetypeRow} | StartCol={startCol} | Columns={colCount}");
                     sb.AppendLine();
                     sb.AppendLine("### Column Rules");
-                    sb.AppendLine("| Col | Row | Address | Header | Style | NumberFormat | Type | InCellFormula | SourceList | SyncFormula | FilterExpr | TransformExpr | IsMulti | IsWarning | NativeType | NativeFormula | NativeAlert | NativeIgnoreBlank |");
-                    sb.AppendLine("| :---: | :---: | :---: | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :---: | :---: | :--- | :--- | :---: | :---: |");
+                    sb.AppendLine("| Col | Row | Address | Header | Style | NumberFormat | EngineType | InCellFormula | Sources | Syncs | Transform | DefaultRule | StateGuards | IsMulti | IsWarning | NativeType | NativeFormula | NativeAlert | NativeIgnoreBlank |");
+                    sb.AppendLine("| :---: | :---: | :---: | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :--- | :---: | :---: | :--- | :--- | :---: | :---: |");
 
                     for (int c = 1; c <= colCount; c++)
                     {
@@ -126,8 +131,13 @@ public static class RulesAuditExporter
                         if (string.IsNullOrWhiteSpace(cellFormula))
                             cellFormula = archetypeCell.Formula?.ToString() ?? string.Empty;
 
+                        // Identify C# Attribute-Driven Rule
+                        var csharpRule = RuleRegistry.GetRule(tableName, headerText);
+                        bool hasCSharp = csharpRule != null;
+
                         var cfg = Metadata.ReadConfig(archetypeCell);
                         bool isCustomDropdown = !cfg.IsEmpty;
+
                         bool hasNativeValidation = false;
                         string nativeType = string.Empty;
                         string nativeFormula = string.Empty;
@@ -149,10 +159,20 @@ public static class RulesAuditExporter
                         }
                         catch { }
 
-                        string engineType = isCustomDropdown ? "CustomDropdown"
+                        string engineType = hasCSharp ? "CSharpAttribute"
+                                          : isCustomDropdown ? "LegacyDropdown"
                                           : hasNativeValidation ? "NativeValidation"
                                           : (!string.IsNullOrWhiteSpace(cellFormula) && cellFormula.StartsWith("=")) ? "Formula"
                                           : "StandardInput";
+
+                        // Populate payload either from C# Attributes or Legacy Metadata
+                        string sources = hasCSharp ? string.Join(", ", csharpRule!.Sources) : cfg.Source;
+                        string syncs = hasCSharp ? string.Join(" ; ", csharpRule!.SyncRules.Select(s => $"{s.TargetHeader}<-{s.LookupSource}")) : cfg.SyncLeft;
+                        string transform = hasCSharp ? csharpRule!.Transform.ToString() : cfg.Transform;
+                        string defaultRule = hasCSharp && csharpRule!.DefaultRule != null ? csharpRule.DefaultRule.Kind.ToString() : cfg.Filter;
+                        string guards = hasCSharp && csharpRule!.StateGuards.Count > 0 ? $"{csharpRule.StateGuards.Count} Guard(s)" : "";
+                        bool isMulti = hasCSharp ? csharpRule!.IsMultiSelect : cfg.IsMultiSelect;
+                        bool isWarning = hasCSharp ? csharpRule!.IsWarningOnly : cfg.IsWarningOnly;
 
                         sb.AppendLine(
                             $"| {colLetter} " +
@@ -163,12 +183,13 @@ public static class RulesAuditExporter
                             $"| {RulesAuditHelper.EscapePipe(numFormat)} " +
                             $"| {engineType} " +
                             $"| {RulesAuditHelper.EscapePipe(cellFormula)} " +
-                            $"| {RulesAuditHelper.EscapePipe(cfg.Source)} " +
-                            $"| {RulesAuditHelper.EscapePipe(cfg.SyncLeft)} " +
-                            $"| {RulesAuditHelper.EscapePipe(cfg.Filter)} " +
-                            $"| {RulesAuditHelper.EscapePipe(cfg.Transform)} " +
-                            $"| {(cfg.IsMultiSelect ? "TRUE" : "FALSE")} " +
-                            $"| {(cfg.IsWarningOnly ? "TRUE" : "FALSE")} " +
+                            $"| {RulesAuditHelper.EscapePipe(sources)} " +
+                            $"| {RulesAuditHelper.EscapePipe(syncs)} " +
+                            $"| {transform} " +
+                            $"| {RulesAuditHelper.EscapePipe(defaultRule)} " +
+                            $"| {guards} " +
+                            $"| {(isMulti ? "TRUE" : "FALSE")} " +
+                            $"| {(isWarning ? "TRUE" : "FALSE")} " +
                             $"| {nativeType} " +
                             $"| {RulesAuditHelper.EscapePipe(nativeFormula)} " +
                             $"| {nativeAlert} " +
@@ -196,6 +217,7 @@ public static class RulesAuditExporter
                                 dynamic fc = formatConditions[i];
                                 int cfType = (int)fc.Type;
                                 string ruleType = cfType == 2 ? "Expression" : cfType == 1 ? "CellValue" : $"Type_{cfType}";
+
                                 string op = string.Empty;
                                 try { op = ((int)fc.Operator).ToString(); } catch { }
 
@@ -212,7 +234,6 @@ public static class RulesAuditExporter
                                     int r = bgOle & 0xFF;
                                     int g = (bgOle >> 8) & 0xFF;
                                     int b = (bgOle >> 16) & 0xFF;
-
                                     if ((r > 200 && g < 150 && b < 150) || (r > 230 && g > 200 && b > 200 && r > g && r > b))
                                         severity = "Error";
                                     else if (r > 200 && g > 180 && b < 180)
@@ -252,17 +273,10 @@ public static class RulesAuditExporter
             string exportPath = FolderRegistry.Data.GetFilePath(targetFileName);
             FolderRegistry.Data.EnsureExists();
             File.WriteAllText(exportPath, sb.ToString(), Encoding.UTF8);
-
             Clipboard.SetText(sb.ToString());
             MessageBox.Show(
-                $"Audit export complete!\n\n" +
-                $"  Tables: {tableCount}\n" +
-                $"  Header/Date Parameter Cells: {sheetHeaderCellCount}\n" +
-                $"  Saved file: {exportPath}\n" +
-                $"  Copied to Clipboard.",
-                "Export Complete",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Information
+                $"Audit export complete!\n\n  Tables: {tableCount}\n  Header/Date Parameter Cells: {sheetHeaderCellCount}\n  Saved file: {exportPath}\n  Copied to Clipboard.",
+                "Export Complete", MessageBoxButtons.OK, MessageBoxIcon.Information
             );
         }
         catch (Exception ex)

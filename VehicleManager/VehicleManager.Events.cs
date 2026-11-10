@@ -86,8 +86,25 @@ public class Events : IExcelAddIn
                     typeof(InsuranceType)
                 );
 
-                // Sync ONLY Staff records to Data sheet (row-aligned StaffIDList and StaffNameList)
-                DataList.SyncEntities(typeof(StaffRecord));
+                // 1. Sync Staff IDs (ordered numerically)
+                DataList.SyncProperty<StaffRecord, long>(
+                    s => s.StaffID,
+                    customListName: "StaffIDList"
+                );
+
+                // 2. Push StaffShortName into StaffNameList (with fallback to StaffName if blank)
+                DataList.SyncProperty<StaffRecord, string>(
+                    s => !string.IsNullOrWhiteSpace(s.StaffDetails.StaffShortName)
+                        ? s.StaffDetails.StaffShortName
+                        : s.StaffDetails.StaffName,
+                    customListName: "StaffNameList"
+                );
+
+                // Optional: Also sync dedicated StaffShortNameList if needed elsewhere
+                DataList.SyncProperty<StaffRecord, string>(
+                    s => s.StaffDetails.StaffShortName,
+                    customListName: "StaffShortNameList"
+                );
             }
             catch (Exception ex)
             {

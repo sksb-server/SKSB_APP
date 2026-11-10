@@ -1,14 +1,15 @@
 ﻿namespace SKSB_App.VehicleManager;
 
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Threading.Tasks;
 using ExcelDna.Integration;
+using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.Integration.Database;
 using SKSB_App.Core.Types;
 using SKSB_App.Core.WorkbookSave.SheetMapper;
 using SKSB_App.Core.WorkbookSave.Storage;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Threading.Tasks;
 
 internal static class ServerSyncCommands
 {
@@ -94,14 +95,17 @@ internal static class ServerSyncCommands
                         VehicleStatus = Enum.TryParse<VehicleStatus>((string)v.status, true, out var vs) ? vs : VehicleStatus.Active,
                         VehicleDetail = new VehicleDetail
                         {
-                            VehiclePlate = plate,
                             VIN = (string)(v.vin ?? string.Empty),
                             Type = Enum.TryParse<VehicleType>((string)v.vehicle_type, true, out var vt) ? vt : VehicleType.None,
                             Brand = (string)(v.brand ?? string.Empty),
                             Model = (string)(v.model ?? string.Empty),
                             RoadTaxExpiry = v.road_tax_expiry != null ? DateOnly.FromDateTime((DateTime)v.road_tax_expiry) : default,
                             InspectionExpiry = v.inspection_expiry != null ? DateOnly.FromDateTime((DateTime)v.inspection_expiry) : default,
-                            CurrentOdometer = v.current_odometer != null ? Convert.ToInt32(v.current_odometer) : 0
+                            CurrentOdometer = v.current_odometer != null ? Convert.ToInt32(v.current_odometer) : 0,
+                            BoughtDate = v.bought_date != null ? DateOnly.FromDateTime((DateTime)v.bought_date) : null,
+                            SoldDate = v.sold_date != null ? DateOnly.FromDateTime((DateTime)v.sold_date) : null,
+                            BoughtPrice = v.bought_price != null ? Convert.ToDecimal(v.bought_price) : 0.00m,
+                            SoldPrice = v.sold_price != null ? Convert.ToDecimal(v.sold_price) : 0.00m
                         },
                         Maintenances = new List<Maintenance>(),
                         RoadTaxes = new List<RoadTax>(),
@@ -143,9 +147,21 @@ internal static class ServerSyncCommands
                                 OdometerOut = m.odometer_out != null ? Convert.ToInt32(m.odometer_out) : 0,
                                 RepairCost = m.repair_cost != null ? Convert.ToDecimal(m.repair_cost) : 0.00m,
                                 WorkshopName = m.workshop_name?.ToString() ?? string.Empty,
-                                WorkshopAddress = m.workshop_address?.ToString() ?? string.Empty,
                                 MaintenanceStatus = mStatus,
-                                Remarks = m.remarks?.ToString() ?? string.Empty
+                                Remarks = m.remarks?.ToString() ?? string.Empty,
+
+                                // ✅ Load all 11 breakdown costs:
+                                TyreCost = m.tyre_cost != null ? Convert.ToDecimal(m.tyre_cost) : 0.00m,
+                                BrakeCost = m.brake_cost != null ? Convert.ToDecimal(m.brake_cost) : 0.00m,
+                                ClutchCost = m.clutch_cost != null ? Convert.ToDecimal(m.clutch_cost) : 0.00m,
+                                ServiceCost = m.service_cost != null ? Convert.ToDecimal(m.service_cost) : 0.00m,
+                                FuelPumpCost = m.fuel_pump_cost != null ? Convert.ToDecimal(m.fuel_pump_cost) : 0.00m,
+                                AircondCost = m.aircond_cost != null ? Convert.ToDecimal(m.aircond_cost) : 0.00m,
+                                WiringCost = m.wiring_cost != null ? Convert.ToDecimal(m.wiring_cost) : 0.00m,
+                                BatteryCost = m.battery_cost != null ? Convert.ToDecimal(m.battery_cost) : 0.00m,
+                                TowingCost = m.towing_cost != null ? Convert.ToDecimal(m.towing_cost) : 0.00m,
+                                CushionCost = m.cushion_cost != null ? Convert.ToDecimal(m.cushion_cost) : 0.00m,
+                                PartsCost = m.parts_cost != null ? Convert.ToDecimal(m.parts_cost) : 0.00m
                             });
                         }
                     }
@@ -154,6 +170,160 @@ internal static class ServerSyncCommands
                 {
                     SKSB_App.Core.Diagnostics.AppLogger.Error("[PostgreSQL Query] vehicle_maintenance failed", exMaint);
                 }
+
+                // 3. Fetch Road Taxes
+                try
+                {
+                    const string sqlRt = "SELECT * FROM vehicle_road_taxes ORDER BY road_tax_id;";
+                    var rawRt = db.Query<dynamic>(sqlRt).ToList();
+                    foreach (var r in rawRt)
+                    {
+                        string p = (string)r.vehicle_plate;
+                        if (maintMap.TryGetValue(p, out var pv))
+                        {
+                            Enum.TryParse<RoadTaxStatus>((string)(r.status ?? "Active"), true, out var rStatus);
+                            pv.RoadTaxes.Add(new RoadTax
+                            {
+                                RoadTaxID = Convert.ToInt64(r.road_tax_id),
+                                VehiclePlate = p,
+                                RenewDate = r.renew_date != null ? DateOnly.FromDateTime(Convert.ToDateTime(r.renew_date)) : DateOnly.FromDateTime(DateTime.Today),
+                                ExpiryDate = r.expiry_date != null ? DateOnly.FromDateTime(Convert.ToDateTime(r.expiry_date)) : DateOnly.FromDateTime(DateTime.Today.AddYears(1)),
+                                Amount = r.amount != null ? Convert.ToDecimal(r.amount) : 0.00m,
+                                Status = rStatus,
+                                Remarks = r.remarks?.ToString() ?? string.Empty
+                            });
+                        }
+                    }
+                }
+                catch (Exception exRt) { AppLogger.Error("[PostgreSQL Query] vehicle_road_taxes failed", exRt); }
+
+                // 4. Fetch Inspections
+                try
+                {
+                    const string sqlInsp = "SELECT * FROM vehicle_inspections ORDER BY inspection_id;";
+                    var rawInsp = db.Query<dynamic>(sqlInsp).ToList();
+                    foreach (var i in rawInsp)
+                    {
+                        string p = (string)i.vehicle_plate;
+                        if (maintMap.TryGetValue(p, out var pv))
+                        {
+                            Enum.TryParse<InspectionStatus>((string)(i.status ?? "Scheduled"), true, out var iStatus);
+                            pv.Inspections.Add(new Inspection
+                            {
+                                InspectionID = Convert.ToInt64(i.inspection_id),
+                                VehiclePlate = p,
+                                ScheduleDateIn = i.schedule_date_in != null ? DateOnly.FromDateTime(Convert.ToDateTime(i.schedule_date_in)) : DateOnly.FromDateTime(DateTime.Today),
+                                DateOut = i.date_out != null ? DateOnly.FromDateTime(Convert.ToDateTime(i.date_out)) : DateOnly.FromDateTime(DateTime.Today),
+                                ExpiryDate = i.expiry_date != null ? DateOnly.FromDateTime(Convert.ToDateTime(i.expiry_date)) : DateOnly.FromDateTime(DateTime.Today.AddMonths(6)),
+                                Amount = i.amount != null ? Convert.ToDecimal(i.amount) : 0.00m,
+                                Status = iStatus,
+                                Address = i.address?.ToString() ?? string.Empty,
+                                Remarks = i.remarks?.ToString() ?? string.Empty
+                            });
+                        }
+                    }
+                }
+                catch (Exception exInsp) { AppLogger.Error("[PostgreSQL Query] vehicle_inspections failed", exInsp); }
+
+                // 5. Fetch Permits
+                try
+                {
+                    const string sqlPermits = "SELECT * FROM vehicle_permits ORDER BY permit_id;";
+                    var rawPermits = db.Query<dynamic>(sqlPermits).ToList();
+                    foreach (var pRec in rawPermits)
+                    {
+                        string p = (string)pRec.vehicle_plate;
+                        if (maintMap.TryGetValue(p, out var pv))
+                        {
+                            Enum.TryParse<VehiclePermitType>((string)(pRec.permit_type ?? "APAD_Carrier_A"), true, out var pType);
+                            Enum.TryParse<VehiclePermitStatus>((string)(pRec.status ?? "Active"), true, out var pStatus);
+                            pv.Permits.Add(new VehiclePermit
+                            {
+                                PermitID = Convert.ToInt64(pRec.permit_id),
+                                VehiclePlate = p,
+                                PermitType = pType,
+                                RenewDate = pRec.renew_date != null ? DateOnly.FromDateTime(Convert.ToDateTime(pRec.renew_date)) : DateOnly.FromDateTime(DateTime.Today),
+                                ExpiryDate = pRec.expiry_date != null ? DateOnly.FromDateTime(Convert.ToDateTime(pRec.expiry_date)) : DateOnly.FromDateTime(DateTime.Today.AddYears(1)),
+                                Amount = pRec.amount != null ? Convert.ToDecimal(pRec.amount) : 0.00m,
+                                Status = pStatus,
+                                Remarks = pRec.remarks?.ToString() ?? string.Empty
+                            });
+                        }
+                    }
+                }
+                catch (Exception exPermits) { AppLogger.Error("[PostgreSQL Query] vehicle_permits failed", exPermits); }
+
+                // 6. Fetch Insurances
+                try
+                {
+                    const string sqlIns = "SELECT * FROM vehicle_insurances ORDER BY insurance_id;";
+                    var rawIns = db.Query<dynamic>(sqlIns).ToList();
+                    foreach (var ins in rawIns)
+                    {
+                        string p = (string)ins.vehicle_plate;
+                        if (maintMap.TryGetValue(p, out var pv))
+                        {
+                            Enum.TryParse<InsuranceType>((string)(ins.insurance_type ?? "Comprehensive"), true, out var insType);
+                            Enum.TryParse<InsuranceStatus>((string)(ins.status ?? "Active"), true, out var insStatus);
+                            pv.Insurances.Add(new VehicleInsurance
+                            {
+                                InsuranceID = Convert.ToInt64(ins.insurance_id),
+                                VehiclePlate = p,
+                                InsuranceCompany = ins.insurance_company?.ToString() ?? string.Empty,
+                                InsuranceType = insType,
+                                RenewDate = ins.renew_date != null ? DateOnly.FromDateTime(Convert.ToDateTime(ins.renew_date)) : DateOnly.FromDateTime(DateTime.Today),
+                                ExpiryDate = ins.expiry_date != null ? DateOnly.FromDateTime(Convert.ToDateTime(ins.expiry_date)) : DateOnly.FromDateTime(DateTime.Today.AddYears(1)),
+                                Amount = ins.amount != null ? Convert.ToDecimal(ins.amount) : 0.00m,
+                                Status = insStatus,
+                                Remarks = ins.remarks?.ToString() ?? string.Empty,
+                                InsuranceNumber = ins.insurance_number?.ToString() ?? string.Empty // <-- Added
+                            });
+                        }
+                    }
+                }
+                catch (Exception exIns) { AppLogger.Error("[PostgreSQL Query] vehicle_insurances failed", exIns); }
+
+                // 7. Fetch Odometers
+                try
+                {
+                    const string sqlOdo = "SELECT * FROM vehicle_odometers ORDER BY odometer_id;";
+                    var rawOdo = db.Query<dynamic>(sqlOdo).ToList();
+                    foreach (var o in rawOdo)
+                    {
+                        string p = (string)o.vehicle_plate;
+                        if (maintMap.TryGetValue(p, out var pv))
+                        {
+                            // Map staff_id cleanly (supports both legacy driven_by fallback and new staff_id)
+                            long sId = 0;
+                            if (o.staff_id != null)
+                            {
+                                long.TryParse(o.staff_id.ToString(), out sId);
+                            }
+                            else if (o.driven_by != null)
+                            {
+                                long.TryParse(o.driven_by.ToString(), out sId);
+                            }
+
+                            pv.OdometerLogs.Add(new OdometerLog
+                            {
+                                OdometerID = Convert.ToInt64(o.odometer_id),
+                                Date = o.date != null ? DateOnly.FromDateTime(Convert.ToDateTime(o.date)) : DateOnly.FromDateTime(DateTime.Today),
+                                VehiclePlate = p,
+                                StaffID = sId,
+                                Project = o.project?.ToString() ?? string.Empty,
+                                OdometerBefore = o.odometer_before != null ? Convert.ToInt32(o.odometer_before) : 0,
+                                CurrentOdometer = o.current_odometer != null ? Convert.ToInt32(o.current_odometer) : 0,
+                                FuelCardNumber = o.fuel_card_number?.ToString() ?? string.Empty,
+                                FuelCompany = o.fuel_company?.ToString() ?? string.Empty,
+                                StationName = o.station_name?.ToString() ?? string.Empty,
+                                ReceiptNumber = o.receipt_number?.ToString() ?? string.Empty,
+                                Amount = o.amount != null ? Convert.ToDecimal(o.amount) : 0.00m,
+                                Remarks = o.remarks?.ToString() ?? string.Empty
+                            });
+                        }
+                    }
+                }
+                catch (Exception exOdo) { AppLogger.Error("[PostgreSQL Query] vehicle_odometers failed", exOdo); }
 
                 // Summary of child records
                 int totalRoadTaxes = serverVehicles.Sum(v => v.RoadTaxes.Count);
@@ -255,14 +425,15 @@ internal static class ServerSyncCommands
     {
         try
         {
-            if (!ServerEnvironment.IsSimulatedOffline())
-            {
-                var db = new PostgreSqlService();
-                const string sql = "SELECT fuel_company_name FROM lookup_fuel_companies ORDER BY fuel_company_name;";
-                return db.Query<string>(sql).Where(s => !string.IsNullOrWhiteSpace(s)).Distinct().ToList();
-            }
+            var db = new PostgreSqlService();
+            const string sql = "SELECT fuel_company_name FROM lookup_fuel_companies ORDER BY fuel_company_name;";
+            var list = db.Query<string>(sql).Where(s => !string.IsNullOrWhiteSpace(s)).Distinct().ToList();
+            return list; // Return exact records from database (even if empty)
         }
-        catch { }
+        catch (Exception ex)
+        {
+            System.Diagnostics.Debug.WriteLine($"[FetchFuelCompanies DB Error] {ex.Message}");
+        }
 
         var cached = OfflineSnapshot.Load<List<FuelCompanyNameRecord>>();
         return cached?.Select(c => c.FuelCompanyName).Where(n => !string.IsNullOrWhiteSpace(n)).ToList() ?? new List<string>();

@@ -1,19 +1,19 @@
 ﻿namespace SKSB_App.Core.WorkbookOpen.Sync;
 
-using System;
-using System.IO;
-using System.Windows.Forms;
+using ExcelDna.Integration;
 using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.WorkbookOpen.Sheet;
 using SKSB_App.Core.WorkbookSave.Entry;
 using SKSB_App.Core.WorkbookSave.Storage;
+using System;
+using System.IO;
+using System.Windows.Forms;
 
 public static class OfflineSave
 {
     public static void HandleStartup<T>(SaveContract<T> contract)
     {
         using var _ = AppLogger.Scope($"OfflineSave.HandleStartup<{typeof(T).Name}>({contract.ModuleName})");
-
         try
         {
             if (SheetOperations.IsMasterTemplateFile() || SheetOperations.IsTemplateEditMode)
@@ -22,6 +22,11 @@ public static class OfflineSave
                 SheetOperations.ShowStatusConfirmation("Design Mode: Auto-load bypassed.");
                 return;
             }
+
+            dynamic xlApp = ExcelDnaUtil.Application;
+            dynamic wb = xlApp?.ActiveWorkbook;
+            dynamic? activeSheetBefore = null;
+            try { activeSheetBefore = xlApp?.ActiveSheet; } catch { }
 
             AppLogger.Info("Calling contract.SyncLookups...");
             contract.SyncLookups?.Invoke(false);
@@ -63,7 +68,6 @@ public static class OfflineSave
                     AppLogger.Info($"LocalPendingUtc={localOfflineUtc:yyyy-MM-dd HH:mm:ss}, ServerLatestUtc={serverLastUpdateUtc:yyyy-MM-dd HH:mm:ss}");
 
                     bool canCommit = true;
-
 #if DEBUG
                     var serverDataDebug = contract.FetchFromServer != null ? contract.FetchFromServer() : default;
                     string diffMessage = contract.FormatConflictSummary != null && serverDataDebug != null
@@ -88,20 +92,14 @@ public static class OfflineSave
                         MessageBoxIcon.Question
                     );
 
-                    if (debugChoice == DialogResult.Cancel)
-                    {
-                        canCommit = false;
-                    }
+                    if (debugChoice == DialogResult.Cancel) canCommit = false;
                     else if (debugChoice == DialogResult.No)
                     {
                         OfflineSnapshot.ClearPendingSnapshot<T>();
                         canCommit = false;
                         AppLogger.Info("User discarded offline pending file.");
                     }
-                    else
-                    {
-                        canCommit = true;
-                    }
+                    else canCommit = true;
 #else
                     if (serverLastUpdateUtc.HasValue && serverLastUpdateUtc.Value > localOfflineUtc)
                     {
@@ -123,13 +121,9 @@ public static class OfflineSave
                         );
 
                         canCommit = (dialogChoice == DialogResult.Yes);
-                        if (!canCommit)
-                        {
-                            OfflineSnapshot.ClearPendingSnapshot<T>();
-                        }
+                        if (!canCommit) OfflineSnapshot.ClearPendingSnapshot<T>();
                     }
 #endif
-
                     if (canCommit)
                     {
                         AppLogger.Info("Committing offline pending save to server...");
@@ -138,7 +132,29 @@ public static class OfflineSave
                         {
                             OfflineSnapshot.ClearPendingSnapshot<T>();
                             AppLogger.Info("Committed pending snapshot to server successfully. Calling PopulateWorksheet...");
-                            contract.PopulateWorksheet?.Invoke(pendingData!);
+
+                            // FREEZE SCREEN DURING POPULATION
+                            bool origUpdating = true;
+                            bool origEvents = true;
+                            int origCalculation = -4105;
+                            try { origUpdating = (bool)xlApp.ScreenUpdating; xlApp.ScreenUpdating = false; } catch { }
+                            try { origEvents = (bool)xlApp.EnableEvents; xlApp.EnableEvents = false; } catch { }
+                            try { origCalculation = (int)xlApp.Calculation; xlApp.Calculation = -4135; /* xlCalculationManual */ } catch { }
+                            try
+                            {
+                                contract.PopulateWorksheet?.Invoke(pendingData!);
+                                if (activeSheetBefore != null)
+                                {
+                                    try { activeSheetBefore.Activate(); } catch { }
+                                }
+                            }
+                            finally
+                            {
+                                try { xlApp.Calculation = origCalculation; } catch { }
+                                try { xlApp.EnableEvents = origEvents; } catch { }
+                                try { xlApp.ScreenUpdating = origUpdating; } catch { }
+                            }
+
                             SaveNotificationDialog.ShowSuccess(
                                 contract.ModuleName,
                                 "Offline changes uploaded successfully!\n\n  Committed records to PostgreSQL server.\n  Local pending upload stash has been cleared."
@@ -169,7 +185,31 @@ public static class OfflineSave
                 if (serverData != null && !isEmpty)
                 {
                     AppLogger.Info("Calling contract.PopulateWorksheet with server records...");
-                    contract.PopulateWorksheet?.Invoke(serverData);
+
+                    // TOP-LEVEL FREEZE FOR THE ENTIRE POPULATE PASS
+                    bool origUpdating = true;
+                    bool origEvents = true;
+                    int origCalculation = -4105; // xlCalculationAutomatic
+                    try { origUpdating = (bool)xlApp.ScreenUpdating; xlApp.ScreenUpdating = false; } catch { }
+                    try { origEvents = (bool)xlApp.EnableEvents; xlApp.EnableEvents = false; } catch { }
+                    try { origCalculation = (int)xlApp.Calculation; xlApp.Calculation = -4135; /* xlCalculationManual */ } catch { }
+
+                    try
+                    {
+                        contract.PopulateWorksheet?.Invoke(serverData);
+
+                        if (activeSheetBefore != null)
+                        {
+                            try { activeSheetBefore.Activate(); } catch { }
+                        }
+                    }
+                    finally
+                    {
+                        try { xlApp.Calculation = origCalculation; } catch { }
+                        try { xlApp.EnableEvents = origEvents; } catch { }
+                        try { xlApp.ScreenUpdating = origUpdating; } catch { }
+                    }
+
                     SheetOperations.ShowStatusConfirmation($"{contract.ModuleName} records loaded from server.");
                 }
             }

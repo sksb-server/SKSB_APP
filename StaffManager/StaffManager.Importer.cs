@@ -4,7 +4,9 @@ using System;
 using System.Collections.Generic;
 using System.Text.RegularExpressions;
 using SKSB_App.Core.Integration.Erp;
+using SKSB_App.Core.RuntimeUI.RuleEngine;
 using SKSB_App.Core.Types;
+using SKSB_App.Core.Types.Attributes;
 
 public static class StaffImportConfig
 {
@@ -64,7 +66,7 @@ public static class Importer
             result.TotalRowsProcessed++;
 
             string rawCode = row.GetString("Code");
-            string name = row.GetString("Name");
+            string name = row.GetString("Name")?.Trim() ?? string.Empty;
             string rawDept = row.GetString("Department");
 
             string mappedDept = StaffImportConfig.MapDepartment(rawDept);
@@ -108,6 +110,8 @@ public static class Importer
                 continue;
             }
 
+            string shortName = RuleEvaluator.ApplyTextTransform(name, TransformKind.ShortNameFirstLast);
+
             // 3. Validate Employment Dates
             DateOnly? rawJoinDate = row.GetDateOnly("Join Date") ?? row.GetDateOnly("JoinDate");
             DateOnly? rawResignDate = row.GetDateOnly("Resign") ?? row.GetDateOnly("Resign Date") ?? row.GetDateOnly("ResignDate");
@@ -145,6 +149,10 @@ public static class Importer
             if (string.IsNullOrWhiteSpace(phone)) phone = row.GetString("Handphone");
             if (string.IsNullOrWhiteSpace(phone)) phone = row.GetString("Phone");
 
+            ContractStatus initialStatus = (rawResignDate.HasValue && rawResignDate.Value <= DateOnly.FromDateTime(DateTime.Today))
+                ? ContractStatus.Resigned
+                : ContractStatus.Active;
+
             var staff = new StaffRecord
             {
                 StaffID = staffId,
@@ -152,13 +160,14 @@ public static class Importer
                 {
                     StaffID = staffId,
                     StaffName = name,
+                    StaffShortName = shortName,
                     Department = mappedDept,
                     NRIC = nric,
                     Passport = passport,
                     Phone = phone,
                     JoinDate = joinDate,
                     ResignDate = rawResignDate,
-                    ContractStatus = ContractStatus.Active
+                    ContractStatus = initialStatus
                 },
                 VehicleLicenses = new List<VehicleLicense>(),
                 SkillLicenses = new List<SkillLicense>()
