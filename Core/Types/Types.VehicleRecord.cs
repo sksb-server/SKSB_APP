@@ -70,6 +70,11 @@ public enum InsuranceStatus
     Active, Expired, Cancelled, None
 }
 
+public enum InsuranceClaimStatus
+{
+    Pending, In_Review, Approved, Settled, Rejected, Cancelled, None
+}
+
 public enum FuelCompany
 {
     Petronas, Shell, Caltex, Petron, BHPetrol, Other, None
@@ -102,6 +107,7 @@ public record VehicleRecord
     public List<RoadTax> RoadTaxes { get; set; } = new();
     public List<Inspection> Inspections { get; set; } = new();
     public List<VehicleInsurance> Insurances { get; set; } = new();
+    public List<InsuranceClaim> InsuranceClaims { get; set; } = new();
     public List<OdometerLog> OdometerLogs { get; set; } = new();
 
     public List<OdometerLog> Odometers
@@ -472,6 +478,77 @@ public record InsuranceCompanyRecord
     [ExcelColumn("Agent Contact Number")]
     [ColumnRule(IsRequired = false)]
     public string AgentContactNumber { get; set; } = string.Empty;
+}
+
+[ExcelTable("InsuranceClaimsTable")]
+public record InsuranceClaim
+{
+    [ExcelColumn("Claim ID", isRequired: true)]
+    [ColumnRule(IsRequired = true)]
+    [ColumnDefault(DefaultKind.AutoIncrement)]
+    public long ClaimID { get; set; }
+
+    [ExcelColumn("Claim Date", isRequired: true)]
+    [ColumnRule(IsRequired = true)]
+    [ColumnDefault(DefaultKind.Today)]
+    public DateOnly ClaimDate { get; set; } = DateOnly.FromDateTime(DateTime.Today);
+
+    [ExcelColumn("Settlement Date")]
+    [ColumnRule(IsRequired = false)]
+    [ColumnDateGreaterThan("Claim Date")]
+    public DateOnly? SettlementDate { get; set; }
+
+    [ExcelColumn("Vehicle Plate", isRequired: true)]
+    [ColumnRule("AllVehiclesTable[Vehicle Plate]", IsRequired = true)]
+    [ColumnSync("Vehicle Type", "AllVehiclesTable[Vehicle Plate]", "AllVehiclesTable[Vehicle Type]")]
+    public string VehiclePlate { get; set; } = string.Empty;
+
+    [JsonIgnore] // UI-only helper: derived from Vehicle Plate
+    [ExcelColumn("Vehicle Type")]
+    [ColumnRule("VehicleTypeList", IsRequired = false, IsWarningOnly = true)]
+    [ColumnSync("Vehicle Plate", "AllVehiclesTable[Vehicle Type]", "AllVehiclesTable[Vehicle Plate]")]
+    public VehicleType VehicleType { get; set; } = VehicleType.None;
+
+    [ExcelColumn("Staff ID")]
+    [ColumnRule("StaffIDList", IsRequired = false, IsWarningOnly = true)]
+    [ColumnSync("Staff Name", "StaffIDList", "StaffShortNameList")]
+    public long StaffID { get; set; }
+
+    [JsonIgnore] // UI-only helper: derived from Staff ID
+    [ExcelColumn("Staff Name")]
+    [ColumnRule("StaffShortNameList", IsRequired = false, IsWarningOnly = true)]
+    [ColumnSync("Staff ID", "StaffShortNameList", "StaffIDList")]
+    public string StaffName { get; set; } = string.Empty;
+
+    [ExcelColumn("Maintenance ID")]
+    [ColumnRule("MaintenancesTable[Maintenance ID]", IsRequired = false, IsWarningOnly = true)]
+    [ColumnSync("Workshop Name", "MaintenancesTable[Maintenance ID]", "MaintenancesTable[Workshop Name]")]
+    [ColumnSync("Workshop Address", "MaintenancesTable[Maintenance ID]", "MaintenancesTable[Workshop Address]")]
+    public long MaintenanceID { get; set; } = 0;
+
+    [ExcelColumn("Workshop Name")]
+    [ColumnRule("WorkshopsTable[Workshop Name]", IsRequired = false, IsWarningOnly = true)]
+    [ColumnSync("Workshop Address", "WorkshopsTable[Workshop Name]", "WorkshopsTable[Workshop Address]")]
+    public string WorkshopName { get; set; } = string.Empty;
+
+    [JsonIgnore] // UI-only helper: derived from Maintenance ID / Workshop Name
+    [ExcelColumn("Workshop Address")]
+    [ColumnRule("WorkshopsTable[Workshop Address]", IsWarningOnly = true, IsRequired = false)]
+    public string WorkshopAddress { get; set; } = string.Empty;
+
+    [ExcelColumn("Status", isRequired: true)]
+    [ColumnRule("InsuranceClaimStatusList", IsRequired = true)]
+    [ColumnDefault(DefaultKind.Literal, literalValue: "Pending")]
+    [ColumnStateGuard(1, StateConditionKind.ColumnNotEmpty, "Settled", "Pending", "Settlement Date", SkipIfCurrentEquals = "Rejected", DisallowForcedValueWhenFalse = true)]
+    public InsuranceClaimStatus Status { get; set; } = InsuranceClaimStatus.Pending;
+
+    [ExcelColumn("Claim Amount")]
+    [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
+    public decimal ClaimAmount { get; set; } = 0.00m;
+
+    [ExcelColumn("Remarks")]
+    [ColumnRule(IsRequired = false)]
+    public string Remarks { get; set; } = string.Empty;
 }
 
 // =========================================================================

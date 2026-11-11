@@ -87,6 +87,7 @@ public static class OfflineSnapshot
 
         string json = JsonSerializer.Serialize(data, JsonOptions);
         File.WriteAllText(fullPath, json);
+        DebugLog($"WRITE local cache '{targetFile}' ({DescribeCount(data)}); writeToDatabase={writeToDatabase}");
 
         if (writeToDatabase)
         {
@@ -95,6 +96,30 @@ public static class OfflineSnapshot
 
         return fullPath;
     }
+
+    // =========================================================================
+    // DEBUG TRACE (compiled out of Release builds)
+    // =========================================================================
+    [System.Diagnostics.Conditional("DEBUG")]
+    internal static void DebugLog(string message)
+    {
+        string line = $"[OfflineSnapshot] {message}";
+        System.Diagnostics.Debug.WriteLine(line);
+        SKSB_App.Core.Diagnostics.AppLogger.Info(line);
+    }
+
+    /// <summary>
+    /// Debug trace that states where a table's data came from. <paramref name="source"/> is "SERVER" or
+    /// "OFFLINE CACHE"; <paramref name="reason"/> explains why the cache was used.
+    /// </summary>
+    [System.Diagnostics.Conditional("DEBUG")]
+    public static void LogDataSource(string manager, string table, string source, string reason = "")
+    {
+        DebugLog($"LOAD [{manager}] {table} <- {source}" + (string.IsNullOrEmpty(reason) ? "" : $" ({reason})"));
+    }
+
+    private static string DescribeCount(object? data) =>
+        data is System.Collections.ICollection c ? $"{c.Count} item(s)" : (data == null ? "null" : "1 object");
 
     public static async Task<string> SaveAsync<T>(T data, bool writeToDatabase = true)
     {
@@ -107,20 +132,42 @@ public static class OfflineSnapshot
         string targetFile = $"{typeName.ToLowerInvariant()}_data.json";
 
         if (!FolderRegistry.Data.Exists())
+        {
+            DebugLog($"READ local cache '{targetFile}': data folder missing -> nothing loaded");
             return default;
+        }
 
         string fullPath = FolderRegistry.Data.GetFilePath(targetFile);
         if (!File.Exists(fullPath))
+        {
+            DebugLog($"READ local cache '{targetFile}': file not found -> nothing loaded");
             return default;
+        }
 
         try
         {
             string json = File.ReadAllText(fullPath);
-            return JsonSerializer.Deserialize<T>(json, JsonOptions);
+            var result = JsonSerializer.Deserialize<T>(json, JsonOptions);
+            DebugLog($"READ local cache '{targetFile}' ({DescribeCount(result)}), last written {File.GetLastWriteTime(fullPath):yyyy-MM-dd HH:mm:ss}");
+            return result;
         }
-        catch
+        catch (Exception ex)
         {
+            DebugLog($"READ local cache '{targetFile}' FAILED: {ex.Message}");
             return default;
+        }
+    }
+
+    /// <summary>Deletes the local cache file for <typeparamref name="T"/> (e.g. a stale snapshot).</summary>
+    public static void Clear<T>()
+    {
+        string targetFile = $"{ResolveTypeName(typeof(T)).ToLowerInvariant()}_data.json";
+        if (!FolderRegistry.Data.Exists()) return;
+        string fullPath = FolderRegistry.Data.GetFilePath(targetFile);
+        if (File.Exists(fullPath))
+        {
+            File.Delete(fullPath);
+            DebugLog($"CLEAR local cache '{targetFile}'");
         }
     }
 

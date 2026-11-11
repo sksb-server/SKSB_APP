@@ -47,6 +47,12 @@ public class SaveContract<T> : ISaveContract
     // =========================================================================
     public Func<(T? Data, List<string> Errors, List<string> Warnings)> ExtractAndValidate { get; set; } = null!;
     public Predicate<T?> IsDatasetEmpty { get; set; } = data => data == null;
+
+    /// <summary>
+    /// When true, an empty (but non-null) server dataset still runs <see cref="PopulateWorksheet"/> on startup,
+    /// so auxiliary/reference tables (e.g. fuel companies, workshops) load even before any master record exists.
+    /// </summary>
+    public bool PopulateStartupWhenEmpty { get; set; }
     public Func<T, (bool Success, string ErrorMessage)> SaveToServer { get; set; } = null!;
 
     public Action<T>? PopulateWorksheet { get; set; }

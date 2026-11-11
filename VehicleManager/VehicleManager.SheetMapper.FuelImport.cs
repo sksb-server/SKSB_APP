@@ -28,7 +28,7 @@ internal static partial class SheetMapper
     {
         string id = string.IsNullOrWhiteSpace(log.VehiclePlate)
             ? (log.FuelCardNumber ?? string.Empty).Trim()
-            : NormalizePlate(log.VehiclePlate);
+            : VehiclePlateHelper.NormalizePlate(log.VehiclePlate);
         return $"{log.Date:yyyyMMdd}_{(log.Time ?? string.Empty).Trim()}_{id}_{log.Amount:F2}_{(log.ReceiptNumber ?? string.Empty).Trim()}_{log.CurrentOdometer}_{(log.StationName ?? string.Empty).Trim()}_{(log.FuelType ?? string.Empty).Trim()}_{log.PriceAtFueling:F2}_{log.FuelAmount:F2}";
     }
 
@@ -38,13 +38,13 @@ internal static partial class SheetMapper
         dynamic wb = xlApp.ActiveWorkbook;
         if (wb == null) throw new InvalidOperationException("No active workbook found.");
 
-        dynamic? wsOdo = ResolveSheetSafely((object)wb, OdometerAliases, "Odometers");
+        dynamic? wsOdo = SheetMapperHelper.ResolveSheetSafely((object)wb, OdometerAliases, "Odometers");
         if (wsOdo == null) throw new InvalidOperationException("Worksheet 'Odometers' was not found in active workbook.");
 
         List<OdometerLog> existingLogs = TableMapper.ExtractFromTable<OdometerLog>((object)wsOdo, "OdometersTable");
         List<FuelCardRecord> fuelCards = TableMapper.ExtractFromTable<FuelCardRecord>((object)wsOdo, "FuelCardsTable");
 
-        dynamic? wsMaster = ResolveSheetSafely((object)wb, MasterSheetAliases, MasterSheetName);
+        dynamic? wsMaster = SheetMapperHelper.ResolveSheetSafely((object)wb, AllVehicleAliases, MasterSheetName);
         List<VehicleRecord> masterVehicles = wsMaster != null
             ? TableMapper.ExtractFromTable<VehicleRecord>((object)wsMaster, MasterTableName)
             : new List<VehicleRecord>();
@@ -98,7 +98,7 @@ internal static partial class SheetMapper
 
         var vehicleTypeMap = masterVehicles
             .Where(v => !string.IsNullOrWhiteSpace(v.VehiclePlate))
-            .GroupBy(v => NormalizePlate(v.VehiclePlate), StringComparer.OrdinalIgnoreCase)
+            .GroupBy(v => VehiclePlateHelper.NormalizePlate(v.VehiclePlate), StringComparer.OrdinalIgnoreCase)
             .ToDictionary(g => g.Key, g => g.First().VehicleDetail.Type.ToString(), StringComparer.OrdinalIgnoreCase);
 
         long maxTxId = 0;
@@ -117,17 +117,17 @@ internal static partial class SheetMapper
         foreach (var raw in parsedItems)
         {
             string resolvedCard = ResolveFullCardNumber(raw.CardNumber, cardMap, out FuelCardRecord? matchedCard);
-            string plate = FormatPlate(raw.VehiclePlate);
+            string plate = VehiclePlateHelper.FormatPlate(raw.VehiclePlate);
 
             if ((string.IsNullOrWhiteSpace(plate) || plate.Equals("SPARE", StringComparison.OrdinalIgnoreCase)) &&
                 matchedCard != null && !string.IsNullOrWhiteSpace(matchedCard.CardOwnerID) &&
                 !long.TryParse(matchedCard.CardOwnerID.Trim(), out _))
             {
-                plate = FormatPlate(matchedCard.CardOwnerID);
+                plate = VehiclePlateHelper.FormatPlate(matchedCard.CardOwnerID);
             }
 
             string vType = raw.VehicleType;
-            if (string.IsNullOrWhiteSpace(vType) && vehicleTypeMap.TryGetValue(NormalizePlate(plate), out var vt))
+            if (string.IsNullOrWhiteSpace(vType) && vehicleTypeMap.TryGetValue(VehiclePlateHelper.NormalizePlate(plate), out var vt))
             {
                 vType = vt;
             }

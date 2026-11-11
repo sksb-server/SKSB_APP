@@ -267,11 +267,10 @@ public static class SheetMapper
                     TableMapper.PopulateTableSafe<SkillLicense>((object)sWs, "SkillLicensesTable", allSLicenses);
 
                     // Load SkillLicenseTypes from local cache (already refreshed during FetchStaffRecords)
-                    var savedTypes = OfflineSnapshot.Load<List<SkillLicenseType>>();
-                    if (savedTypes == null || savedTypes.Count == 0)
-                    {
-                        savedTypes = ServerSyncCommands.FetchSkillLicenseTypesFromDb();
-                    }
+                    // Cache is refreshed from the server (even when empty) by FetchSkillLicenseTypesFromDb;
+                    // re-query only if no cache exists at all.
+                    var savedTypes = OfflineSnapshot.Load<List<SkillLicenseType>>()
+                                     ?? ServerSyncCommands.FetchSkillLicenseTypesFromDb();
 
                     if (savedTypes != null && savedTypes.Count > 0)
                     {
@@ -299,11 +298,8 @@ public static class SheetMapper
             dynamic? ws = ResolveSheetSafely((object)wb, SkillLicenseAliases, "Skill Licenses");
             if (ws == null) return;
 
+            // FetchSkillLicenseTypesFromDb already falls back to the offline cache only when the server is unreachable.
             var types = ServerSyncCommands.FetchSkillLicenseTypesFromDb();
-            if (types.Count == 0)
-            {
-                types = OfflineSnapshot.Load<List<SkillLicenseType>>() ?? new List<SkillLicenseType>();
-            }
 
             if (types.Count > 0)
             {

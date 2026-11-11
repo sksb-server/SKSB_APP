@@ -64,6 +64,7 @@ public static partial class TableRowManager
         TableNatures["InspectionsTable"] = TableNature.Additive;
         TableNatures["PermitsTable"] = TableNature.Additive;
         TableNatures["InsurancesTable"] = TableNature.Additive;
+        TableNatures["InsuranceClaimsTable"] = TableNature.Additive;
         TableNatures["StaffLicensesTable"] = TableNature.Additive;
         TableNatures["StaffLeavesTable"] = TableNature.Additive;
     }
@@ -105,6 +106,7 @@ public static partial class TableRowManager
             norm.Contains("roadtax") ||
             norm.Contains("permit") ||
             (norm.Contains("insurance") && !norm.Contains("company") && !norm.Contains("companies")) ||
+            norm.Contains("claim") ||
             norm.Contains("log") ||
             norm.Contains("transaction") ||
             norm.Contains("attendance") ||

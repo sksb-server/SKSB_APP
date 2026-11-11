@@ -19,14 +19,14 @@ internal static partial class SheetMapper
         dynamic wb = wbObj;
 
         List<Workshop> workshops = new();
-        dynamic? wsWorkshop = ResolveSheetSafely((object)wb, WorkshopAliases, "Workshops");
+        dynamic? wsWorkshop = SheetMapperHelper.ResolveSheetSafely((object)wb, WorkshopAliases, "Workshops");
         if (wsWorkshop != null)
         {
             workshops = TableMapper.ExtractFromTable<Workshop>((object)wsWorkshop, "WorkshopsTable");
         }
 
         List<InsuranceCompanyRecord> insuranceCompanies = new();
-        dynamic? wsIns = ResolveSheetSafely((object)wb, InsuranceAliases, "Insurances");
+        dynamic? wsIns = SheetMapperHelper.ResolveSheetSafely((object)wb, InsuranceAliases, "Insurances");
         if (wsIns != null)
         {
             insuranceCompanies = TableMapper.ExtractFromTable<InsuranceCompanyRecord>((object)wsIns, "InsuranceCompaniesTable");
@@ -34,7 +34,7 @@ internal static partial class SheetMapper
 
         List<FuelCardRecord> fuelCards = new();
         List<FuelCompanyNameRecord> fuelCompanyRecords = new();
-        dynamic? wsOdo = ResolveSheetSafely((object)wb, OdometerAliases, "Odometers");
+        dynamic? wsOdo = SheetMapperHelper.ResolveSheetSafely((object)wb, OdometerAliases, "Odometers");
         if (wsOdo != null)
         {
             fuelCards = TableMapper.ExtractFromTable<FuelCardRecord>((object)wsOdo, "FuelCardsTable");
@@ -108,7 +108,7 @@ internal static partial class SheetMapper
         dynamic wb = wbObj;
 
         // 1. WorkshopsTable
-        dynamic? wsWorkshop = ResolveSheetSafely((object)wb, WorkshopAliases, "Workshops");
+        dynamic? wsWorkshop = SheetMapperHelper.ResolveSheetSafely((object)wb, WorkshopAliases, "Workshops");
         if (wsWorkshop != null)
         {
             try { wsWorkshop.Unprotect("SKSB_Internal_Guard"); } catch { }
@@ -118,7 +118,7 @@ internal static partial class SheetMapper
         }
 
         // 2. InsuranceCompaniesTable
-        dynamic? wsIns = ResolveSheetSafely((object)wb, InsuranceAliases, "Insurances");
+        dynamic? wsIns = SheetMapperHelper.ResolveSheetSafely((object)wb, InsuranceAliases, "Insurances");
         if (wsIns != null)
         {
             try { wsIns.Unprotect("SKSB_Internal_Guard"); } catch { }
@@ -128,7 +128,7 @@ internal static partial class SheetMapper
         }
 
         // 3. FuelCardsTable & FuelCompanyNamesTable
-        dynamic? wsOdo = ResolveSheetSafely((object)wb, OdometerAliases, "Odometers");
+        dynamic? wsOdo = SheetMapperHelper.ResolveSheetSafely((object)wb, OdometerAliases, "Odometers");
         if (wsOdo != null)
         {
             try { wsOdo.Unprotect("SKSB_Internal_Guard"); } catch { }

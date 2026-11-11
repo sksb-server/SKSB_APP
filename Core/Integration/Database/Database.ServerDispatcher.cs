@@ -228,6 +228,23 @@ public static class ServerDispatcher
             };
         })).ToList();
 
+        var insuranceClaimRecords = validVehicles.SelectMany(v => (v.InsuranceClaims ?? new List<InsuranceClaim>()).Select(c => new
+        {
+            ClaimId = c.ClaimID,
+            ClaimDate = c.ClaimDate.ToDateTime(TimeOnly.MinValue),
+            SettlementDate = c.SettlementDate.HasValue
+                ? (DateTime?)c.SettlementDate.Value.ToDateTime(TimeOnly.MinValue)
+                : null,
+            VehiclePlate = (string.IsNullOrWhiteSpace(c.VehiclePlate) ? v.VehiclePlate : c.VehiclePlate).Trim().ToUpperInvariant(),
+            VehicleType = c.VehicleType.ToString(),
+            StaffId = c.StaffID,
+            MaintenanceId = c.MaintenanceID,
+            WorkshopName = c.WorkshopName ?? string.Empty,
+            Status = c.Status.ToString(),
+            ClaimAmount = c.ClaimAmount,
+            Remarks = c.Remarks ?? string.Empty
+        })).ToList();
+
         // 2. Define UPSERT queries
         const string sqlMasterUpsert = @"
 INSERT INTO vehicle_master (
@@ -400,11 +417,50 @@ ON CONFLICT (odometer_id) DO UPDATE SET
     fuel_amount      = EXCLUDED.fuel_amount,
     updated_at       = CURRENT_TIMESTAMP;";
 
+        const string sqlInsuranceClaimUpsert = @"
+INSERT INTO vehicle_insurance_claims (
+    claim_id, claim_date, settlement_date, vehicle_plate, vehicle_type,
+    staff_id, maintenance_id, workshop_name, status, claim_amount, remarks, updated_at
+) VALUES (
+    @ClaimId, @ClaimDate, @SettlementDate, @VehiclePlate, @VehicleType,
+    @StaffId, @MaintenanceId, @WorkshopName, @Status, @ClaimAmount, @Remarks, CURRENT_TIMESTAMP
+)
+ON CONFLICT (claim_id) DO UPDATE SET
+    claim_date      = EXCLUDED.claim_date,
+    settlement_date = EXCLUDED.settlement_date,
+    vehicle_plate   = EXCLUDED.vehicle_plate,
+    vehicle_type    = EXCLUDED.vehicle_type,
+    staff_id        = EXCLUDED.staff_id,
+    maintenance_id  = EXCLUDED.maintenance_id,
+    workshop_name   = EXCLUDED.workshop_name,
+    status          = EXCLUDED.status,
+    claim_amount    = EXCLUDED.claim_amount,
+    remarks         = EXCLUDED.remarks,
+    updated_at      = CURRENT_TIMESTAMP;";
+
         // 3. Execute in Transaction
         Db.ExecuteInTransaction((conn, trans) =>
         {
+            // Defensive migration: must precede the full-batch DELETE below on a server that predates this table.
+            conn.Execute(@"
+CREATE TABLE IF NOT EXISTS vehicle_insurance_claims (
+    claim_id        BIGINT PRIMARY KEY,
+    claim_date      DATE NOT NULL,
+    settlement_date DATE NULL,
+    vehicle_plate   VARCHAR(32) NOT NULL,
+    vehicle_type    VARCHAR(64) DEFAULT '',
+    staff_id        BIGINT DEFAULT 0,
+    maintenance_id  BIGINT DEFAULT 0,
+    workshop_name   VARCHAR(256) DEFAULT '',
+    status          VARCHAR(32) NOT NULL DEFAULT 'Pending',
+    claim_amount    NUMERIC(14,2) DEFAULT 0,
+    remarks         TEXT DEFAULT '',
+    updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);", transaction: trans);
+
             if (isFullBatch)
             {
+                conn.Execute("DELETE FROM vehicle_insurance_claims WHERE vehicle_plate != ALL(@ActivePlates);", new { ActivePlates = activePlates }, trans);
                 conn.Execute("DELETE FROM vehicle_inspections WHERE vehicle_plate != ALL(@ActivePlates);", new { ActivePlates = activePlates }, trans);
                 conn.Execute("DELETE FROM vehicle_road_taxes WHERE vehicle_plate != ALL(@ActivePlates);", new { ActivePlates = activePlates }, trans);
                 conn.Execute("DELETE FROM vehicle_permits WHERE vehicle_plate != ALL(@ActivePlates);", new { ActivePlates = activePlates }, trans);
@@ -421,6 +477,7 @@ ON CONFLICT (odometer_id) DO UPDATE SET
             if (roadTaxRecords.Any()) conn.Execute(sqlRoadTaxUpsert, roadTaxRecords, trans);
             if (permitRecords.Any()) conn.Execute(sqlPermitUpsert, permitRecords, trans);
             if (insuranceRecords.Any()) conn.Execute(sqlInsuranceUpsert, insuranceRecords, trans);
+            if (insuranceClaimRecords.Any()) conn.Execute(sqlInsuranceClaimUpsert, insuranceClaimRecords, trans);
             if (odoRecords.Any())
             {
                 conn.Execute("ALTER TABLE vehicle_odometers ADD COLUMN IF NOT EXISTS time VARCHAR(16) DEFAULT '';", transaction: trans);
@@ -435,6 +492,7 @@ ON CONFLICT (odometer_id) DO UPDATE SET
         var sb = new StringBuilder();
         sb.AppendLine("=== POSTGRESQL VEHICLE UPLOAD COMMITTED ===");
         sb.AppendLine($"Committed Vehicle Profiles: {validVehicles.Count}");
+        sb.AppendLine($"InsuranceClaims: {insuranceClaimRecords.Count}");
         sb.AppendLine($"Timestamp: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
         DebugDialog.ShowLog("[DEBUG] PostgreSQL Upload - Vehicle Summary", sb.ToString());
 #endif
@@ -674,10 +732,10 @@ ON CONFLICT (odometer_id) DO UPDATE SET
         var items = projects.Where(p => !string.IsNullOrWhiteSpace(p.ProjectID)).ToList();
         if (!items.Any()) return;
 
-        var activeIds = items.Select(p => p.ProjectID.Trim()).ToArray();
+        var activeIds = items.Select(p => p.ProjectID.Trim().ToUpperInvariant()).ToArray();
         var records = items.Select(p => new
         {
-            ProjectId = p.ProjectID.Trim(),
+            ProjectId = p.ProjectID.Trim().ToUpperInvariant(),
             ProjectName = p.ProjectDetails.ProjectName ?? string.Empty,
             ProjectType = p.ProjectDetails.ProjectType.ToString(),
             CompanyName = p.ProjectDetails.CompanyName ?? string.Empty,
@@ -697,7 +755,7 @@ ON CONFLICT (odometer_id) DO UPDATE SET
                 VALUES (@ProjectId, @ProjectName, @ProjectType, @CompanyName, @StartDate, @TargetEndDate)
                 ON CONFLICT (project_id) DO UPDATE SET
                     project_name    = EXCLUDED.project_name,
-                    project_type    = CASE WHEN EXCLUDED.project_type != 'None' THEN EXCLUDED.project_type ELSE project_master.project_type END,
+                    project_type    = EXCLUDED.project_type,
                     company_name    = EXCLUDED.company_name,
                     start_date      = EXCLUDED.start_date,
                     target_end_date = EXCLUDED.target_end_date,

@@ -29,15 +29,15 @@ internal static class ServerSyncCommands
 
             if (wb != null)
             {
-                dynamic? wsWorkshops = SheetMapper.ResolveSheetSafely(wb, new[] { "Workshops", "Workshop" }, "Workshops");
+                dynamic? wsWorkshops = SheetMapperHelper.ResolveSheetSafely((object)wb, new[] { "Workshops", "Workshop" }, "Workshops");
                 if (wsWorkshops != null)
                     workshops = TableMapper.ExtractFromTable<Workshop>((object)wsWorkshops, "WorkshopsTable");
 
-                dynamic? wsInsurances = SheetMapper.ResolveSheetSafely(wb, new[] { "Insurances", "Insurance" }, "Insurances");
+                dynamic? wsInsurances = SheetMapperHelper.ResolveSheetSafely((object)wb, new[] { "Insurances", "Insurance" }, "Insurances");
                 if (wsInsurances != null)
                     insuranceCompanies = TableMapper.ExtractFromTable<InsuranceCompanyRecord>((object)wsInsurances, "InsuranceCompaniesTable");
 
-                dynamic? wsOdometers = SheetMapper.ResolveSheetSafely(wb, new[] { "Odometers", "Odometer" }, "Odometers");
+                dynamic? wsOdometers = SheetMapperHelper.ResolveSheetSafely((object)wb, new[] { "Odometers", "Odometer" }, "Odometers");
                 if (wsOdometers != null)
                 {
                     fuelCards = TableMapper.ExtractFromTable<FuelCardRecord>((object)wsOdometers, "FuelCardsTable");
@@ -47,6 +47,12 @@ internal static class ServerSyncCommands
                     fuelCompanies = companyRecords.Select(c => c.FuelCompanyName).Where(n => !string.IsNullOrWhiteSpace(n)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
                 }
             }
+
+            AppLogger.Info(
+                $"[VehicleManager.SaveVehiclesSilent] Vehicles={vehicleList.Count}, Maintenances={vehicleList.Sum(v => v.Maintenances.Count)}, " +
+                $"RoadTaxes={vehicleList.Sum(v => v.RoadTaxes.Count)}, Inspections={vehicleList.Sum(v => v.Inspections.Count)}, " +
+                $"Permits={vehicleList.Sum(v => v.Permits.Count)}, Insurances={vehicleList.Sum(v => v.Insurances.Count)}, " +
+                $"InsuranceClaims={vehicleList.Sum(v => v.InsuranceClaims?.Count ?? 0)}, Odometers={vehicleList.Sum(v => v.OdometerLogs.Count)}");
 
             // 2. Persist to PostgreSQL Server
             ServerDispatcher.PersistVehicles(vehicleList, isFullBatch: true);
@@ -112,6 +118,7 @@ internal static class ServerSyncCommands
                         Inspections = new List<Inspection>(),
                         Permits = new List<VehiclePermit>(),
                         Insurances = new List<VehicleInsurance>(),
+                        InsuranceClaims = new List<InsuranceClaim>(),
                         OdometerLogs = new List<OdometerLog>()
                     };
 
@@ -329,7 +336,42 @@ internal static class ServerSyncCommands
                 }
                 catch (Exception exOdo) { AppLogger.Error("[PostgreSQL Query] vehicle_odometers failed", exOdo); }
 
+                // 8. Fetch Insurance Claims
+                try
+                {
+                    const string sqlClaims = "SELECT * FROM vehicle_insurance_claims ORDER BY claim_id;";
+                    var rawClaims = db.Query<dynamic>(sqlClaims).ToList();
+                    SKSB_App.Core.Diagnostics.AppLogger.Info($"[PostgreSQL Query] vehicle_insurance_claims returned {rawClaims.Count} record(s).");
+
+                    foreach (var c in rawClaims)
+                    {
+                        string p = (string)c.vehicle_plate;
+                        if (maintMap.TryGetValue(p, out var pv))
+                        {
+                            Enum.TryParse<InsuranceClaimStatus>((string)(c.status ?? "Pending"), true, out var cStatus);
+                            Enum.TryParse<VehicleType>((string)(c.vehicle_type ?? "None"), true, out var cVehicleType);
+
+                            pv.InsuranceClaims.Add(new InsuranceClaim
+                            {
+                                ClaimID = Convert.ToInt64(c.claim_id),
+                                ClaimDate = c.claim_date != null ? DateOnly.FromDateTime(Convert.ToDateTime(c.claim_date)) : DateOnly.FromDateTime(DateTime.Today),
+                                SettlementDate = c.settlement_date != null ? DateOnly.FromDateTime(Convert.ToDateTime(c.settlement_date)) : null,
+                                VehiclePlate = p,
+                                VehicleType = cVehicleType,
+                                StaffID = c.staff_id != null ? Convert.ToInt64(c.staff_id) : 0,
+                                MaintenanceID = c.maintenance_id != null ? Convert.ToInt64(c.maintenance_id) : 0,
+                                WorkshopName = c.workshop_name?.ToString() ?? string.Empty,
+                                Status = cStatus,
+                                ClaimAmount = c.claim_amount != null ? Convert.ToDecimal(c.claim_amount) : 0.00m,
+                                Remarks = c.remarks?.ToString() ?? string.Empty
+                            });
+                        }
+                    }
+                }
+                catch (Exception exClaims) { AppLogger.Error("[PostgreSQL Query] vehicle_insurance_claims failed", exClaims); }
+
                 // Summary of child records
+                int totalInsuranceClaims = serverVehicles.Sum(v => v.InsuranceClaims.Count);
                 int totalRoadTaxes = serverVehicles.Sum(v => v.RoadTaxes.Count);
                 int totalInspections = serverVehicles.Sum(v => v.Inspections.Count);
                 int totalPermits = serverVehicles.Sum(v => v.Permits.Count);
@@ -338,7 +380,7 @@ internal static class ServerSyncCommands
 
                 SKSB_App.Core.Diagnostics.AppLogger.Info(
                     $"[Server Assembly Summary] Vehicles={serverVehicles.Count}, Maintenances={serverVehicles.Sum(v => v.Maintenances.Count)}, " +
-                    $"RoadTaxes={totalRoadTaxes}, Inspections={totalInspections}, Permits={totalPermits}, Insurances={totalInsurances}, Odometers={totalOdometers}");
+                    $"RoadTaxes={totalRoadTaxes}, Inspections={totalInspections}, Permits={totalPermits}, Insurances={totalInsurances}, InsuranceClaims={totalInsuranceClaims}, Odometers={totalOdometers}");
 
                 try
                 {
@@ -346,12 +388,20 @@ internal static class ServerSyncCommands
                 }
                 catch { }
 
+                OfflineSnapshot.LogDataSource(Module, "VehicleRecord (all vehicle tables)", "SERVER", $"{serverVehicles.Count} vehicle(s)");
                 return serverVehicles;
             }
+
+            // The server answered successfully but holds no vehicles. The server is authoritative:
+            // refresh the local cache to empty so a stale snapshot can never resurrect wiped data.
+            try { OfflineSnapshot.Save(new List<VehicleRecord>(), writeToDatabase: false); } catch { }
+            OfflineSnapshot.LogDataSource(Module, "VehicleRecord (all vehicle tables)", "SERVER", "server reachable but vehicle_master is empty; local cache reset (no offline fallback)");
+            return new List<VehicleRecord>();
         }
         catch (Exception ex)
         {
             SKSB_App.Core.Diagnostics.AppLogger.Error("FetchVehicleRecords server query failed", ex);
+            OfflineSnapshot.LogDataSource(Module, "VehicleRecord (all vehicle tables)", "OFFLINE CACHE", $"server query failed: {ex.GetType().Name}: {ex.Message}");
         }
 
         var fallback = OfflineSnapshot.Load<List<VehicleRecord>>() ?? new List<VehicleRecord>();
@@ -359,71 +409,59 @@ internal static class ServerSyncCommands
         return fallback;
     }
 
-    internal static List<Workshop> FetchWorkshops()
+    private const string Module = "VehicleManager";
+
+    /// <summary>
+    /// Server-authoritative fetch for a lookup/auxiliary table. A successful query is returned as-is (even when
+    /// empty) and refreshes the local cache; the offline cache is used only when the server cannot be reached.
+    /// </summary>
+    private static List<T> FetchAuxiliary<T>(string table, string sql) where T : class
     {
         try
         {
             var db = new PostgreSqlService();
-            const string sql = @"
-                SELECT 
-                    workshop_id AS WorkshopID, 
-                    workshop_name AS WorkshopName, 
-                    workshop_address AS WorkshopAddress, 
-                    workshop_owner AS WorkshopOwner, 
-                    primary_contact AS PrimaryContact, 
-                    secondary_contact AS SecondaryContact 
-                FROM vehicle_workshops 
-                ORDER BY workshop_id;";
-            var list = db.Query<Workshop>(sql).ToList();
-            if (list.Any()) return list;
+            var list = db.Query<T>(sql).ToList();
+            try { OfflineSnapshot.Save(list, writeToDatabase: false); } catch { }
+            OfflineSnapshot.LogDataSource(Module, table, "SERVER", $"{list.Count} row(s)");
+            return list;
         }
-        catch { }
-
-        return OfflineSnapshot.Load<List<Workshop>>() ?? new List<Workshop>();
-    }
-
-    internal static List<InsuranceCompanyRecord> FetchInsuranceCompanies()
-    {
-        try
+        catch (Exception ex)
         {
-            var db = new PostgreSqlService();
-            const string sql = @"
-                SELECT 
-                    insurance_company AS InsuranceCompany, 
-                    company_contact_number AS CompanyContactNumber, 
-                    company_address AS CompanyAddress, 
-                    insurance_agent AS InsuranceAgent, 
-                    agent_contact_number AS AgentContactNumber 
-                FROM vehicle_insurance_companies 
-                ORDER BY insurance_company;";
-            var list = db.Query<InsuranceCompanyRecord>(sql).ToList();
-            if (list.Any()) return list;
+            AppLogger.Error($"[{Module}] {table} server query failed", ex);
+            OfflineSnapshot.LogDataSource(Module, table, "OFFLINE CACHE", $"server query failed: {ex.GetType().Name}: {ex.Message}");
+            return OfflineSnapshot.Load<List<T>>() ?? new List<T>();
         }
-        catch { }
-
-        return OfflineSnapshot.Load<List<InsuranceCompanyRecord>>() ?? new List<InsuranceCompanyRecord>();
     }
 
-    internal static List<FuelCardRecord> FetchFuelCards()
-    {
-        try
-        {
-            var db = new PostgreSqlService();
-            const string sql = @"
-                SELECT 
-                    fuel_card_number AS FuelCardNumber, 
-                    fuel_company_name AS FuelCompanyName, 
-                    card_owner_id AS CardOwnerID, 
-                    card_owner_name AS CardOwnerName 
-                FROM vehicle_fuel_cards 
-                ORDER BY fuel_card_number;";
-            var list = db.Query<FuelCardRecord>(sql).ToList();
-            if (list.Any()) return list;
-        }
-        catch { }
+    internal static List<Workshop> FetchWorkshops() => FetchAuxiliary<Workshop>("WorkshopsTable", @"
+        SELECT
+            workshop_id AS WorkshopID,
+            workshop_name AS WorkshopName,
+            workshop_address AS WorkshopAddress,
+            workshop_owner AS WorkshopOwner,
+            primary_contact AS PrimaryContact,
+            secondary_contact AS SecondaryContact
+        FROM vehicle_workshops
+        ORDER BY workshop_id;");
 
-        return OfflineSnapshot.Load<List<FuelCardRecord>>() ?? new List<FuelCardRecord>();
-    }
+    internal static List<InsuranceCompanyRecord> FetchInsuranceCompanies() => FetchAuxiliary<InsuranceCompanyRecord>("InsuranceCompaniesTable", @"
+        SELECT
+            insurance_company AS InsuranceCompany,
+            company_contact_number AS CompanyContactNumber,
+            company_address AS CompanyAddress,
+            insurance_agent AS InsuranceAgent,
+            agent_contact_number AS AgentContactNumber
+        FROM vehicle_insurance_companies
+        ORDER BY insurance_company;");
+
+    internal static List<FuelCardRecord> FetchFuelCards() => FetchAuxiliary<FuelCardRecord>("FuelCardsTable", @"
+        SELECT
+            fuel_card_number AS FuelCardNumber,
+            fuel_company_name AS FuelCompanyName,
+            card_owner_id AS CardOwnerID,
+            card_owner_name AS CardOwnerName
+        FROM vehicle_fuel_cards
+        ORDER BY fuel_card_number;");
 
     internal static List<string> FetchFuelCompanies()
     {
@@ -432,11 +470,16 @@ internal static class ServerSyncCommands
             var db = new PostgreSqlService();
             const string sql = "SELECT fuel_company_name FROM lookup_fuel_companies ORDER BY fuel_company_name;";
             var list = db.Query<string>(sql).Where(s => !string.IsNullOrWhiteSpace(s)).Distinct().ToList();
-            return list; // Return exact records from database (even if empty)
+
+            // Server is authoritative (even when empty): keep the local cache in step.
+            try { OfflineSnapshot.Save(list.Select(n => new FuelCompanyNameRecord { FuelCompanyName = n }).ToList(), writeToDatabase: false); } catch { }
+            OfflineSnapshot.LogDataSource(Module, "FuelCompanyNamesTable", "SERVER", $"{list.Count} row(s)");
+            return list;
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"[FetchFuelCompanies DB Error] {ex.Message}");
+            AppLogger.Error($"[{Module}] FuelCompanyNamesTable server query failed", ex);
+            OfflineSnapshot.LogDataSource(Module, "FuelCompanyNamesTable", "OFFLINE CACHE", $"server query failed: {ex.GetType().Name}: {ex.Message}");
         }
 
         var cached = OfflineSnapshot.Load<List<FuelCompanyNameRecord>>();

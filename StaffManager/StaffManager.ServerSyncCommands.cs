@@ -94,6 +94,7 @@ public static class ServerSyncCommands
         {
             if (ServerEnvironment.SimulateOffline)
             {
+                OfflineSnapshot.LogDataSource("StaffManager", "SkillLicenseTypesTable", "OFFLINE CACHE", "Simulate Server Offline is ON");
                 return OfflineSnapshot.Load<List<SkillLicenseType>>() ?? new List<SkillLicenseType>();
             }
 
@@ -121,15 +122,15 @@ public static class ServerSyncCommands
                 ORDER BY {nameCol};";
 
             var result = db.Query<SkillLicenseType>(querySql)?.ToList() ?? new List<SkillLicenseType>();
-            if (result.Count > 0)
-            {
-                OfflineSnapshot.Save(result, writeToDatabase: false);
-            }
+            // Server is authoritative: cache the result even when empty so wiped types are not resurrected.
+            OfflineSnapshot.Save(result, writeToDatabase: false);
+            OfflineSnapshot.LogDataSource("StaffManager", "SkillLicenseTypesTable", "SERVER", $"{result.Count} row(s)");
             return result;
         }
         catch (Exception ex)
         {
             System.Diagnostics.Debug.WriteLine($"[FetchSkillLicenseTypesFromDb Error] {ex.Message}");
+            OfflineSnapshot.LogDataSource("StaffManager", "SkillLicenseTypesTable", "OFFLINE CACHE", $"server query failed: {ex.GetType().Name}: {ex.Message}");
             return OfflineSnapshot.Load<List<SkillLicenseType>>() ?? new List<SkillLicenseType>();
         }
     }
@@ -234,6 +235,7 @@ public static class ServerSyncCommands
 
                     // Cache to local JSON snapshot so VehicleManager and DailyScheduler have fresh staff lookups
                     OfflineSnapshot.Save(assembledList, writeToDatabase: false);
+                    OfflineSnapshot.LogDataSource("StaffManager", "StaffRecord (all staff tables)", "SERVER", $"{assembledList.Count} staff");
 
 #if DEBUG
                     if (DebugDialog.DebugEnabled)
@@ -261,11 +263,20 @@ public static class ServerSyncCommands
 #endif
                     return assembledList;
                 }
+
+                // Server reachable but staff_master is empty: server is authoritative, so reset the local
+                // cache instead of falling back to a stale snapshot.
+                try { OfflineSnapshot.Save(new List<StaffRecord>(), writeToDatabase: false); } catch { }
+                OfflineSnapshot.LogDataSource("StaffManager", "StaffRecord (all staff tables)", "SERVER", "server reachable but staff_master is empty; local cache reset (no offline fallback)");
+                return new List<StaffRecord>();
             }
+
+            OfflineSnapshot.LogDataSource("StaffManager", "StaffRecord (all staff tables)", "OFFLINE CACHE", "Simulate Server Offline is ON");
         }
         catch (Exception ex)
         {
             AppLogger.Error("[FetchStaffRecords DB Fallback]", ex);
+            OfflineSnapshot.LogDataSource("StaffManager", "StaffRecord (all staff tables)", "OFFLINE CACHE", $"server query failed: {ex.GetType().Name}: {ex.Message}");
         }
 
         return OfflineSnapshot.Load<List<StaffRecord>>();

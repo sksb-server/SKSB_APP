@@ -182,7 +182,7 @@ public static class OfflineSave
                 bool isEmpty = contract.IsDatasetEmpty(serverData);
                 AppLogger.Info($"FetchFromServer returned: DataIsNull={serverData == null}, IsEmpty={isEmpty}");
 
-                if (serverData != null && !isEmpty)
+                if (serverData != null && (!isEmpty || contract.PopulateStartupWhenEmpty))
                 {
                     AppLogger.Info("Calling contract.PopulateWorksheet with server records...");
 
