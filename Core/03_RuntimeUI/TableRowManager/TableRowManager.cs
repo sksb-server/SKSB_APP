@@ -572,10 +572,6 @@ public static partial class TableRowManager
             }
             catch { }
 
-            // Ensure cell is unlocked if the style is whitelisted
-            string appliedStyle = newCell.Style?.Name?.ToString() ?? string.Empty;
-            newCell.Locked = !SheetProtections.IsUnlockedStyle(appliedStyle);
-
             var cfg = Metadata.ReadConfig(archetypeCell);
             if (!cfg.IsEmpty)
             {

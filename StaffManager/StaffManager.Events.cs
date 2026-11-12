@@ -207,17 +207,6 @@ public class Events : IExcelAddIn
         dynamic wb = xlApp.ActiveWorkbook;
         if (wb != null && !SheetOperations.IsTemplateEditMode)
         {
-            foreach (dynamic sheet in wb.Worksheets)
-            {
-                string sName = sheet.Name?.ToString() ?? string.Empty;
-                if (sName.Equals(SheetOperations.LookupsSheetName, StringComparison.OrdinalIgnoreCase) ||
-                    sName.Equals(SheetOperations.DataSheetName, StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-                SheetProtections.ApplyStyleDrivenProtection(sheet);
-            }
-
             SheetOperations.SetAuxiliarySheetsVisibility(visible: false);
         }
     }

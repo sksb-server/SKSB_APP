@@ -513,9 +513,6 @@ public static class RuleEvaluator
                 bool origEvents = true;
                 try { origEvents = (bool)xlApp.EnableEvents; xlApp.EnableEvents = false; } catch { }
 
-                // Lift any legacy sheet protection; it is never re-applied.
-                if (SheetProtections.IsProtected(worksheet)) SheetProtections.Unprotect(worksheet);
-
                 try
                 {
                     foreach (var (excelRow, absCol, val, rule) in dirtyWrites)

@@ -111,33 +111,27 @@ internal static partial class SheetMapper
         dynamic? wsWorkshop = SheetMapperHelper.ResolveSheetSafely((object)wb, WorkshopAliases, "Workshops");
         if (wsWorkshop != null)
         {
-            try { wsWorkshop.Unprotect("SKSB_Internal_Guard"); } catch { }
             var workshops = ServerSyncCommands.FetchWorkshops();
             TableMapper.PopulateTableSafe<Workshop>((object)wsWorkshop, "WorkshopsTable", workshops);
-            SheetProtections.ApplyStyleDrivenProtection(wsWorkshop);
         }
 
         // 2. InsuranceCompaniesTable
         dynamic? wsIns = SheetMapperHelper.ResolveSheetSafely((object)wb, InsuranceAliases, "Insurances");
         if (wsIns != null)
         {
-            try { wsIns.Unprotect("SKSB_Internal_Guard"); } catch { }
             var insuranceCompanies = ServerSyncCommands.FetchInsuranceCompanies();
             TableMapper.PopulateTableSafe<InsuranceCompanyRecord>((object)wsIns, "InsuranceCompaniesTable", insuranceCompanies);
-            SheetProtections.ApplyStyleDrivenProtection(wsIns);
         }
 
         // 3. FuelCardsTable & FuelCompanyNamesTable
         dynamic? wsOdo = SheetMapperHelper.ResolveSheetSafely((object)wb, OdometerAliases, "Odometers");
         if (wsOdo != null)
         {
-            try { wsOdo.Unprotect("SKSB_Internal_Guard"); } catch { }
             var fuelCards = ServerSyncCommands.FetchFuelCards();
             TableMapper.PopulateTableSafe<FuelCardRecord>((object)wsOdo, "FuelCardsTable", fuelCards);
 
             var fuelCompanies = ServerSyncCommands.FetchFuelCompanies();
             SheetMapperHelper.SyncReferenceTable((object)wb, "FuelCompanyNamesTable", "", fuelCompanies);
-            SheetProtections.ApplyStyleDrivenProtection(wsOdo);
         }
     }
 }

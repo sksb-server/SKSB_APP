@@ -904,7 +904,6 @@ internal static partial class SheetMapper
         SheetProtections.ExecuteWithBypass((object)wsOdo, new Action(() =>
         {
             TableMapper.PopulateTableSafe<OdometerLog>((object)wsOdo, logs, "OdometersTable");
-            SheetProtections.ApplyStyleDrivenProtection(wsOdo);
             try { xlApp.Calculate(); } catch { }
         }));
 

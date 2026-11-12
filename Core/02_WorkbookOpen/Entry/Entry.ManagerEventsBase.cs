@@ -220,7 +220,6 @@ public abstract class ManagerEventsBase<T> : IExcelAddIn
         object? wbObj = xlApp.ActiveWorkbook;
         if (wbObj == null || SheetOperations.IsTemplateEditMode) return;
 
-        ApplyProtectionToModuleSheets(xlApp, wbObj);
         SheetOperations.SetAuxiliarySheetsVisibility(visible: false);
 
         try
@@ -230,42 +229,6 @@ public abstract class ManagerEventsBase<T> : IExcelAddIn
         catch (Exception ex)
         {
             AppLogger.Error($"[{contract.ModuleName}] OnAfterDelayedLoad failed", ex);
-        }
-    }
-
-    private static void ApplyProtectionToModuleSheets(dynamic xlApp, object wbObj)
-    {
-        dynamic wb = wbObj;
-        bool origEvents = true;
-        bool origUpdating = true;
-        int origCalculation = -4105; // xlCalculationAutomatic
-        try { origEvents = (bool)xlApp.EnableEvents; xlApp.EnableEvents = false; } catch { }
-        try { origUpdating = (bool)xlApp.ScreenUpdating; xlApp.ScreenUpdating = false; } catch { }
-        try { origCalculation = (int)xlApp.Calculation; xlApp.Calculation = -4135; /* xlCalculationManual */ } catch { }
-
-        try
-        {
-            foreach (dynamic sheet in wb.Worksheets)
-            {
-                string sName = sheet.Name?.ToString() ?? string.Empty;
-                if (sName.Equals(SheetOperations.LookupsSheetName, StringComparison.OrdinalIgnoreCase) ||
-                    sName.Equals(SheetOperations.DataSheetName, StringComparison.OrdinalIgnoreCase))
-                {
-                    continue;
-                }
-
-                SheetProtections.ApplyStyleDrivenProtection(sheet);
-            }
-        }
-        catch (Exception ex)
-        {
-            AppLogger.Error("ApplyProtectionToModuleSheets failed", ex);
-        }
-        finally
-        {
-            try { xlApp.Calculation = origCalculation; } catch { }
-            try { xlApp.EnableEvents = origEvents; } catch { }
-            try { xlApp.ScreenUpdating = origUpdating; } catch { }
         }
     }
 }

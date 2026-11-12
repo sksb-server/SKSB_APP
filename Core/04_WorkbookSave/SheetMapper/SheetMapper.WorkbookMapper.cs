@@ -129,7 +129,6 @@ public sealed class ChildTableBinding<TMaster, TChild, TKey> : IChildTableBindin
             {
                 TableMapper.PopulateTableSafe<TChild>((object)ws, TableName, allChildren);
             }));
-            SheetProtections.ApplyStyleDrivenProtection((object)ws);
         }
         catch (Exception ex)
         {
@@ -327,7 +326,6 @@ public static class WorkbookMapper
                     map.OnBeforeMasterPopulate?.Invoke((object)masterWs);
                     TableMapper.PopulateTableSafe<TMaster>((object)masterWs, map.MasterTableName, ordered);
                 }));
-                SheetProtections.ApplyStyleDrivenProtection((object)masterWs);
             }
 
             // 5. Child tables

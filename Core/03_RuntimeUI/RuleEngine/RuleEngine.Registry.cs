@@ -312,8 +312,6 @@ public static class RuleRegistry
                     }
                 }));
 
-                // Ensure operational protection (and =FALSE lock on calculated columns) is active on open
-                SheetProtections.ApplyStyleDrivenProtection(ws);
             }
 
             // Restore original sheet view so Excel doesn't jump

@@ -4,153 +4,114 @@ using System;
 using System.Collections.Generic;
 using ExcelDna.Integration;
 
+/// <summary>
+/// Table self-healing WITHOUT native sheet protection (worksheet.Protect is forbidden: it breaks
+/// ListObject sorting/filtering/row insertion). Read-only cells are authored as =FALSE Custom Data
+/// Validation in the templates; HealFormulas/HealHeaders restore anything that slips through
+/// (paste, delete, undo).
+/// </summary>
 public static class SheetProtections
 {
-    private const string ProtectionPassword = "SKSB_Internal_Guard";
+    /// <summary>Legacy pass-through kept for call-site compatibility. No protection is lifted or re-applied.</summary>
+    public static void ExecuteWithBypass(dynamic worksheet, Action action) => action?.Invoke();
 
-    // Whitelist of styles that represent user-editable inputs
-    public static readonly HashSet<string> UnlockedStyles = new(StringComparer.OrdinalIgnoreCase)
-    {
-        "DropDown",
-        "Unlocked",
-        "StandardInput",
-        "DisplayDate",
-        "DisplayRange",
-        "Comma",        // Standard Excel Comma style (#,##0.00)
-        "Comma [0]",     // Comma style without decimals (#,##0)
-        "Cost"
-    };
-
-    public static bool IsUnlockedStyle(string? styleName) =>
-        !string.IsNullOrWhiteSpace(styleName) && UnlockedStyles.Contains(styleName.Trim());
-
-    public static bool IsProtected(dynamic worksheet)
-    {
-        try { return (bool)worksheet.ProtectContents; } catch { return false; }
-    }
-
-    public static void Unprotect(dynamic worksheet)
-    {
-        try { worksheet.Unprotect(ProtectionPassword); } catch { }
-    }
+    // =========================================================================
+    // HEALING
+    // =========================================================================
 
     /// <summary>
-    /// Executes an action that modifies table structure by temporarily lifting protection.
+    /// For every column whose archetype cell (first body row) holds a formula, ensures all body cells
+    /// still hold that column formula, restoring cells that were cleared or overwritten.
     /// </summary>
-    public static void ExecuteWithBypass(dynamic worksheet, Action action)
+    public static void HealFormulas(dynamic worksheet, dynamic table)
     {
-        if (worksheet == null || action == null) return;
-        // Sheet protection is no longer used; lift any legacy protection and never re-apply it.
-        if (IsProtected(worksheet)) Unprotect(worksheet);
-        action();
-    }
-
-    /// <summary>
-    /// Unlocks table structure for native sorting, while locking non-editable columns
-    /// using Excel Custom Data Validation (=FALSE) with a custom alert popup.
-    /// </summary>
-    public static void ApplyStyleDrivenProtection(dynamic worksheet)
-    {
-        if (SheetOperations.IsTemplateEditMode)
-        {
-            try { worksheet.Unprotect(ProtectionPassword); } catch { }
-            try
-            {
-                worksheet.Cells.Locked = false;
-                foreach (dynamic table in worksheet.ListObjects)
-                {
-                    table.Range.Locked = false;
-                    foreach (dynamic col in table.ListColumns)
-                    {
-                        try { col.Range.Validation.Delete(); } catch { }
-                    }
-                }
-            }
-            catch { }
-            return;
-        }
+        if (table == null) return;
 
         dynamic xlApp = ExcelDnaUtil.Application;
-        bool origUpdating = true;
-        try { origUpdating = (bool)xlApp.ScreenUpdating; xlApp.ScreenUpdating = false; } catch { }
+        bool origEvents = true;
+        try { origEvents = (bool)xlApp.EnableEvents; xlApp.EnableEvents = false; } catch { }
 
         try
         {
-            try { worksheet.Unprotect(ProtectionPassword); } catch { }
+            dynamic bodyRange = table.DataBodyRange;
+            if (bodyRange == null) return;
 
-            // Configure all tables on the worksheet (no sheet protection is applied)
-            foreach (dynamic table in worksheet.ListObjects)
+            int headerRow = (int)table.HeaderRowRange.Row;
+            int startCol = (int)table.HeaderRowRange.Column;
+            int colCount = (int)table.ListColumns.Count;
+            int rows = (int)bodyRange.Rows.Count;
+
+            for (int c = 1; c <= colCount; c++)
             {
-                dynamic bodyRange = table.DataBodyRange;
-                int headerRow = (int)table.HeaderRowRange.Row;
-                int startCol = (int)table.HeaderRowRange.Column;
-                int colCount = (int)table.ListColumns.Count;
-                int bodyRows = bodyRange != null ? (int)bodyRange.Rows.Count : 1;
-
-                for (int c = 1; c <= colCount; c++)
+                try
                 {
-                    int currentCol = startCol + c - 1;
-                    dynamic archetypeCell = worksheet.Cells[headerRow + 1, currentCol];
-                    string styleName = archetypeCell.Style?.Name?.ToString() ?? string.Empty;
+                    dynamic archetype = worksheet.Cells[headerRow + 1, startCol + c - 1];
+                    string formula = archetype.Formula?.ToString() ?? string.Empty;
+                    if (!formula.StartsWith("=")) continue;
 
-                    dynamic colBody = worksheet.Range[
-                        worksheet.Cells[headerRow + 1, currentCol],
-                        worksheet.Cells[headerRow + bodyRows, currentCol]
-                    ];
+                    dynamic colRange = table.ListColumns[c].DataBodyRange;
+                    if (colRange == null) continue;
 
-                    if (!UnlockedStyles.Contains(styleName))
+                    bool dirty = false;
+                    if (rows > 1)
                     {
-                        // Apply custom =FALSE Stop alert to calculated / read-only columns
-                        try
+                        object? raw = colRange.Formula;
+                        if (raw is object[,] arr)
                         {
-                            colBody.Validation.Delete();
-                            colBody.Validation.Add(
-                                Type: 7,       // xlValidateCustom
-                                AlertStyle: 1, // xlValidAlertStop
-                                Formula1: "=FALSE"
-                            );
-                            colBody.Validation.IgnoreBlank = true;
-                            colBody.Validation.ErrorMessage = "This column is auto-calculated and cannot be modified directly.";
-                            colBody.Validation.ErrorTitle = "Protected Field";
-                        }
-                        catch { }
-                    }
-                    else
-                    {
-                        // Clean up any stale =FALSE validation if the column style was changed to editable
-                        try
-                        {
-                            if (colBody.Validation?.Formula1 == "=FALSE")
+                            int lo = arr.GetLowerBound(0), hi = arr.GetUpperBound(0);
+                            for (int r = lo; r <= hi; r++)
                             {
-                                colBody.Validation.Delete();
+                                string f = arr[r, arr.GetLowerBound(1)]?.ToString() ?? string.Empty;
+                                if (!f.StartsWith("=")) { dirty = true; break; }
                             }
                         }
-                        catch { }
                     }
-                }
-            }
 
+                    if (dirty) colRange.Formula = formula;
+                }
+                catch { }
+            }
         }
         catch (Exception ex)
         {
-            System.Diagnostics.Debug.WriteLine($"[ApplyStyleDrivenProtection Error] {ex.Message}");
+            System.Diagnostics.Debug.WriteLine($"[HealFormulas Error] {ex.Message}");
         }
         finally
         {
-            try { xlApp.ScreenUpdating = origUpdating; } catch { }
+            try { xlApp.EnableEvents = origEvents; } catch { }
         }
     }
 
-    private static void UnlockIfStylePermits(dynamic cell)
+    /// <summary>Ensures table header cells match the expected column names (by position).</summary>
+    public static void HealHeaders(dynamic table, IEnumerable<string> expectedHeaders)
     {
+        if (table == null || expectedHeaders == null) return;
+
+        dynamic xlApp = ExcelDnaUtil.Application;
+        bool origEvents = true;
+        try { origEvents = (bool)xlApp.EnableEvents; xlApp.EnableEvents = false; } catch { }
+
         try
         {
-            string styleName = cell.Style?.Name?.ToString() ?? string.Empty;
-            if (UnlockedStyles.Contains(styleName))
+            int c = 0;
+            int colCount = (int)table.ListColumns.Count;
+            foreach (var expected in expectedHeaders)
             {
-                cell.Locked = false;
+                c++;
+                if (c > colCount) break;
+                try
+                {
+                    dynamic col = table.ListColumns[c];
+                    string actual = col.Name?.ToString() ?? string.Empty;
+                    if (!string.Equals(actual, expected, StringComparison.Ordinal))
+                        table.HeaderRowRange.Cells[1, c].Value2 = expected;
+                }
+                catch { }
             }
         }
-        catch { }
+        finally
+        {
+            try { xlApp.EnableEvents = origEvents; } catch { }
+        }
     }
 }

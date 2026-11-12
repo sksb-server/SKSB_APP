@@ -384,10 +384,7 @@ public abstract class ManagerRibbonBase : ExcelRibbon
 
                     if (isPressed)
                     {
-                        // 1. MUST unlock total row so native header sorting isn't blocked
-                        table.TotalsRowRange.Locked = false;
-
-                        // 2. Configure default calculation for summable columns
+                        // Configure default calculation for summable columns
                         int colCount = (int)table.ListColumns.Count;
                         for (int c = 1; c <= colCount; c++)
                         {

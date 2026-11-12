@@ -28,13 +28,6 @@ public static class SheetMapperHelper
             dynamic ws = table.Parent;
             if (ws == null) return;
 
-            // Lift any legacy sheet protection; it is never re-applied.
-            try
-            {
-                if ((bool)ws.ProtectContents) ws.Unprotect("SKSB_Internal_Guard");
-            }
-            catch { }
-
             int headerRow = (int)table.HeaderRowRange.Row;
             int startCol = (int)table.HeaderRowRange.Column;
             int finalColSpan = explicitColSpan ?? (int)table.ListColumns.Count;
