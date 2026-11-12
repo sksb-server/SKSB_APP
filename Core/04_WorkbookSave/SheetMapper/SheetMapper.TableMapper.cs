@@ -282,6 +282,8 @@ public static class TableMapper
                                            (string.Equals(archFmt, "@", StringComparison.OrdinalIgnoreCase) ||
                                             binding.Property.PropertyType == typeof(string));
 
+                bool isOdometerColumn = binding.Property.Name is "CurrentOdometer" or "OdometerBefore" or "OdometerIn" or "OdometerOut";
+
                 object[,] colData = new object[effectiveRows, 1];
                 for (int r = 0; r < recordCount; r++)
                 {
@@ -346,6 +348,21 @@ public static class TableMapper
 
                 // 3. Write data
                 colRange.Value2 = colData;
+
+                // 4. Unit display overrides (applied after the archetype format so they win)
+                string propName = binding.Property.Name;
+                if (propName == "PriceAtFueling")
+                {
+                    try { colRange.NumberFormat = "\"RM \"#,##0.00\"/L\""; } catch { }
+                }
+                else if (propName == "FuelAmount")
+                {
+                    try { colRange.NumberFormat = "#,##0.00 \"L\""; } catch { }
+                }
+                else if (isOdometerColumn)
+                {
+                    ApplyOdometerUnitFormats(worksheet, records, headerRow, binding.ColumnIndex);
+                }
             }
 
             // 4. Pin table boundary
@@ -368,6 +385,43 @@ public static class TableMapper
             if (hadTotals) { try { table.ShowTotals = true; } catch { } }
             try { xlApp.ScreenUpdating = origUpdating; } catch { }
             try { xlApp.EnableEvents = origEvents; } catch { }
+        }
+    }
+
+    private static bool IsHourMeterRecord(object? record) => record switch
+    {
+        SKSB_App.Core.Types.VehicleRecord v => SKSB_App.Core.Types.VehicleRecord.IsHourMeterType(v.VehicleDetail.Type),
+        SKSB_App.Core.Types.OdometerLog o => SKSB_App.Core.Types.VehicleRecord.IsHourMeterType(o.VehicleType),
+        SKSB_App.Core.Types.Maintenance m => SKSB_App.Core.Types.VehicleRecord.IsHourMeterType(m.VehicleType),
+        _ => false
+    };
+
+    /// <summary>
+    /// Formats an odometer column as "hrs" (machinery) or "km" (road vehicles). Consecutive rows sharing a unit are
+    /// formatted as one contiguous range, so the COM call count scales with unit changes, not with row count.
+    /// </summary>
+    private static void ApplyOdometerUnitFormats<T>(dynamic worksheet, IList<T> records, int headerRow, int column)
+    {
+        const string hoursFmt = "#,##0.# \"hrs\"";
+        const string kmFmt = "#,##0 \"km\"";
+
+        int runStart = 0;
+        while (runStart < records.Count)
+        {
+            bool isHours = IsHourMeterRecord(records[runStart]);
+            int runEnd = runStart;
+            while (runEnd + 1 < records.Count && IsHourMeterRecord(records[runEnd + 1]) == isHours) runEnd++;
+
+            try
+            {
+                dynamic run = worksheet.Range[
+                    worksheet.Cells[headerRow + 1 + runStart, column],
+                    worksheet.Cells[headerRow + 1 + runEnd, column]];
+                run.NumberFormat = isHours ? hoursFmt : kmFmt;
+            }
+            catch { }
+
+            runStart = runEnd + 1;
         }
     }
 

@@ -21,6 +21,35 @@ public static class RuleEvaluator
 {
     private static bool _isEvaluating = false;
 
+    private static readonly HashSet<string> OdometerHeaders = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "currentodometer", "odometerbefore", "odometerin", "odometerout"
+    };
+
+    private static string SquashHeaderText(string? h) =>
+        new string((h ?? string.Empty).Where(char.IsLetterOrDigit).ToArray()).ToLowerInvariant();
+
+    /// <summary>Formats odometer cells of one row as hours (machinery) or km, based on the row's Vehicle Type.</summary>
+    private static void ApplyOdometerUnitFormat(
+        dynamic worksheet, int excelRow, int startCol, int colCount, string[] colHeaders, string[] rowValues)
+    {
+        int typeCol = -1;
+        for (int c = 1; c <= colCount; c++)
+            if (SquashHeaderText(colHeaders[c]) == "vehicletype") { typeCol = c; break; }
+        if (typeCol < 0) return;
+
+        string typeText = (rowValues[typeCol] ?? string.Empty).Trim().Replace(' ', '_').Replace('-', '_');
+        bool isHours = Enum.TryParse<SKSB_App.Core.Types.VehicleType>(typeText, true, out var vt)
+                       && SKSB_App.Core.Types.VehicleRecord.IsHourMeterType(vt);
+        string fmt = isHours ? "#,##0.# \"hrs\"" : "#,##0 \"km\"";
+
+        for (int c = 1; c <= colCount; c++)
+        {
+            if (!OdometerHeaders.Contains(SquashHeaderText(colHeaders[c]))) continue;
+            try { worksheet.Cells[excelRow, startCol + c - 1].NumberFormat = fmt; } catch { }
+        }
+    }
+
     /// <summary>
     /// Live self-healing row evaluation: runs on SheetChange and Dropdown selection.
     /// Executes:
@@ -209,6 +238,9 @@ public static class RuleEvaluator
                             }
                         }
                     }
+
+                    // STEP 5: Unit display for odometer cells (hrs for machinery, km for road vehicles)
+                    ApplyOdometerUnitFormat(worksheet, excelRow, startCol, colCount, colHeaders, rowValues);
                 });
 
                 // EXECUTION: Use existing bypass if batching, otherwise unprotect single row

@@ -458,6 +458,23 @@ CREATE TABLE IF NOT EXISTS vehicle_insurance_claims (
     updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );", transaction: trans);
 
+            // Defensive idempotent migration: odometers / engine-hour meters carry 1 decimal place (NUMERIC(12,1)).
+            conn.Execute(@"
+DO $$
+BEGIN
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'vehicle_master' AND column_name = 'current_odometer' AND data_type = 'integer') THEN
+        ALTER TABLE vehicle_master ALTER COLUMN current_odometer TYPE NUMERIC(12,1) USING current_odometer::numeric(12,1);
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'vehicle_maintenance' AND column_name = 'odometer_in' AND data_type = 'integer') THEN
+        ALTER TABLE vehicle_maintenance ALTER COLUMN odometer_in TYPE NUMERIC(12,1) USING odometer_in::numeric(12,1);
+        ALTER TABLE vehicle_maintenance ALTER COLUMN odometer_out TYPE NUMERIC(12,1) USING odometer_out::numeric(12,1);
+    END IF;
+    IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'vehicle_odometers' AND column_name = 'current_odometer' AND data_type = 'integer') THEN
+        ALTER TABLE vehicle_odometers ALTER COLUMN odometer_before TYPE NUMERIC(12,1) USING odometer_before::numeric(12,1);
+        ALTER TABLE vehicle_odometers ALTER COLUMN current_odometer TYPE NUMERIC(12,1) USING current_odometer::numeric(12,1);
+    END IF;
+END $$;", transaction: trans);
+
             if (isFullBatch)
             {
                 conn.Execute("DELETE FROM vehicle_insurance_claims WHERE vehicle_plate != ALL(@ActivePlates);", new { ActivePlates = activePlates }, trans);

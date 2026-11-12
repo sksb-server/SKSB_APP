@@ -70,11 +70,11 @@ internal static partial class SheetMapper
 
         OnBeforeMasterPopulate = masterWs =>
         {
-            if (masterWs.Cells[1, 2].Value2 == null)
-                masterWs.Cells[1, 2].Value2 = DateTime.Today.ToOADate();
+            if (masterWs.Cells[2, 2].Value2 == null)
+                masterWs.Cells[2, 2].Value2 = DateTime.Today.ToOADate();
 
             if (string.IsNullOrWhiteSpace(masterWs.Cells[1, 3].Value2?.ToString()))
-                masterWs.Cells[1, 3].Value2 = "All_Time";
+                masterWs.Cells[2, 3].Value2 = "All_Time";
         },
 
         OnPopulateAuxiliaryTables = (wb, masters) => PopulateAuxiliaryTables((object)wb),
@@ -127,7 +127,8 @@ internal static partial class SheetMapper
             BackfillFromParent = (v, c) =>
             {
                 if (string.IsNullOrWhiteSpace(plateSelector(c))) plateSetter(c, v.VehiclePlate);
-            }
+            },
+            ValidateForeignKeyExists = true
         };
     }
 

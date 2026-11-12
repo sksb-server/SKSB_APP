@@ -24,12 +24,15 @@ internal static partial class SheetMapper
     // =========================================================================
     // FUEL STATEMENT IMPORTER (PETRONAS SMARTPAY & SHELL FLEET HUB)
     // =========================================================================
+    /// <summary>
+    /// Duplicate-detection key. Deliberately excludes CurrentOdometer and any plate reassigned by odometer matching,
+    /// so re-importing a statement after "Sort &amp; Match Odometers" is still recognised as a duplicate.
+    /// </summary>
     private static string BuildFuelSignature(OdometerLog log)
     {
-        string id = string.IsNullOrWhiteSpace(log.VehiclePlate)
-            ? (log.FuelCardNumber ?? string.Empty).Trim()
-            : VehiclePlateHelper.NormalizePlate(log.VehiclePlate);
-        return $"{log.Date:yyyyMMdd}_{(log.Time ?? string.Empty).Trim()}_{id}_{log.Amount:F2}_{(log.ReceiptNumber ?? string.Empty).Trim()}_{log.CurrentOdometer}_{(log.StationName ?? string.Empty).Trim()}_{(log.FuelType ?? string.Empty).Trim()}_{log.PriceAtFueling:F2}_{log.FuelAmount:F2}";
+        string card = (log.FuelCardNumber ?? string.Empty).Trim();
+        string id = string.IsNullOrWhiteSpace(card) ? VehiclePlateHelper.NormalizePlate(log.VehiclePlate) : card;
+        return $"{log.Date:yyyyMMdd}_{(log.Time ?? string.Empty).Trim()}_{(log.ReceiptNumber ?? string.Empty).Trim()}_{log.Amount:F2}_{log.FuelAmount:F2}_{log.PriceAtFueling:F2}_{id}";
     }
 
     internal static (int ImportedCount, int SkippedCount, decimal TotalAmount, string ProviderName) ImportFuelStatement(string filePath)
@@ -160,7 +163,7 @@ internal static partial class SheetMapper
                 Date = raw.Date,
                 Time = raw.Time?.Trim() ?? string.Empty,
                 VehiclePlate = plate,
-                CurrentOdometer = raw.Odometer > 0 ? (int)raw.Odometer : 0,
+                CurrentOdometer = raw.Odometer > 0 ? (decimal)raw.Odometer : 0m,
                 FuelCardNumber = resolvedCard,
                 StationName = raw.StationName ?? string.Empty,
                 FuelType = raw.FuelType ?? string.Empty,
@@ -206,8 +209,7 @@ internal static partial class SheetMapper
         foreach (var log in cleanTransactions)
         {
             maxTxId++;
-            SetProp(log, "FuelTransactionID", maxTxId);
-            SetProp(log, "TransactionID", maxTxId);
+            log.OdometerID = maxTxId;
             totalAmount += GetProp<decimal>(log, "Amount", "TransactionAmount");
         }
 
@@ -217,27 +219,789 @@ internal static partial class SheetMapper
             combined.AddRange(existingLogs);
             combined.AddRange(cleanTransactions);
 
-            combined = combined.OrderBy(x => GetProp<DateOnly>(x, "Date"))
-                               .ThenBy(x => x.Time ?? string.Empty)
-                               .ThenBy(x => x.OdometerID)
-                               .ToList();
+            // Normalise hour-meters, resolve wrong/unrecognised plates, zero dummy readings, sort and chain OdometerBefore.
+            var reconcile = ReconcileAndSortOdometerLogs(combined, masterVehicles, cardMap);
+            AppLogger.Info($"[FuelImport] Reconcile: matched={reconcile.VehiclesMatched}, hours={reconcile.HoursNormalized}, invalid={reconcile.InvalidZeroed}, flagged={reconcile.FlaggedPlates}");
 
-            SheetProtections.ExecuteWithBypass((object)wsOdo, new Action(() =>
-            {
-                TableMapper.PopulateTableSafe<OdometerLog>((object)wsOdo, combined, "OdometersTable");
-                SheetProtections.ApplyStyleDrivenProtection(wsOdo);
-                try { xlApp.Calculate(); } catch { }
-            }));
-
-            try
-            {
-                dynamic table = wsOdo.ListObjects["OdometersTable"];
-                RuleEvaluator.EvaluateAndHealTable(wsOdo, table);
-            }
-            catch { }
+            WriteBackOdometers(xlApp, wsOdo, wsMaster, combined, masterVehicles);
         }
 
         return (cleanTransactions.Count, skippedCount, totalAmount, providerName);
+    }
+
+    // =========================================================================
+    // ODOMETER RECONCILIATION ENGINE (shared by Import Fuel Statement & Sort & Match Odometers)
+    // =========================================================================
+    internal sealed record OdometerReconcileResult(
+        int RowsSorted, int VehiclesMatched, int HoursNormalized, int InvalidZeroed, int FlaggedPlates);
+
+    private sealed class OdoWork
+    {
+        public OdometerLog Log = null!;
+        public decimal Raw;                 // working reading as typed (or recovered from an [Invalid Odometer] tag)
+        public decimal Norm;                // reading after hour-meter normalisation
+        public decimal JunkRaw;             // value used for junk tests (tag raw for already-scaled rows)
+        public string OrigPlate = string.Empty;
+        public string Key = string.Empty;   // group key (normalised preliminary plate)
+        public bool AlreadyScaled;          // hours already divided by 10 on a previous run (or typed with a decimal)
+        public bool PlateLocked;            // plate was matched on a previous run or hand-edited: never reassign
+        public bool Invalid;
+        public bool Divided;
+        public bool NeedsMatch;
+        public bool CanReject;              // no match found => zero the reading
+        public bool Matched;
+        public bool Ambiguous;
+    }
+
+    private sealed class OdoCandidate
+    {
+        public string Plate = string.Empty;
+        public string Key = string.Empty;
+        public VehicleType Type = VehicleType.None;
+        public bool Hour;
+        public decimal MasterOdo;
+        public List<(DateTime Stamp, decimal Odo)> Anchors = new();
+    }
+
+    // System-generated remark tags (Step 0: state recovery)
+    private static readonly Regex ScaledHoursRx = new(@"\[(?<hrs>[\d\.]+)\s*hrs\s*\(raw\s*(?<raw>\d+)\)\]", RegexOptions.Compiled);
+    private static readonly Regex MatchedPlateRx = new(@"\[Card\s+(?<card>.+?)\s*->\s*Matched\s+(?<plate>.+?)\s+by Odometer\]", RegexOptions.Compiled);
+    private static readonly Regex InvalidOdoRx = new(@"\[Invalid Odometer:\s*(?:repeated\s*)?raw\s*(?<raw>[\d\.]+)[^\]]*\]", RegexOptions.Compiled);
+    private static readonly Regex AmbiguousOdoRx = new(@"\[Ambiguous Odometer\s+(?<raw>[\d\.]+):[^\]]+\]", RegexOptions.Compiled);
+    private static readonly Regex UnrecognizedPlateRx = new(@"\[Unrecognized Plate:\s*(?<plate>[^\s\]]+)[^\]]*\]", RegexOptions.Compiled);
+
+    private static readonly HashSet<string> PlaceholderPlates =
+        new(StringComparer.OrdinalIgnoreCase) { "", "SPARE", "CHK", "UNKNOWN", "NA", "N/A", "NIL" };
+
+    /// <summary>Step 0: reads previous-run tags off Remarks, strips stale error tags, and recovers zeroed readings.</summary>
+    private static OdoWork ParseOdometerState(OdometerLog l)
+    {
+        var w = new OdoWork { Log = l, OrigPlate = (l.VehiclePlate ?? string.Empty).Trim() };
+        string rem = l.Remarks ?? string.Empty;
+        decimal current = l.CurrentOdometer;
+        decimal candidate = 0m;
+
+        var inv = InvalidOdoRx.Match(rem);
+        if (inv.Success && decimal.TryParse(inv.Groups["raw"].Value, NumberStyles.Any, CultureInfo.InvariantCulture, out var cr))
+            candidate = cr;
+        rem = InvalidOdoRx.Replace(rem, string.Empty);
+        rem = AmbiguousOdoRx.Replace(rem, string.Empty);
+        rem = UnrecognizedPlateRx.Replace(rem, string.Empty);
+
+        var sm = ScaledHoursRx.Match(rem);
+        if (sm.Success)
+        {
+            if (current > 0m
+                && decimal.TryParse(sm.Groups["hrs"].Value, NumberStyles.Any, CultureInfo.InvariantCulture, out var tagHrs)
+                && Math.Abs(tagHrs - current) <= 0.05m)
+            {
+                w.AlreadyScaled = true;
+                if (decimal.TryParse(sm.Groups["raw"].Value, NumberStyles.Any, CultureInfo.InvariantCulture, out var tagRaw))
+                    w.JunkRaw = tagRaw;
+            }
+            else
+            {
+                rem = ScaledHoursRx.Replace(rem, string.Empty);   // reading was edited after scaling: tag is stale
+            }
+        }
+
+        var mm = MatchedPlateRx.Match(rem);
+        if (mm.Success)
+        {
+            w.PlateLocked = true;
+            if (VehiclePlateHelper.NormalizePlate(l.VehiclePlate) != VehiclePlateHelper.NormalizePlate(mm.Groups["plate"].Value))
+                rem = MatchedPlateRx.Replace(rem, string.Empty);   // user chose a different plate: respect it
+        }
+
+        if (!w.AlreadyScaled && current % 1m != 0m) w.AlreadyScaled = true;   // hand-typed decimal hours
+
+        l.Remarks = Regex.Replace(rem, @"\s{2,}", " ").Trim();
+        w.Raw = current > 0m ? current : candidate;
+        w.Norm = w.Raw;
+        if (w.JunkRaw == 0m) w.JunkRaw = w.Raw;
+        return w;
+    }
+
+    private static void AppendRemarkTag(OdometerLog log, string tag)
+    {
+        string r = (log.Remarks ?? string.Empty).Trim();
+        if (r.Contains(tag, StringComparison.Ordinal)) return;
+        log.Remarks = r.Length == 0 ? tag : r + " " + tag;
+    }
+
+    private static DateTime OdoStamp(OdometerLog l)
+    {
+        var t = TimeOnly.MinValue;
+        if (!string.IsNullOrWhiteSpace(l.Time))
+            TimeOnly.TryParse(l.Time.Trim(), CultureInfo.InvariantCulture, DateTimeStyles.None, out t);
+        return l.Date.ToDateTime(t);
+    }
+
+    private static decimal MedianOf(List<decimal> values)
+    {
+        if (values.Count == 0) return 0m;
+        var s = values.OrderBy(x => x).ToList();
+        int m = s.Count / 2;
+        return s.Count % 2 == 1 ? s[m] : (s[m - 1] + s[m]) / 2m;
+    }
+
+    private static string F1(decimal v) => v.ToString("F1", CultureInfo.InvariantCulture);
+    private static string F0(decimal v) => v.ToString("0", CultureInfo.InvariantCulture);
+    private static string RawText(decimal v) => v % 1m == 0m ? F0(v) : F1(v);
+    private static string PlateTag(string? p) => string.IsNullOrWhiteSpace(p) ? "BLANK" : VehiclePlateHelper.NormalizePlate(p);
+
+    /// <summary>Step A: dummy / mashed / impossible readings.</summary>
+    private static bool IsJunkOdometer(decimal raw)
+    {
+        if (raw < 10m || raw > 1_500_000m) return true;
+        if (raw % 1m != 0m) return false;
+        string d = ((long)raw).ToString(CultureInfo.InvariantCulture);
+        if (d.Length >= 4 && d.Distinct().Count() == 1) return true;   // 111111, 9999
+        if (d.Length >= 5)
+        {
+            bool asc = true, desc = true;
+            for (int i = 1; i < d.Length; i++)
+            {
+                if (d[i] != d[i - 1] + 1) asc = false;
+                if (d[i] != d[i - 1] - 1) desc = false;
+            }
+            if (asc || desc) return true;                               // 12345, 987654
+        }
+        return false;
+    }
+
+    private static bool IsDieselOnlyRoadType(VehicleType t) =>
+        t is VehicleType.Lorry or VehicleType.Tipper_Lorry or VehicleType.Roro_Lorry
+          or VehicleType.Crane_Lorry or VehicleType.Skylift;
+
+    private static bool FuelCompatible(OdometerLog l, OdoCandidate c)
+    {
+        // Subsidised diesel is only sold against road diesel vehicles - never petrol cars or unsubsidised machinery.
+        if (l.PriceAtFueling > 0m && l.PriceAtFueling <= 2.50m)
+            return !c.Hour && c.Type is not (VehicleType.Car or VehicleType.Motorcycle);
+
+        string ft = l.FuelType ?? string.Empty;
+        bool petrol = ft.Contains("RON", StringComparison.OrdinalIgnoreCase)
+                   || ft.Contains("PRIMAX", StringComparison.OrdinalIgnoreCase)
+                   || ft.Contains("V-Power", StringComparison.OrdinalIgnoreCase);
+        return !(petrol && (c.Hour || IsDieselOnlyRoadType(c.Type)));
+    }
+
+    /// <summary>
+    /// Remark-aware reconciliation: sorts, normalises, matches and chains odometer logs in place.
+    /// Idempotent - previous-run tags are parsed first, so no edit is ever applied twice.
+    /// </summary>
+    internal static OdometerReconcileResult ReconcileAndSortOdometerLogs(
+        List<OdometerLog> logs,
+        IList<VehicleRecord> masters,
+        IDictionary<string, FuelCardRecord>? cardMap = null)
+    {
+        int matchedCount = 0, hoursNormalized = 0, invalidZeroed = 0;
+        if (logs.Count == 0) return new OdometerReconcileResult(0, 0, 0, 0, 0);
+
+        // ---- Known fleet -----------------------------------------------------------------
+        var known = new Dictionary<string, VehicleRecord>(StringComparer.OrdinalIgnoreCase);
+        foreach (var v in masters)
+        {
+            if (string.IsNullOrWhiteSpace(v.VehiclePlate)) continue;
+            known.TryAdd(VehiclePlateHelper.NormalizePlate(v.VehiclePlate), v);
+        }
+        bool haveMaster = known.Count > 0;
+
+        bool IsKnownPlate(string? plate)
+        {
+            string n = VehiclePlateHelper.NormalizePlate(plate);
+            if (PlaceholderPlates.Contains(n)) return false;
+            return !haveMaster || known.ContainsKey(n);
+        }
+
+        // ---- Step 0: parse previous-run state --------------------------------------------
+        var works = logs.Select(ParseOdometerState).ToList();
+
+        // Placeholder plates (SPARE / blank): fall back to the vehicle the fuel card is registered to.
+        if (cardMap != null && haveMaster)
+        {
+            foreach (var w in works)
+            {
+                if (w.PlateLocked || IsKnownPlate(w.Log.VehiclePlate)) continue;
+                if (!PlaceholderPlates.Contains(VehiclePlateHelper.NormalizePlate(w.Log.VehiclePlate))) continue;
+                if (!cardMap.TryGetValue(SanitizeCardToken(w.Log.FuelCardNumber), out var card)) continue;
+                string owner = (card.CardOwnerID ?? string.Empty).Trim();
+                if (owner.Length == 0 || long.TryParse(owner, out _)) continue;
+                if (known.TryGetValue(VehiclePlateHelper.NormalizePlate(owner), out var ownerVehicle))
+                    w.Log.VehiclePlate = ownerVehicle.VehiclePlate;
+            }
+        }
+
+        foreach (var w in works) w.Key = VehiclePlateHelper.NormalizePlate(w.Log.VehiclePlate);
+
+        void Invalidate(OdoWork w, string why)
+        {
+            if (w.Invalid) return;
+            w.Invalid = true;
+            w.NeedsMatch = false;
+            w.Log.CurrentOdometer = 0m;
+            AppendRemarkTag(w.Log, $"[Invalid Odometer: {why}]");
+            invalidZeroed++;
+        }
+
+        // ---- Per-vehicle analysis --------------------------------------------------------
+        var candidates = new Dictionary<string, OdoCandidate>(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var g in works.GroupBy(w => w.Key))
+        {
+            string key = g.Key;
+            var rows = g.OrderBy(w => OdoStamp(w.Log)).ThenBy(w => w.Log.OdometerID).ToList();
+            bool recognized = IsKnownPlate(key);
+
+            // A) Junk / dummy readings, then lazily repeated values.
+            var live = new List<OdoWork>();
+            foreach (var w in rows)
+            {
+                if (IsJunkOdometer(w.JunkRaw)) Invalidate(w, $"raw {RawText(w.JunkRaw)}");
+                else live.Add(w);
+            }
+            for (int i = 0; i < live.Count;)
+            {
+                int j = i;
+                while (j + 1 < live.Count && live[j + 1].JunkRaw == live[i].JunkRaw) j++;
+                if (j - i + 1 >= 3 &&
+                    live.Skip(i).Take(j - i + 1).Select(w => OdoStamp(w.Log)).Distinct().Count() >= 3)
+                {
+                    for (int k = i; k <= j; k++) Invalidate(live[k], $"repeated raw {RawText(live[k].JunkRaw)}");
+                }
+                i = j + 1;
+            }
+            live = live.Where(w => !w.Invalid).ToList();
+
+            // Unrecognised plate: nothing reliable to compare against - every reading is matched individually.
+            if (!recognized)
+            {
+                foreach (var w in live) if (!w.PlateLocked) w.NeedsMatch = true;
+                continue;
+            }
+
+            known.TryGetValue(key, out var kv);
+            VehicleType vType = kv?.VehicleDetail.Type ?? VehicleType.None;
+            if (vType == VehicleType.None)
+                vType = rows.Select(r => r.Log.VehicleType).FirstOrDefault(t => t != VehicleType.None);
+            bool typeDecided = vType != VehicleType.None && (kv != null || !haveMaster);
+            decimal masterOdo = kv?.VehicleDetail.CurrentOdometer ?? 0m;
+
+            // B) Hour-meter detection (unscaled readings only).
+            var unscaled = live.Where(w => !w.AlreadyScaled).ToList();
+            var ratios = new List<decimal>();
+            var deltas = new List<decimal>();
+            var rates = new List<decimal>();
+            for (int i = 1; i < unscaled.Count; i++)
+            {
+                decimal d = unscaled[i].Raw - unscaled[i - 1].Raw;
+                if (d <= 0m) continue;
+                deltas.Add(d);
+                if (unscaled[i].Log.FuelAmount > 0m) ratios.Add(d / unscaled[i].Log.FuelAmount);
+                double days = (OdoStamp(unscaled[i].Log) - OdoStamp(unscaled[i - 1].Log)).TotalDays;
+                if (days >= 1.0) rates.Add(d / (decimal)days);
+            }
+            bool tenthsConsistent = ratios.Count >= 2 && MedianOf(ratios) is >= 0.8m and <= 4.0m;
+            // Implied work rate: > 20 hrs/day unscaled but 0.5 - 18 hrs/day once divided by 10.
+            decimal medRate = MedianOf(rates);
+            bool rateImpliesTenths = rates.Count >= 2 && medRate > 20m && medRate / 10m is >= 0.5m and <= 18m;
+
+            bool hourVehicle;
+            if (typeDecided)
+            {
+                hourVehicle = VehicleRecord.IsHourMeterType(vType);
+            }
+            else
+            {
+                bool unsubsidised = live.Count >= 2 && live.Count(w => w.Log.PriceAtFueling > 3.00m) * 2 >= live.Count;
+                bool smallSteps = deltas.Count >= 2 && MedianOf(deltas) is >= 1m and <= 40m
+                                  && unscaled.All(w => w.Raw < 25000m);
+                hourVehicle = unsubsidised && (tenthsConsistent || smallSteps);
+            }
+
+            // C) Normalise readings.
+            bool scaleAll = hourVehicle && (tenthsConsistent || rateImpliesTenths);
+            foreach (var w in live)
+            {
+                w.Norm = w.AlreadyScaled ? w.Log.CurrentOdometer : w.Raw;
+                if (!hourVehicle || w.AlreadyScaled) continue;
+
+                if (scaleAll)
+                {
+                    w.Norm = Math.Round(w.Raw / 10m, 1);
+                    w.Divided = true;
+                    continue;
+                }
+
+                var others = live.Where(o => o != w).Select(o => o.AlreadyScaled ? o.Log.CurrentOdometer : o.Raw).ToList();
+                decimal baseline = others.Count > 0 ? MedianOf(others) : masterOdo;
+                decimal tenth = Math.Round(w.Raw / 10m, 1);
+                bool scale = baseline > 0m
+                    ? Math.Abs(tenth - baseline) <= 500m && Math.Abs(w.Raw - baseline) > 500m   // 14192 vs 1421..1429
+                    : w.Raw > 25000m;
+                if (scale) { w.Norm = tenth; w.Divided = true; }
+            }
+
+            // D) Value clusters (gap split) -> primary cluster; chronological chain inside it catches single typos.
+            decimal gap = hourVehicle ? 500m : 5000m;
+            var byValue = live.OrderBy(w => w.Norm).ToList();
+            var clusters = new List<List<OdoWork>>();
+            foreach (var w in byValue)
+            {
+                if (clusters.Count == 0 || w.Norm - clusters[^1][^1].Norm > gap) clusters.Add(new List<OdoWork>());
+                clusters[^1].Add(w);
+            }
+
+            List<OdoWork> primary = new();
+            if (clusters.Count > 0)
+            {
+                decimal Dist(List<OdoWork> c) =>
+                    masterOdo < c[0].Norm ? c[0].Norm - masterOdo : masterOdo > c[^1].Norm ? masterOdo - c[^1].Norm : 0m;
+                var byMaster = masterOdo > 0m ? clusters.OrderBy(Dist).First() : null;
+                primary = byMaster != null && Dist(byMaster) <= gap
+                    ? byMaster
+                    : clusters.OrderByDescending(c => c.Count).ThenByDescending(c => c.Max(w => OdoStamp(w.Log))).First();
+            }
+            var inPrimary = new HashSet<OdoWork>(primary);
+
+            bool StepOk(OdoWork a, OdoWork b)
+            {
+                int days = Math.Max(0, b.Log.Date.DayNumber - a.Log.Date.DayNumber);
+                decimal d = b.Norm - a.Norm;
+                if (d < 0m) return false;
+                if (d == 0m) return days == 0;
+                decimal max = hourVehicle ? 60m + 14m * days : 1500m + 500m * days;
+                return d <= max;
+            }
+
+            var chain = live.Where(inPrimary.Contains).ToList();   // already chronological
+            var len = new int[chain.Count];
+            var prev = new int[chain.Count];
+            int bestEnd = -1, bestLen = 0;
+            for (int i = 0; i < chain.Count; i++)
+            {
+                len[i] = 1; prev[i] = -1;
+                for (int j = 0; j < i; j++)
+                    if (len[j] + 1 > len[i] && StepOk(chain[j], chain[i])) { len[i] = len[j] + 1; prev[i] = j; }
+                if (len[i] > bestLen) { bestLen = len[i]; bestEnd = i; }
+            }
+            var inChain = new HashSet<OdoWork>();
+            for (int i = bestEnd; i >= 0; i = prev[i]) inChain.Add(chain[i]);
+
+            var cand = new OdoCandidate
+            {
+                Plate = kv?.VehiclePlate ?? rows[0].OrigPlate,
+                Key = key,
+                Type = vType,
+                Hour = hourVehicle,
+                MasterOdo = masterOdo
+            };
+            if (bestLen >= 2 || live.Count == 1)
+            {
+                foreach (var w in chain.Where(inChain.Contains)) cand.Anchors.Add((OdoStamp(w.Log), w.Norm));
+                cand.Anchors.Sort((x, y) => x.Stamp != y.Stamp ? x.Stamp.CompareTo(y.Stamp) : x.Odo.CompareTo(y.Odo));
+            }
+            candidates[key] = cand;
+
+            // E) Outliers: other value clusters (card fuelled a different vehicle) and typos inside the primary cluster.
+            foreach (var w in live)
+            {
+                if (w.PlateLocked) continue;
+                if (!inPrimary.Contains(w)) { w.NeedsMatch = true; w.CanReject = true; }
+                else if (bestLen >= 3 && !inChain.Contains(w)) { w.NeedsMatch = true; w.CanReject = true; }
+            }
+        }
+
+        // Known vehicles without a timeline in the table still take part in matching via their master odometer.
+        foreach (var entry in known)
+        {
+            if (candidates.ContainsKey(entry.Key)) continue;
+            var t = entry.Value.VehicleDetail.Type;
+            candidates[entry.Key] = new OdoCandidate
+            {
+                Plate = entry.Value.VehiclePlate,
+                Key = entry.Key,
+                Type = t,
+                Hour = VehicleRecord.IsHourMeterType(t),
+                MasterOdo = entry.Value.VehicleDetail.CurrentOdometer
+            };
+        }
+        var candidateList = candidates.Values.Where(c => c.Anchors.Count > 0 || c.MasterOdo > 0m).ToList();
+
+        // ---- Cross-fleet odometer trajectory matching (with ambiguity guard) -------------
+        foreach (var w in works.Where(x => x.NeedsMatch && !x.Invalid && !x.PlateLocked).OrderBy(x => OdoStamp(x.Log)))
+        {
+            DateTime stamp = OdoStamp(w.Log);
+            var hits = new List<(OdoCandidate C, decimal Odo, bool Div, int Tier, decimal Metric)>();
+
+            foreach (var c in candidateList)
+            {
+                if (c.Key == w.Key || !FuelCompatible(w.Log, c)) continue;
+
+                var readings = new List<(decimal Odo, bool Div)>();
+                if (w.AlreadyScaled) readings.Add((w.Log.CurrentOdometer > 0m ? w.Log.CurrentOdometer : w.Norm, false));
+                else
+                {
+                    readings.Add((w.Raw, false));
+                    if (c.Hour) readings.Add((Math.Round(w.Raw / 10m, 1), true));
+                }
+
+                decimal bracketRate = c.Hour ? 20m : 800m;
+                decimal boundRate = c.Hour ? 15m : 600m;
+                decimal boundMax = c.Hour ? 150m : 3000m;
+                decimal masterMax = c.Hour ? 100m : 2000m;
+
+                (DateTime Stamp, decimal Odo)? before = null, after = null;
+                foreach (var a in c.Anchors)
+                {
+                    if (a.Stamp <= stamp) before = a;
+                    else { after = a; break; }
+                }
+
+                (OdoCandidate C, decimal Odo, bool Div, int Tier, decimal Metric)? bestForCandidate = null;
+                foreach (var (odo, div) in readings)
+                {
+                    int tier = 0; decimal metric = 0m;
+                    if (c.Anchors.Count > 0)
+                    {
+                        if (before != null && after != null)
+                        {
+                            if (odo >= before.Value.Odo && odo <= after.Value.Odo)
+                            {
+                                decimal d1 = odo - before.Value.Odo, d2 = after.Value.Odo - odo;
+                                decimal dayB = Math.Max(1m, (decimal)(stamp - before.Value.Stamp).TotalDays);
+                                decimal dayA = Math.Max(1m, (decimal)(after.Value.Stamp - stamp).TotalDays);
+                                if (d1 / dayB <= bracketRate && d2 / dayA <= bracketRate) { tier = 1; metric = Math.Min(d1, d2); }
+                            }
+                        }
+                        else if (before != null)
+                        {
+                            decimal d = odo - before.Value.Odo;
+                            decimal days = (decimal)(stamp - before.Value.Stamp).TotalDays;
+                            if (d > 0m && d <= boundMax && days <= 30m && d / Math.Max(1m, days) <= boundRate) { tier = 2; metric = d; }
+                        }
+                        else if (after != null)
+                        {
+                            decimal d = after.Value.Odo - odo;
+                            decimal days = (decimal)(after.Value.Stamp - stamp).TotalDays;
+                            if (d > 0m && d <= boundMax && days <= 30m && d / Math.Max(1m, days) <= boundRate) { tier = 2; metric = d; }
+                        }
+                    }
+                    else if (c.MasterOdo > 0m)
+                    {
+                        decimal d = odo - c.MasterOdo;
+                        if (d >= 0m && d <= masterMax) { tier = 3; metric = d; }
+                    }
+                    if (tier == 0) continue;
+
+                    if (bestForCandidate == null || tier < bestForCandidate.Value.Tier
+                        || (tier == bestForCandidate.Value.Tier && metric < bestForCandidate.Value.Metric))
+                        bestForCandidate = (c, odo, div, tier, metric);
+                }
+                if (bestForCandidate != null) hits.Add(bestForCandidate.Value);
+            }
+
+            if (hits.Count == 0) continue;
+            hits = hits.OrderBy(h => h.Tier).ThenBy(h => h.Metric).ToList();
+            var best = hits[0];
+            // One match, or a bracketed match that beats every looser match by more than 2x closeness.
+            bool decisive = hits.Count == 1 ||
+                (best.Tier == 1 && hits.Skip(1).All(h => h.Tier > 1 && h.Metric > 2m * best.Metric));
+
+            if (!decisive)
+            {
+                // Never guess: keep the plate and ask for a human decision.
+                AppendRemarkTag(w.Log,
+                    $"[Ambiguous Odometer {RawText(w.Raw)}: matches {string.Join(", ", hits.Take(4).Select(h => h.C.Plate))} — verify vehicle]");
+                w.Ambiguous = true;
+                w.NeedsMatch = false;
+                continue;
+            }
+
+            string orig = PlateTag(w.OrigPlate);
+            w.Log.VehiclePlate = best.C.Plate;
+            if (best.C.Type != VehicleType.None) w.Log.VehicleType = best.C.Type;
+            w.Log.CurrentOdometer = best.Odo;
+            if (best.Div)
+            {
+                AppendRemarkTag(w.Log, $"[{F1(best.Odo)} hrs (raw {F0(w.Raw)})]");
+                hoursNormalized++;
+            }
+            AppendRemarkTag(w.Log, $"[Card {orig} -> Matched {PlateTag(best.C.Plate)} by Odometer]");
+            w.Matched = true;
+            w.PlateLocked = true;
+            w.NeedsMatch = false;
+            matchedCount++;
+        }
+
+        // ---- Apply remaining decisions ----------------------------------------------------
+        foreach (var w in works)
+        {
+            if (w.Invalid || w.Matched) continue;
+
+            if (w.NeedsMatch && w.CanReject)
+            {
+                Invalidate(w, $"raw {RawText(w.JunkRaw)}");
+                continue;
+            }
+            if (w.Divided)
+            {
+                w.Log.CurrentOdometer = w.Norm;
+                if (!ScaledHoursRx.IsMatch(w.Log.Remarks ?? string.Empty))
+                {
+                    AppendRemarkTag(w.Log, $"[{F1(w.Norm)} hrs (raw {F0(w.Raw)})]");
+                    hoursNormalized++;
+                }
+            }
+            else if (w.Log.CurrentOdometer <= 0m && w.Raw > 0m)
+            {
+                w.Log.CurrentOdometer = w.Raw;   // recovered reading that no longer needs rejecting
+            }
+        }
+
+        // ---- Unrecognised plates / vehicle type ------------------------------------------
+        foreach (var w in works)
+        {
+            var l = w.Log;
+            if (IsKnownPlate(l.VehiclePlate))
+            {
+                // Populated on every row so PopulateTableSafe picks the right km / hrs display on first write.
+                if (known.TryGetValue(VehiclePlateHelper.NormalizePlate(l.VehiclePlate), out var kvRec) &&
+                    kvRec.VehicleDetail.Type != VehicleType.None)
+                    l.VehicleType = kvRec.VehicleDetail.Type;
+                continue;
+            }
+
+            // A blank plate would make TableMapper drop the row on the next extract; keep a visible placeholder.
+            if (string.IsNullOrWhiteSpace(l.VehiclePlate)) l.VehiclePlate = "UNKNOWN";
+            AppendRemarkTag(l, $"[Unrecognized Plate: {PlateTag(w.OrigPlate)} — please assign vehicle]");
+        }
+
+        // ---- Step D: chronological sort, ID repair, OdometerBefore chain ------------------
+        var sorted = logs.OrderBy(l => l.Date).ThenBy(l => l.Time ?? string.Empty).ThenBy(l => l.OdometerID).ToList();
+        logs.Clear();
+        logs.AddRange(sorted);
+
+        // IDs are database keys: only repair missing / duplicate ones, never renumber healthy rows.
+        var seenIds = new HashSet<long>();
+        long maxId = Math.Max(0, logs.Max(l => l.OdometerID));
+        foreach (var l in logs)
+        {
+            if (l.OdometerID <= 0 || !seenIds.Add(l.OdometerID))
+            {
+                l.OdometerID = ++maxId;
+                seenIds.Add(l.OdometerID);
+            }
+        }
+
+        var lastValid = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+        foreach (var l in logs)
+        {
+            string k = VehiclePlateHelper.NormalizePlate(l.VehiclePlate);
+            decimal last = lastValid.TryGetValue(k, out var p) ? p : 0m;
+            l.OdometerBefore = last;
+            if (l.CurrentOdometer <= 0m) continue;   // lastValid carries forward unchanged
+
+            if (last > 0m && l.CurrentOdometer < last)
+            {
+                // Regression that survived matching: keep it out of the forward chain.
+                AppendRemarkTag(l, $"[Invalid Odometer: raw {RawText(l.CurrentOdometer)} < before {RawText(last)}]");
+                l.CurrentOdometer = 0m;
+                invalidZeroed++;
+            }
+            else
+            {
+                lastValid[k] = l.CurrentOdometer;
+            }
+        }
+
+        int flagged = logs.Count(l => !IsKnownPlate(l.VehiclePlate) ||
+                                      (l.Remarks ?? string.Empty).Contains("[Ambiguous Odometer", StringComparison.Ordinal));
+        return new OdometerReconcileResult(logs.Count, matchedCount, hoursNormalized, invalidZeroed, flagged);
+    }
+
+    // =========================================================================
+    // ODOMETERS TABLE COMMANDS & WRITE-BACK
+    // =========================================================================
+
+    /// <summary>Ribbon entry point: re-sorts and reconciles whatever is currently in OdometersTable.</summary>
+    internal static OdometerReconcileResult SortAndHealOdometers()
+    {
+        dynamic xlApp = ExcelDnaUtil.Application;
+        dynamic wb = xlApp.ActiveWorkbook;
+        if (wb == null) throw new InvalidOperationException("No active workbook found.");
+
+        dynamic? wsOdo = SheetMapperHelper.ResolveSheetSafely((object)wb, OdometerAliases, "Odometers");
+        if (wsOdo == null) throw new InvalidOperationException("Worksheet 'Odometers' was not found in active workbook.");
+
+        // TableMapper skips rows without a plate; writing the list back would silently erase them.
+        int platelessRows = CountRowsMissingPlate(wsOdo);
+        if (platelessRows > 0)
+            throw new InvalidOperationException(
+                $"{platelessRows} row(s) in OdometersTable have no Vehicle Plate.\n" +
+                "Enter a Vehicle Plate (or delete the rows) before sorting, otherwise they would be lost.");
+
+        List<OdometerLog> logs = TableMapper.ExtractFromTable<OdometerLog>((object)wsOdo, "OdometersTable");
+        if (logs.Count == 0) return new OdometerReconcileResult(0, 0, 0, 0, 0);
+
+        List<FuelCardRecord> fuelCards = TableMapper.ExtractFromTable<FuelCardRecord>((object)wsOdo, "FuelCardsTable");
+        var cardMap = new Dictionary<string, FuelCardRecord>(StringComparer.OrdinalIgnoreCase);
+        foreach (var c in fuelCards)
+        {
+            string norm = SanitizeCardToken(c.FuelCardNumber);
+            if (norm.Length > 0) cardMap[norm] = c;
+        }
+
+        dynamic? wsMaster = SheetMapperHelper.ResolveSheetSafely((object)wb, AllVehicleAliases, MasterSheetName);
+        List<VehicleRecord> masters = wsMaster != null
+            ? TableMapper.ExtractFromTable<VehicleRecord>((object)wsMaster, MasterTableName)
+            : new List<VehicleRecord>();
+
+        var result = ReconcileAndSortOdometerLogs(logs, masters, cardMap);
+        WriteBackOdometers(xlApp, wsOdo, wsMaster, logs, masters);
+        return result;
+    }
+
+    private static string SquashHeader(object? h) =>
+        Regex.Replace((h?.ToString() ?? string.Empty).ToLowerInvariant(), "[^a-z0-9]", "");
+
+    private static int FindColumn(dynamic table, string squashedName)
+    {
+        int cols = (int)table.ListColumns.Count;
+        for (int c = 1; c <= cols; c++)
+            if (SquashHeader(table.ListColumns[c].Name) == squashedName) return c;
+        return 0;
+    }
+
+    private static int CountRowsMissingPlate(dynamic wsOdo)
+    {
+        dynamic? table = TableMapper.ResolveTable(wsOdo, "OdometersTable");
+        dynamic? body = table?.DataBodyRange;
+        if (table == null || body == null) return 0;
+
+        int rows = (int)body.Rows.Count, cols = (int)table.ListColumns.Count;
+        int plateCol = FindColumn(table, "vehicleplate");
+        int dateCol = FindColumn(table, "date");
+        int odoCol = FindColumn(table, "currentodometer");
+        if (plateCol == 0) return 0;
+
+        object[,] grid = TableMapper.GetRange2DValues(body, rows, cols);
+        int count = 0;
+        for (int r = 1; r <= rows; r++)
+        {
+            if (!string.IsNullOrWhiteSpace(grid[r, plateCol]?.ToString())) continue;
+            bool hasData = (dateCol > 0 && !string.IsNullOrWhiteSpace(grid[r, dateCol]?.ToString()))
+                        || (odoCol > 0 && !string.IsNullOrWhiteSpace(grid[r, odoCol]?.ToString()) && grid[r, odoCol]?.ToString() != "0");
+            if (hasData) count++;
+        }
+        return count;
+    }
+
+    /// <summary>Writes the reconciled list into OdometersTable, then refreshes each vehicle's Current Odometer.</summary>
+    private static void WriteBackOdometers(dynamic xlApp, dynamic wsOdo, dynamic? wsMaster, List<OdometerLog> logs, IList<VehicleRecord> masters)
+    {
+        SheetProtections.ExecuteWithBypass((object)wsOdo, new Action(() =>
+        {
+            TableMapper.PopulateTableSafe<OdometerLog>((object)wsOdo, logs, "OdometersTable");
+            SheetProtections.ApplyStyleDrivenProtection(wsOdo);
+            try { xlApp.Calculate(); } catch { }
+        }));
+
+        try
+        {
+            dynamic table = wsOdo.ListObjects["OdometersTable"];
+            RuleEvaluator.EvaluateAndHealTable(wsOdo, table);
+        }
+        catch { }
+
+        if (wsMaster == null) return;
+        try { SyncMasterCurrentOdometers(xlApp, wsMaster, logs, masters); }
+        catch (Exception ex) { AppLogger.Warn($"[Odometers] Master Current Odometer sync skipped: {ex.Message}"); }
+    }
+
+    /// <summary>Sets AllVehiclesTable[Current Odometer] to each vehicle's highest valid reading (one column write).</summary>
+    private static void SyncMasterCurrentOdometers(dynamic xlApp, dynamic wsMaster, List<OdometerLog> logs, IList<VehicleRecord> masters)
+    {
+        var maxByPlate = logs
+            .Where(l => l.CurrentOdometer > 0m && !string.IsNullOrWhiteSpace(l.VehiclePlate))
+            .GroupBy(l => VehiclePlateHelper.NormalizePlate(l.VehiclePlate))
+            .ToDictionary(g => g.Key, g => g.Max(x => x.CurrentOdometer), StringComparer.OrdinalIgnoreCase);
+        if (maxByPlate.Count == 0) return;
+
+        dynamic? table = TableMapper.ResolveTable(wsMaster, MasterTableName);
+        dynamic? body = table?.DataBodyRange;
+        if (table == null || body == null) return;
+
+        int plateCol = FindColumn(table, "vehicleplate");
+        int odoCol = FindColumn(table, "currentodometer");
+        if (plateCol == 0 || odoCol == 0) return;
+
+        int rows = (int)body.Rows.Count;
+        dynamic plateRange = table.ListColumns[plateCol].DataBodyRange;
+        dynamic odoRange = table.ListColumns[odoCol].DataBodyRange;
+        if ((odoRange.Cells[1, 1].Formula?.ToString() ?? string.Empty).StartsWith("=")) return;
+
+        object[,] plates = TableMapper.GetRange2DValues(plateRange, rows, 1);
+        object[,] current = TableMapper.GetRange2DValues(odoRange, rows, 1);
+
+        var output = new object[rows, 1];
+        bool changed = false;
+        for (int r = 0; r < rows; r++)
+        {
+            object? existing = current[r + 1, 1];
+            object? value = existing;
+            string k = VehiclePlateHelper.NormalizePlate(plates[r + 1, 1]?.ToString());
+            if (maxByPlate.TryGetValue(k, out decimal max))
+            {
+                double newVal = (double)max;
+                if (existing is not double old || Math.Abs(old - newVal) > 0.0001) changed = true;
+                value = newVal;
+            }
+            output[r, 0] = value!;
+        }
+        var typeByPlate = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        foreach (var m in masters)
+            typeByPlate[VehiclePlateHelper.NormalizePlate(m.VehiclePlate)] = VehicleRecord.IsHourMeterType(m.VehicleDetail.Type);
+        var isHours = new List<bool>(rows);
+        for (int r = 0; r < rows; r++)
+        {
+            string k = VehiclePlateHelper.NormalizePlate(plates[r + 1, 1]?.ToString());
+            isHours.Add(typeByPlate.TryGetValue(k, out bool h) && h);
+        }
+
+        bool origEvents = true;
+        try { origEvents = (bool)xlApp.EnableEvents; xlApp.EnableEvents = false; } catch { }
+        try
+        {
+            SheetProtections.ExecuteWithBypass((object)wsMaster, new Action(() =>
+            {
+                if (changed) odoRange.Value2 = output;
+                ApplyUnitFormatRuns(wsMaster, odoRange, isHours);
+            }));
+        }
+        finally
+        {
+            try { xlApp.EnableEvents = origEvents; } catch { }
+        }
+    }
+
+    /// <summary>Applies km / hrs NumberFormat per contiguous run of rows sharing a unit (one COM call per run).</summary>
+    private static void ApplyUnitFormatRuns(dynamic ws, dynamic columnRange, IList<bool> isHours)
+    {
+        int start = 0;
+        while (start < isHours.Count)
+        {
+            int end = start;
+            while (end + 1 < isHours.Count && isHours[end + 1] == isHours[start]) end++;
+            try
+            {
+                dynamic run = ws.Range[columnRange.Cells[start + 1, 1], columnRange.Cells[end + 1, 1]];
+                run.NumberFormat = isHours[start] ? "#,##0.# \"hrs\"" : "#,##0 \"km\"";
+            }
+            catch { }
+            start = end + 1;
+        }
     }
 
     // =========================================================================

@@ -38,6 +38,13 @@ public class RibbonController : ManagerRibbonBase
                           screentip='Import Petronas / Shell Monthly Statement'
                           supertip='Parses monthly PDF invoices or portal Excel files and appends fuel logs into OdometersTable.'
                           onAction='OnImportFuelStatementClicked' />
+                  <button id='btnSortAndHealOdometers'
+                          label='Sort &amp; Match&#10;Odometers'
+                          size='large'
+                          imageMso='SortAscendingExcel'
+                          screentip='Auto-Sort &amp; Reconcile OdometersTable'
+                          supertip='Sorts all odometer logs chronologically, reads Remarks so edits are never applied twice, normalizes machinery engine hours (0.1 hr), matches cross-card fueling trajectories across the fleet, flags ambiguous or invalid odometers, and recomputes Odometer Before.'
+                          onAction='OnSortAndHealOdometersClick' />
                 </group>";
 
     // Original behaviour: an empty fetch still populates (clears) the worksheet.
@@ -108,5 +115,45 @@ public class RibbonController : ManagerRibbonBase
         {
             MessageBox.Show($"Fuel import failed:\n{ex.Message}", "Import Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
+    }
+
+    // =========================================================================
+    // 4. SORT & MATCH ODOMETERS CALLBACK
+    // =========================================================================
+    public void OnSortAndHealOdometersClick(IRibbonControl control)
+    {
+        // COM work must run on Excel's main thread. The engine restores ScreenUpdating / EnableEvents
+        // before returning, so the summary dialogs below are safe to show.
+        ExcelAsyncUtil.QueueAsMacro(() =>
+        {
+            try
+            {
+                var result = SheetMapper.SortAndHealOdometers();
+
+                if (result.RowsSorted == 0)
+                {
+                    MessageBox.Show("OdometersTable has no rows to sort.", "Sort & Match Odometers",
+                        MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    return;
+                }
+
+                string summary =
+                    $"  • Total Rows Sorted: {result.RowsSorted}\n" +
+                    $"  • Vehicles Matched by Odometer Trajectory: {result.VehiclesMatched}\n" +
+                    $"  • Ambiguous / Unresolved Plates Flagged for Review: {result.FlaggedPlates}\n" +
+                    $"  • Machinery Hour Readings Normalized (÷ 10): {result.HoursNormalized}\n" +
+                    $"  • Invalid / Dummy Odometers Zeroed: {result.InvalidZeroed}";
+
+                if (result.FlaggedPlates > 0)
+                    summary += "\n\nRows tagged [Unrecognized Plate: ...] or [Ambiguous Odometer ...] need a valid Vehicle Plate before the workbook can be saved.";
+
+                MessageBox.Show(summary, "Sort & Match Odometers Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            }
+            catch (Exception ex)
+            {
+                MessageBox.Show($"Sort & Match Odometers failed:\n{ex.Message}", "Odometer Error",
+                    MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        });
     }
 }

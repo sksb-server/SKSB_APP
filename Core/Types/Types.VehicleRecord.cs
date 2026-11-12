@@ -87,6 +87,11 @@ public enum FuelCompany
 [ExcelTable("AllVehiclesTable")]
 public record VehicleRecord
 {
+    /// <summary>Heavy machinery tracks engine hours (1 decimal place) instead of kilometres.</summary>
+    public static bool IsHourMeterType(VehicleType type) =>
+        type is VehicleType.Backhoe or VehicleType.Excavator or VehicleType.Roller
+             or VehicleType.Compressor or VehicleType.Generator or VehicleType.Machinery;
+
     [DataList("VehiclePlateList")]
     [ExcelColumn("Vehicle Plate")]
     [ColumnRule(IsRequired = true, Transform = TransformKind.UpperCase)]
@@ -211,7 +216,7 @@ public record VehicleDetail
 
     [ExcelColumn("Current Odometer")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
-    public int CurrentOdometer { get; set; } = 0;
+    public decimal CurrentOdometer { get; set; } = 0m;
 
     [ExcelColumn("Remarks")]
     [ColumnRule(IsRequired = false)]
@@ -262,11 +267,11 @@ public record Maintenance
 
     [ExcelColumn("Odometer In")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
-    public int OdometerIn { get; set; } = 0;
+    public decimal OdometerIn { get; set; } = 0m;
 
     [ExcelColumn("Odometer Out")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
-    public int OdometerOut { get; set; } = 0;
+    public decimal OdometerOut { get; set; } = 0m;
 
     [ExcelColumn("Workshop Name")]
     [ColumnRule("WorkshopsTable[Workshop Name]", IsRequired = false, IsWarningOnly = true)]
@@ -483,7 +488,7 @@ public record InsuranceCompanyRecord
 [ExcelTable("InsuranceClaimsTable")]
 public record InsuranceClaim
 {
-    [ExcelColumn("Claim ID", isRequired: true)]
+    [ExcelColumn("Insurance Claim ID", isRequired: true)]
     [ColumnRule(IsRequired = true)]
     [ColumnDefault(DefaultKind.AutoIncrement)]
     public long ClaimID { get; set; }
@@ -751,11 +756,11 @@ public record OdometerLog
 
     [ExcelColumn("Odometer Before")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
-    public int OdometerBefore { get; set; } = 0;
+    public decimal OdometerBefore { get; set; } = 0m;
 
     [ExcelColumn("Current Odometer")]
     [ColumnRule(IsRequired = true, AllowNonNegativeZero = true)]
-    public int CurrentOdometer { get; set; } = 0;
+    public decimal CurrentOdometer { get; set; } = 0m;
 
     [ExcelColumn("Fuel Card Number")]
     [ColumnRule("FuelCardsTable[Fuel Card Number]", IsRequired = false, IsWarningOnly = true)]
