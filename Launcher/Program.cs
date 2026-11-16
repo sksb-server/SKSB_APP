@@ -27,7 +27,38 @@ public class LauncherPackageManifest
 static class Program
 {
     private const string ServerHost = "http://192.168.0.20:5000";
-    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromSeconds(25) };
+    // Long overall timeout for package downloads; the cheap version check uses its own short CTS.
+    private static readonly HttpClient Http = new() { Timeout = TimeSpan.FromMinutes(5) };
+    private static readonly TimeSpan VersionCheckTimeout = TimeSpan.FromSeconds(10);
+    private static readonly string LogFilePath = Path.Combine(FolderRegistry.Data.GetPath(), "Launcher.log");
+
+    private const string ServerOfflinePrefix = "SERVER OFFLINE";
+
+    /// <summary>True when the exception means the server could not be reached (refused, DNS, timeout).</summary>
+    private static bool IsServerUnreachable(Exception ex)
+    {
+        for (Exception? e = ex; e != null; e = e.InnerException)
+        {
+            if (e is System.Net.Sockets.SocketException or TimeoutException or TaskCanceledException) return true;
+            if (e is HttpRequestException h && h.StatusCode == null) return true;
+        }
+        return false;
+    }
+
+    private static string DescribeServerError(Exception ex) =>
+        IsServerUnreachable(ex)
+            ? $"{ServerOfflinePrefix}: the SKSB update server ({ServerHost}) is not reachable.\nCheck that the server is running and that you are on the office network.\n\nDetails: {ex.Message}"
+            : ex.Message;
+
+    private static void LogLauncher(string message)
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(LogFilePath)!);
+            File.AppendAllText(LogFilePath, $"[{DateTime.Now:yyyy-MM-dd HH:mm:ss}] {message}{System.Environment.NewLine}");
+        }
+        catch { }
+    }
 
     private static readonly string RootPath = FolderRegistry.SKSB_App.GetPath();
     private static readonly string TemplatesFolder = FolderRegistry.Templates.GetPath();
@@ -52,11 +83,15 @@ static class Program
         {
             EnsureDirectoryHierarchy();
 
+            // 1b. Make sure the .NET 8 Desktop Runtime (needed by Portal and the Excel add-ins) is installed
+            if (!EnsureDotNetRuntime()) return;
+
             // 2. Detection Gate: Check if initial installation is needed
             bool isFirstInstall = !File.Exists(PortalExePath) || !File.Exists(VersionFilePath);
 
             if (isFirstInstall)
             {
+                bool installFailed = false;
                 var progressForm = new InstallationProgressForm();
                 progressForm.Shown += async (s, e) =>
                 {
@@ -66,6 +101,8 @@ static class Program
                     }
                     catch (Exception ex)
                     {
+                        installFailed = true;
+                        LogLauncher($"[Install] Failed: {ex}");
                         MessageBox.Show($"Installation failed: {ex.Message}", "Installation Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     }
                     finally
@@ -74,6 +111,7 @@ static class Program
                     }
                 };
                 Application.Run(progressForm);
+                if (installFailed) return;
             }
             else
             {
@@ -95,6 +133,108 @@ static class Program
         }
     }
 
+    // =========================================================================
+    // .NET 8 DESKTOP RUNTIME PREREQUISITE
+    // =========================================================================
+    private const string RuntimeUrlX64 = "https://aka.ms/dotnet/8.0/windowsdesktop-runtime-win-x64.exe";
+    private const string RuntimeUrlX86 = "https://aka.ms/dotnet/8.0/windowsdesktop-runtime-win-x86.exe";
+
+    private static bool HasDesktopRuntime8(string programFilesDir)
+    {
+        try
+        {
+            string shared = Path.Combine(programFilesDir, "dotnet", "shared", "Microsoft.WindowsDesktop.App");
+            return Directory.Exists(shared) &&
+                   Directory.GetDirectories(shared, "8.*").Length > 0;
+        }
+        catch { return false; }
+    }
+
+    /// <summary>64-bit Excel needs only x64; 32-bit (or unknown) Excel also needs the x86 runtime.</summary>
+    private static bool IsExcel64Bit()
+    {
+        try
+        {
+            using var key = Microsoft.Win32.Registry.LocalMachine.OpenSubKey(@"SOFTWARE\Microsoft\Office\ClickToRun\Configuration");
+            return string.Equals(key?.GetValue("Platform") as string, "x64", StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
+    }
+
+    private static bool EnsureDotNetRuntime()
+    {
+        var missing = new List<(string Name, string Url)>();
+        if (!HasDesktopRuntime8(System.Environment.GetFolderPath(System.Environment.SpecialFolder.ProgramFiles)))
+            missing.Add((".NET 8 Desktop Runtime (x64)", RuntimeUrlX64));
+        if (!IsExcel64Bit() && !HasDesktopRuntime8(System.Environment.GetFolderPath(System.Environment.SpecialFolder.ProgramFilesX86)))
+            missing.Add((".NET 8 Desktop Runtime (x86, for 32-bit Excel)", RuntimeUrlX86));
+
+        if (missing.Count == 0) return true;
+
+        var confirm = MessageBox.Show(
+            "SKSB needs the following Microsoft component(s), which will be downloaded and installed now:\n\n  - " +
+            string.Join("\n  - ", missing.Select(m => m.Name)) +
+            "\n\nAn administrator permission prompt (UAC) will appear. Continue?",
+            "SKSB Setup - Prerequisites", MessageBoxButtons.OKCancel, MessageBoxIcon.Information);
+        if (confirm != DialogResult.OK) return false;
+
+        string? failure = null;
+        var form = new InstallationProgressForm();
+        form.Shown += async (s, e) =>
+        {
+            try
+            {
+                foreach (var (name, url) in missing)
+                {
+                    form.UpdateStatus($"Downloading {name}...");
+                    string exe = Path.Combine(Path.GetTempPath(), $"SKSB_Runtime_{Guid.NewGuid():N}.exe");
+                    try
+                    {
+                        using (var resp = await Http.GetAsync(url, HttpCompletionOption.ResponseHeadersRead))
+                        {
+                            resp.EnsureSuccessStatusCode();
+                            await using var fs = new FileStream(exe, FileMode.Create, FileAccess.Write, FileShare.None, 81920, useAsync: true);
+                            await resp.Content.CopyToAsync(fs);
+                        }
+
+                        form.UpdateStatus($"Installing {name}...");
+                        var psi = new ProcessStartInfo(exe, "/install /quiet /norestart") { UseShellExecute = true, Verb = "runas" };
+                        using var proc = Process.Start(psi)!;
+                        await proc.WaitForExitAsync();
+                        // 0 = ok, 3010 = ok (reboot pending), 1638 = newer version already present
+                        if (proc.ExitCode is not (0 or 3010 or 1638))
+                            throw new InvalidOperationException($"Installer exited with code {proc.ExitCode}.");
+                    }
+                    finally { try { File.Delete(exe); } catch { } }
+                }
+            }
+            catch (System.ComponentModel.Win32Exception wex) when (wex.NativeErrorCode == 1223)
+            {
+                failure = "The administrator permission prompt was cancelled.";
+            }
+            catch (Exception ex)
+            {
+                failure = IsServerUnreachable(ex)
+                    ? $"Could not download the component. Check your internet connection.\n\n{ex.Message}"
+                    : ex.Message;
+            }
+            finally { form.Close(); }
+        };
+        Application.Run(form);
+
+        if (failure != null)
+        {
+            LogLauncher($"[Runtime] Install failed: {failure}");
+            MessageBox.Show(
+                $"The required .NET 8 Desktop Runtime could not be installed.\n\n{failure}\n\n" +
+                "Please install it manually from https://dotnet.microsoft.com/download/dotnet/8.0 and start SKSB again.",
+                "SKSB Setup - Prerequisites", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return false;
+        }
+        LogLauncher("[Runtime] .NET 8 Desktop Runtime installed.");
+        return true;
+    }
+
     private static void EnsureDirectoryHierarchy()
     {
         FolderRegistry.SKSB_App.EnsureExists();
@@ -113,8 +253,16 @@ static class Program
 
         if (!downloaded)
         {
+            LogLauncher($"[Install] Download failed: {error}");
             progress.UpdateStatus("Server unreachable. Resolving local dependencies...");
             CopyLocalFolderArtifacts();
+
+            if (!File.Exists(PortalExePath))
+            {
+                // Do NOT write version.json: the next launch must retry a full install.
+                throw new InvalidOperationException(
+                    $"Could not install SKSB: no local Portal.exe is available and the package could not be downloaded.\n\n{error}\n\nLog: {LogFilePath}");
+            }
         }
 
         if (!File.Exists(VersionFilePath))
@@ -135,15 +283,24 @@ static class Program
         try
         {
             string endpoint = $"{ServerHost}/api/update/version";
-            string manifestJson = Http.GetStringAsync(endpoint).GetAwaiter().GetResult();
+            using var cts = new CancellationTokenSource(VersionCheckTimeout);
+            string manifestJson = Http.GetStringAsync(endpoint, cts.Token).GetAwaiter().GetResult();
             remoteVersion = JsonSerializer.Deserialize<LauncherPackageManifest>(manifestJson, new JsonSerializerOptions
             {
                 PropertyNameCaseInsensitive = true
             });
         }
-        catch
+        catch (Exception ex)
         {
-            // Server offline: silently continue to launch installed local files
+            // Server offline: continue to launch installed local files (logged for diagnostics)
+            LogLauncher($"[AutoUpdate] Version check skipped: {ex.Message}");
+            if (IsServerUnreachable(ex))
+            {
+                MessageBox.Show(
+                    $"{ServerOfflinePrefix}: cannot reach the SKSB update server ({ServerHost}).\n\n" +
+                    $"Starting the installed version (v{localVersion?.Version ?? "unknown"}) without checking for updates.",
+                    "Server Offline", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
             return;
         }
 
@@ -197,12 +354,18 @@ static class Program
                     }
                     else
                     {
-                        System.Diagnostics.Debug.WriteLine($"[AutoUpdate Failed]: {err}");
+                        LogLauncher($"[AutoUpdate Failed] v{remoteVersion.Version}: {err}");
+                        MessageBox.Show(
+                            $"The update to v{remoteVersion.Version} could not be installed.\n\n{err}\n\nThe currently installed version will be launched. Details: {LogFilePath}",
+                            "Update Failed", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     }
                 }
                 catch (Exception ex)
                 {
-                    System.Diagnostics.Debug.WriteLine($"[AutoUpdate Exception]: {ex.Message}");
+                    LogLauncher($"[AutoUpdate Exception]: {ex}");
+                    MessageBox.Show(
+                        $"The update failed unexpectedly:\n\n{ex.Message}\n\nDetails: {LogFilePath}",
+                        "Update Failed", MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 }
                 finally
                 {
@@ -245,7 +408,7 @@ static class Program
         }
         catch (Exception ex)
         {
-            return (false, ex.Message);
+            return (false, DescribeServerError(ex));
         }
         finally
         {
@@ -256,6 +419,9 @@ static class Program
 
     private static void DispatchFilesToDestination(string sourceFolder)
     {
+        if (Directory.GetFiles(sourceFolder, "Portal.exe", SearchOption.AllDirectories).Length == 0)
+            throw new InvalidDataException("The downloaded package does not contain Portal.exe.");
+
         foreach (string file in Directory.GetFiles(sourceFolder, "*.*", SearchOption.AllDirectories))
         {
             string fileName = Path.GetFileName(file);
@@ -275,12 +441,17 @@ static class Program
                     File.Copy(file, destinationPath, overwrite: true);
                     break;
                 }
-                catch when (i < 2)
+                catch (Exception ex) when (i < 2)
                 {
+                    LogLauncher($"[Dispatch] Retry {i + 1} copying {fileName}: {ex.Message}");
                     Thread.Sleep(200);
                 }
+                // Final failure propagates; DownloadAndExtractFromServerAsync reports it.
             }
         }
+
+        if (!File.Exists(PortalExePath))
+            throw new FileNotFoundException("Portal.exe was not installed after extraction.", PortalExePath);
     }
 
     private static void CopyLocalFolderArtifacts()

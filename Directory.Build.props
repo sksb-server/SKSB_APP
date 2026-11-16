@@ -5,8 +5,6 @@
   <!-- Deployment Release target: C:\Users\<user>\Documents\SKSB_App -->
   <!-- ============================================================= -->
   <PropertyGroup>
-    <AIExportDir>$(MSBuildThisFileDirectory)AI_Source_Export</AIExportDir>
-    <SingleBundleFile>$(AIExportDir)\AI_Context_AllCode.txt</SingleBundleFile>
     <SourceAddInsDir>$(MSBuildThisFileDirectory)AddIns</SourceAddInsDir>
     <ReleaseDeploymentDir>$(UserProfile)\Documents\SKSB_App</ReleaseDeploymentDir>
   </PropertyGroup>
@@ -23,13 +21,10 @@
       <_DeepCleanExecuted>true</_DeepCleanExecuted>
     </PropertyGroup>
 
-    <Message Importance="high" Text="[Clean] Wiping easy-access AddIns, AI export, and Release directories..." />
+    <Message Importance="high" Text="[Clean] Wiping easy-access AddIns and Release directories..." />
 
     <!-- 1a. Completely wipe everything inside Codes\SKSB_App\AddIns -->
     <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -Command &quot;if (Test-Path '$(SourceAddInsDir)') { Get-ChildItem -Path '$(SourceAddInsDir)' -Recurse -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue }&quot;" IgnoreExitCode="true" />
-
-    <!-- 1b. Wipe AI export folder and any loose AI zips -->
-    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -Command &quot;Remove-Item -Path '$(MSBuildThisFileDirectory)*AI*.zip' -Force -ErrorAction SilentlyContinue; if (Test-Path '$(AIExportDir)') { Remove-Item -Path '$(AIExportDir)' -Recurse -Force -ErrorAction SilentlyContinue }&quot;" IgnoreExitCode="true" />
 
     <!-- 1c. Only wipe Documents\SKSB_App when cleaning in RELEASE mode -->
     <Exec Condition="'$(Configuration)' == 'Release'"
@@ -73,55 +68,19 @@
     <Message Importance="high" Text="[AddIn Sync] Deployed $(MSBuildProjectName) artifacts to $(SourceAddInsDir)" />
   </Target>
 
-  <!-- ============================================================= -->
-  <!-- 3. AUTO-GENERATE AI CHAT EXPORT BUNDLE                        -->
-  <!-- Triggers once per build cycle on Launcher                     -->
-  <!-- ============================================================= -->
-	<Target Name="GenerateAIChatCodeBundle"
-		  AfterTargets="Build"
-		  Condition="'$(_AIChatBundleRan)' != 'true' and ('$(MSBuildProjectName)' == 'Launcher' or '$(MSBuildProjectName)' == 'SKSB_App')">
-
-    <PropertyGroup>
-      <_AIChatBundleRan>true</_AIChatBundleRan>
-    </PropertyGroup>
-
-    <MakeDir Directories="$(AIExportDir)" Condition="!Exists('$(AIExportDir)')" />
-
-    <ItemGroup>
-      <CleanSourceFiles Include="$(MSBuildThisFileDirectory)**\*.cs;
-                                 $(MSBuildThisFileDirectory)**\*.csproj;
-                                 $(MSBuildThisFileDirectory)**\*.dna;
-                                 $(MSBuildThisFileDirectory)**\*.props;
-                                 $(MSBuildThisFileDirectory)**\*.targets;
-                                 $(MSBuildThisFileDirectory)**\*.sql"
-                        Exclude="$(MSBuildThisFileDirectory)**\bin\**;
-                                 $(MSBuildThisFileDirectory)**\obj\**;
-                                 $(MSBuildThisFileDirectory)**\.vs\**;
-                                 $(MSBuildThisFileDirectory)**\.git\**;
-                                 $(MSBuildThisFileDirectory)**\packages\**;
-                                 $(MSBuildThisFileDirectory)**\publish\**;
-                                 $(MSBuildThisFileDirectory)**\publish_staging\**;
-                                 $(MSBuildThisFileDirectory)**\AI_Source_Export\**;
-                                 $(MSBuildThisFileDirectory)**\*AI*\**;
-                                 $(AIExportDir)\**" />
-    </ItemGroup>
-
-    <Copy SourceFiles="@(CleanSourceFiles)"
-          DestinationFolder="$(AIExportDir)\%(RecursiveDir)"
-          SkipUnchangedFiles="false" />
-
-    <!-- Consolidate into AI_Context_AllCode.txt using atomic write -->
-    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -Command &quot;$dest = '$(SingleBundleFile)'; $tmp = $dest + '.tmp'; New-Item -ItemType File -Path $tmp -Force | Out-Null; Get-ChildItem -Path '$(AIExportDir)' -Recurse -File | Where-Object { $_.FullName -ne $dest -and $_.FullName -ne $tmp -and $_.Extension -match '\.(cs|csproj|dna|props|targets|sql)$' } | ForEach-Object { '============================================================' | Out-File $tmp -Append -Encoding utf8; ('FILE: ' + $_.FullName.Replace('$(AIExportDir)\', '')) | Out-File $tmp -Append -Encoding utf8; '============================================================' | Out-File $tmp -Append -Encoding utf8; Get-Content $_.FullName -Encoding utf8 | Out-File $tmp -Append -Encoding utf8; '`n' | Out-File $tmp -Append -Encoding utf8 }; Move-Item -Path $tmp -Destination $dest -Force;&quot;" IgnoreExitCode="true" />
-
-    <Message Importance="high" Text="[AI Export Ready] Unified bundle created at: $(SingleBundleFile)" />
-  </Target>
-
 	<!-- ============================================================= -->
-	<!-- 4. AUTO-DEPLOY RELEASE PACKAGE TO SERVER (PUBLISH ONLY)       -->
+	<!-- 3. AUTO-DEPLOY RELEASE PACKAGE TO SERVER (PUBLISH ONLY)       -->
+	<!-- publish.ps1 is self-contained: it runs its own Release builds -->
+	<!-- (solution + out-of-solution modules), so a single             -->
+	<!-- 'dotnet publish Launcher -c Release' works even right after   -->
+	<!-- a Clean. A non-zero exit from publish.ps1 fails the publish.  -->
 	<!-- ============================================================= -->
 	<Target Name="AutoDeployReleaseToServer"
 			AfterTargets="Publish"
-			Condition="'$(Configuration)' == 'Release' and ('$(MSBuildProjectName)' == 'Launcher' or '$(MSBuildProjectName)' == 'SKSB_App')">
+			Condition="'$(_AutoDeployRan)' != 'true' and '$(Configuration)' == 'Release' and ('$(MSBuildProjectName)' == 'Launcher' or '$(MSBuildProjectName)' == 'SKSB_App')">
+		<PropertyGroup>
+			<_AutoDeployRan>true</_AutoDeployRan>
+		</PropertyGroup>
 		<Message Importance="high" Text="[Release Deploy] Building and deploying SKSB package to server..." />
 		<Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -File &quot;$(MSBuildThisFileDirectory)publish.ps1&quot;" />
 	</Target>

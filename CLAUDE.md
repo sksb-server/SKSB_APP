@@ -40,8 +40,7 @@ Before running any build or clean command, understand what MSBuild executes auto
 
 Process Termination (Portal.csproj -> KillExistingExcelAndPortalOnBuild): Building Portal (or the full solution) runs taskkill /f /fi "IMAGENAME eq excel.exe" and taskkill /f /fi "IMAGENAME eq Portal.exe" before compilation so locked .xll and .dll files can be overwritten.
 Add-In Artifact Sync (SyncAddInsToCodesFolderOnBuild): Every Build of Core or any ExcelDna.AddIn project copies .dll, .pdb, .deps.json, .runtimeconfig.json, *.dna, *-AddIn*.xll, and publish/*-packed.xll into ./AddIns/.
-AI Code Bundle Generation (GenerateAIChatCodeBundle): Building Launcher or SKSB_App exports all clean source files into ./AI_Source_Export/ and atomically consolidates them into ./AI_Source_Export/AI_Context_AllCode.txt.
-Deep Clean (DeepCleanAllArtifactsOnClean): Running a Clean or Rebuild target wipes ./AddIns/ and ./AI_Source_Export/. Warning: Running Clean with -c Release also deletes all non-Data files in %USERPROFILE%\Documents\SKSB_App.
+Deep Clean (DeepCleanAllArtifactsOnClean): Running a Clean or Rebuild target wipes ./AddIns/. Warning: Running Clean with -c Release also deletes all non-Data files in %USERPROFILE%\Documents\SKSB_App.
 Standard CLI Commands (PowerShell)
 Restore Dependencies
 powershell
@@ -58,7 +57,7 @@ dotnet build ProjectManager/ProjectManager.csproj -c Debug
 dotnet build ScheduleManager/ScheduleManager.csproj -c Debug
 Clean Solution
 powershell
-# Safe Debug Clean (wipes bin/, obj/, ./AddIns/, and ./AI_Source_Export/)
+# Safe Debug Clean (wipes bin/, obj/, and ./AddIns/)
 dotnet clean SKSB_App.slnx -c Debug
 # Release Clean (ALSO wipes deployed binaries in $env:USERPROFILE\Documents\SKSB_App except \Data\)
 dotnet clean SKSB_App.slnx -c Release
