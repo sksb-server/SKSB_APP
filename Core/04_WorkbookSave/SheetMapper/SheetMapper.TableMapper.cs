@@ -437,9 +437,11 @@ public static class TableMapper
         return scalarGrid;
     }
 
-    public static object FormatForExcel(object? val)
+    public static object? FormatForExcel(object? val)
     {
-        if (val == null) return string.Empty;
+        // null -> truly empty cell. An empty string would be a text value, and "" >= TODAY()
+        // evaluates TRUE in Excel, giving blank date cells a green icon.
+        if (val == null) return null;
         if (val is DateOnly d) return d.ToDateTime(TimeOnly.MinValue).ToOADate();
         if (val is DateTime dt) return dt.ToOADate();
         if (val is decimal dec)

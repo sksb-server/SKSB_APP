@@ -288,6 +288,202 @@ public static class WorkbookMapper
     }
 
     // =========================================================================
+    // 3a. POST-FREEZE CONDITIONAL FORMATTING REFRESH
+    // =========================================================================
+    /// <summary>
+    /// Icon Set / formula-driven conditional formats evaluated while Calculation was manual and
+    /// ScreenUpdating off can keep stale visuals. Marks populated table bodies dirty, recalculates
+    /// once, then forces a repaint. Must run with EnableEvents still false (no Worksheet_Change).
+    /// Writes nothing to cells, so it is unaffected by validation-based locking.
+    /// </summary>
+    private static void RefreshConditionalFormatting<TMaster, TKey>(
+        dynamic xlApp, object wbObj, WorkbookMapping<TMaster, TKey> map)
+        where TMaster : new()
+        where TKey : notnull
+    {
+        try
+        {
+#if DEBUG
+            LogCfDiagnostics(wbObj, map.MasterTableName, "BEFORE refresh");
+#endif
+            NudgeIconSetRules(xlApp, wbObj);
+
+#if DEBUG
+            LogCfDiagnostics(wbObj, map.MasterTableName, "AFTER inline refresh");
+#endif
+
+            // Excel can defer CF rendering until the current macro returns. Queue a second nudge
+            // that runs on the macro thread afterwards, with events suppressed again.
+            try
+            {
+                ExcelAsyncUtil.QueueAsMacro(() =>
+                {
+                    dynamic app = ExcelDnaUtil.Application;
+                    bool prevEvents = true;
+                    try { prevEvents = (bool)app.EnableEvents; app.EnableEvents = false; } catch { }
+                    try
+                    {
+                        NudgeIconSetRules(app, wbObj);
+#if DEBUG
+                        LogCfDiagnostics(wbObj, map.MasterTableName, "AFTER deferred refresh");
+#endif
+                    }
+                    catch (Exception exDef)
+                    {
+                        AppLogger.Warn($"[WorkbookMapper] Deferred CF refresh warning: {exDef.Message}");
+                    }
+                    finally
+                    {
+                        try { app.EnableEvents = prevEvents; } catch { }
+                    }
+                });
+            }
+            catch (Exception exQ)
+            {
+                AppLogger.Warn($"[WorkbookMapper] Could not queue deferred CF refresh: {exQ.Message}");
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn($"[WorkbookMapper] CF refresh warning: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Rule-level (not cell-level) nudge: re-assigns each Icon Set rule's AppliesTo on every table
+    /// body so Excel invalidates its cached icon state, then recalculates. Writes no cell values.
+    /// </summary>
+    private static void NudgeIconSetRules(dynamic xlApp, object wbObj)
+    {
+        dynamic wb = wbObj;
+        foreach (dynamic sheet in wb.Worksheets)
+        {
+            try
+            {
+                foreach (dynamic tbl in sheet.ListObjects)
+                {
+                    try
+                    {
+                        dynamic? body = tbl.DataBodyRange;
+                        if (body == null) continue;
+                        try { body.Dirty(); } catch { }
+
+                        dynamic fcs = body.FormatConditions;
+                        int count = (int)fcs.Count;
+                        for (int i = 1; i <= count; i++)
+                        {
+                            try
+                            {
+                                dynamic fc = fcs[i];
+                                if ((int)fc.Type == 6) // xlIconSets
+                                {
+                                    fc.ModifyAppliesToRange(fc.AppliesTo);
+                                }
+                            }
+                            catch { }
+                        }
+                    }
+                    catch { }
+                }
+            }
+            catch { }
+        }
+
+        try { xlApp.Calculate(); } catch { }
+    }
+
+#if DEBUG
+    /// <summary>DEBUG: logs CF state for the first Expired row of the master table.</summary>
+    private static void LogCfDiagnostics(object wbObj, string masterTableName, string label)
+    {
+        try
+        {
+            dynamic wb = wbObj;
+            dynamic? tbl = null;
+            dynamic? ws = null;
+            foreach (dynamic sheet in wb.Worksheets)
+            {
+                try { tbl = sheet.ListObjects[masterTableName]; ws = sheet; if (tbl != null) break; } catch { }
+            }
+            if (tbl == null || ws == null) return;
+
+            dynamic? body = tbl.DataBodyRange;
+            if (body == null) return;
+
+            // Bulk reads: headers + whole body in 2 COM calls
+            object[,] headers = TableMapper.GetRange2DValues(tbl.HeaderRowRange, 1, (int)tbl.ListColumns.Count);
+            int rows = (int)body.Rows.Count;
+            int cols = (int)body.Columns.Count;
+            object[,] data = TableMapper.GetRange2DValues(body, rows, cols);
+
+            int statusCol = -1;
+            for (int c = 1; c <= cols; c++)
+                if (string.Equals(headers[1, c]?.ToString(), "Status", StringComparison.OrdinalIgnoreCase)) { statusCol = c; break; }
+            if (statusCol < 0) { AppLogger.Info($"[CF-DIAG {label}] No Status column"); return; }
+
+            int expiredRow = -1;
+            for (int r = 1; r <= rows; r++)
+                if (string.Equals(data[r, statusCol]?.ToString(), "Expired", StringComparison.OrdinalIgnoreCase)) { expiredRow = r; break; }
+            if (expiredRow < 0) { AppLogger.Info($"[CF-DIAG {label}] No Expired row in {masterTableName}"); return; }
+
+            var sb = new System.Text.StringBuilder();
+            sb.AppendLine($"[CF-DIAG {label}] {masterTableName} first Expired row = body row {expiredRow}");
+
+            for (int c = 1; c <= cols; c++)
+            {
+                string h = headers[1, c]?.ToString() ?? "";
+                if (!h.Contains("Expiry", StringComparison.OrdinalIgnoreCase)) continue;
+                try
+                {
+                    dynamic cell = body.Cells[expiredRow, c];
+                    string color = "n/a";
+                    try { color = cell.DisplayFormat.Interior.Color.ToString(); } catch { }
+                    sb.AppendLine($"  Cell {cell.Address[false, false]} '{h}': Value2={cell.Value2}, Text='{cell.Text}', Formula='{cell.Formula}', DisplayFormat.Interior.Color={color}");
+                }
+                catch (Exception exCell) { sb.AppendLine($"  Cell col {c} read failed: {exCell.Message}"); }
+            }
+
+            dynamic fcs = body.FormatConditions;
+            int count = (int)fcs.Count;
+            sb.AppendLine($"  FormatConditions on body: {count}");
+            for (int i = 1; i <= count; i++)
+            {
+                try
+                {
+                    dynamic fc = fcs[i];
+                    int type = (int)fc.Type;
+                    string line = $"  [{i}] Type={type} Priority={fc.Priority} StopIfTrue={fc.StopIfTrue} AppliesTo={fc.AppliesTo.Address}";
+                    if (type == 6)
+                    {
+                        try
+                        {
+                            dynamic crit = fc.IconCriteria;
+                            int cc = (int)crit.Count;
+                            var parts = new List<string>();
+                            for (int k = 1; k <= cc; k++)
+                            {
+                                dynamic ic = crit[k];
+                                parts.Add($"#{k}(Type={ic.Type},Op={ic.Operator},Value={ic.Value})");
+                            }
+                            line += " IconCriteria=" + string.Join(" ", parts);
+                        }
+                        catch (Exception exIc) { line += $" IconCriteria read failed: {exIc.Message}"; }
+                    }
+                    sb.AppendLine(line);
+                }
+                catch (Exception exFc) { sb.AppendLine($"  [{i}] read failed: {exFc.Message}"); }
+            }
+
+            AppLogger.Info(sb.ToString());
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn($"[CF-DIAG {label}] failed: {ex.Message}");
+        }
+    }
+#endif
+
+    // =========================================================================
     // 3b. MASTER + CHILD POPULATE PIPELINE
     // =========================================================================
     public static void PopulateMasterAndChildren<TMaster, TKey>(
@@ -373,9 +569,15 @@ public static class WorkbookMapper
         }
         finally
         {
+            // Lift calculation + screen freeze first, but keep EnableEvents off until the
+            // repaint pass is done so it cannot raise Worksheet_Change loops.
             try { xlApp.Calculation = origCalculation; } catch { }
-            try { xlApp.EnableEvents = origEvents; } catch { }
             try { xlApp.ScreenUpdating = origUpdating; } catch { }
+            if (auditWorkbook != null)
+            {
+                RefreshConditionalFormatting(xlApp, auditWorkbook, map);
+            }
+            try { xlApp.EnableEvents = origEvents; } catch { }
         }
 
         // 8. DEBUG audit (no-op in Release). Shown only after the freeze is lifted: a modal dialog

@@ -205,13 +205,11 @@ public record VehicleDetail
     public DateOnly? PermitExpiry { get; set; }
 
     [ExcelColumn("Road Tax Expiry")]
-    [ColumnRule(IsRequired = false, IsWarningOnly = true)]
-    [ColumnDefault(DefaultKind.DateOffsetDays, referenceHeader: "Bought Date", offset: 365)]
+    [ColumnRule(IsRequired = false)]
     public DateOnly? RoadTaxExpiry { get; set; }
 
     [ExcelColumn("Inspection Expiry")]
-    [ColumnRule(IsRequired = false, IsWarningOnly = true)]
-    [ColumnDefault(DefaultKind.DateOffsetMonths, referenceHeader: "Bought Date", offset: 6)]
+    [ColumnRule(IsRequired = false)]
     public DateOnly? InspectionExpiry { get; set; }
 
     [ExcelColumn("Current Odometer")]
