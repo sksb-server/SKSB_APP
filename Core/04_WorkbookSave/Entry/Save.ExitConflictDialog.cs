@@ -19,9 +19,12 @@ public class ExitConflictDialog : Form
     public ExitConflictDialog(
         string moduleName,
         string errorMessage,
-        bool isClosing = true)
+        bool isClosing = true,
+        bool isDebugPrompt = false)
     {
-        Text = $"{moduleName} - Synchronization Alert";
+        Text = isDebugPrompt
+            ? $"[DEBUG MODE] {moduleName} - Save & Exit Options"
+            : $"{moduleName} - Synchronization Alert";
 
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -52,13 +55,22 @@ public class ExitConflictDialog : Form
         pnlIndicator.Paint += (s, e) =>
         {
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
-            Color iconColor = Color.FromArgb(217, 119, 6);
+            Color iconColor = isDebugPrompt ? Color.FromArgb(79, 70, 229) : Color.FromArgb(217, 119, 6);
             using var brush = new SolidBrush(iconColor);
             e.Graphics.FillEllipse(brush, 2, 2, 32, 32);
 
             using var pen = new Pen(Color.White, 2.5f);
-            e.Graphics.DrawLine(pen, 18, 10, 18, 20);
-            e.Graphics.FillEllipse(Brushes.White, 16.5f, 23.5f, 3, 3);
+            if (isDebugPrompt)
+            {
+                e.Graphics.DrawArc(pen, 12, 9, 12, 10, 180, 200);
+                e.Graphics.DrawLine(pen, 18, 19, 18, 22);
+                e.Graphics.FillEllipse(Brushes.White, 16.5f, 25f, 3, 3);
+            }
+            else
+            {
+                e.Graphics.DrawLine(pen, 18, 10, 18, 20);
+                e.Graphics.FillEllipse(Brushes.White, 16.5f, 23.5f, 3, 3);
+            }
         };
 
         var pnlContent = new TableLayoutPanel
@@ -71,7 +83,7 @@ public class ExitConflictDialog : Form
 
         var lblTitle = new Label
         {
-            Text = "Server Database Offline",
+            Text = isDebugPrompt ? "Debug Save Intercept" : "Server Database Offline",
             Font = new Font("Segoe UI", 11.5f, FontStyle.Bold),
             ForeColor = Color.FromArgb(30, 41, 59),
             AutoSize = true,
@@ -84,7 +96,9 @@ public class ExitConflictDialog : Form
 
         var lblMessage = new Label
         {
-            Text = $"Unable to persist records to the server database.\n\nDetails:\n{errorMessage}\n\n{actionPrompt}",
+            Text = isDebugPrompt
+                ? "Pending records ready to persist.\n\nDebug Mode is active. Select how to proceed with this record batch:"
+                : $"Unable to persist records to the server database.\n\nDetails:\n{errorMessage}\n\n{actionPrompt}",
             Font = new Font("Segoe UI", 9.5f),
             ForeColor = Color.FromArgb(71, 85, 105),
             AutoSize = true,
@@ -116,19 +130,23 @@ public class ExitConflictDialog : Form
         flowButtons.Controls.Add(btnCancel);
 
 #if DEBUG
-        var btnQuitAnyway = new Button
+        // Non-closing saves have nothing to discard: Cancel already aborts without saving.
+        if (isClosing)
         {
-            Text = "Quit Anyway (Discard)",
-            Font = new Font("Segoe UI", 9f, FontStyle.Italic),
-            ForeColor = Color.FromArgb(185, 28, 28),
-            BackColor = Color.FromArgb(254, 242, 242),
-            FlatStyle = FlatStyle.Flat,
-            AutoSize = true,
-            Padding = new Padding(12, 6, 12, 6)
-        };
-        btnQuitAnyway.FlatAppearance.BorderColor = Color.FromArgb(252, 165, 165);
-        btnQuitAnyway.Click += (_, _) => { Resolution = ExitResolution.QuitAnyway; Close(); };
-        flowButtons.Controls.Add(btnQuitAnyway);
+            var btnQuitAnyway = new Button
+            {
+                Text = "Quit Anyway (Discard)",
+                Font = new Font("Segoe UI", 9f, FontStyle.Italic),
+                ForeColor = Color.FromArgb(185, 28, 28),
+                BackColor = Color.FromArgb(254, 242, 242),
+                FlatStyle = FlatStyle.Flat,
+                AutoSize = true,
+                Padding = new Padding(12, 6, 12, 6)
+            };
+            btnQuitAnyway.FlatAppearance.BorderColor = Color.FromArgb(252, 165, 165);
+            btnQuitAnyway.Click += (_, _) => { Resolution = ExitResolution.QuitAnyway; Close(); };
+            flowButtons.Controls.Add(btnQuitAnyway);
+        }
 #endif
 
         var btnSaveLocal = new Button
@@ -147,7 +165,7 @@ public class ExitConflictDialog : Form
 
         var btnRetry = new Button
         {
-            Text = "Retry Server",
+            Text = isDebugPrompt ? "Save to Server" : "Retry Server",
             Font = new Font("Segoe UI", 9f, FontStyle.Bold),
             AutoSize = true,
             Padding = new Padding(14, 6, 14, 6),

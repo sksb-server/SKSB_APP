@@ -41,6 +41,38 @@ public static class SaveEntry
                     return;
                 }
 
+#if DEBUG
+                // DEBUG ONLY: confirm before every commit. Rule 2 modal exception: unfreeze + hide floating widgets first.
+                SKSB_App.Core.RuntimeUI.DropDown.Arrow.HideAll();
+                try { xlApp.EnableEvents = true; } catch { }
+                try { xlApp.ScreenUpdating = true; } catch { }
+
+                using var debugPrompt = new ExitConflictDialog(
+                    contract.ModuleName,
+                    string.Empty,
+                    isClosing: false,
+                    isDebugPrompt: true
+                );
+                debugPrompt.ShowDialog();
+                switch (debugPrompt.Resolution)
+                {
+                    case ExitResolution.Retry:
+                        try { xlApp.ScreenUpdating = false; } catch { }
+                        break; // Proceed to contract.SaveToServer(data) below
+                    case ExitResolution.SaveLocallyAndQuit:
+                        OfflineSnapshot.SaveOfflineSnapshot(data);
+                        contract.PopulateWorksheet?.Invoke(data);
+                        try { ((dynamic)ExcelDnaUtil.Application).ActiveWorkbook.Saved = true; } catch { }
+                        SaveNotificationDialog.ShowOffline(contract.ModuleName, "Debug: Records stashed to offline JSON storage.");
+                        return;
+                    case ExitResolution.QuitAnyway:
+                    case ExitResolution.Cancel:
+                    default:
+                        AppLogger.Info($"[{contract.ModuleName}] Debug save cancelled by user.");
+                        return;
+                }
+#endif
+
                 var (success, dbErrRelease) = contract.SaveToServer(data);
                 if (success)
                 {
@@ -151,6 +183,42 @@ public static class SaveEntry
                     QuitExcelIfLastWorkbook(wb);
                     return;
                 }
+
+#if DEBUG
+                // DEBUG ONLY: confirm before every commit. ScreenUpdating / EnableEvents are already true here (step 3 above).
+                using var closePrompt = new ExitConflictDialog(
+                    contract.ModuleName,
+                    string.Empty,
+                    isClosing: true,
+                    isDebugPrompt: true
+                );
+                closePrompt.ShowDialog();
+                switch (closePrompt.Resolution)
+                {
+                    case ExitResolution.Retry:
+                        break; // Proceed to freeze + contract.SaveToServer(data) below
+                    case ExitResolution.SaveLocallyAndQuit:
+                        OfflineSnapshot.SaveOfflineSnapshot(data);
+                        isExiting = true;
+                        unEventHooks();
+                        wb.Saved = true;
+                        cancel = false;
+                        QuitExcelIfLastWorkbook(wb);
+                        return;
+                    case ExitResolution.QuitAnyway:
+                        AppLogger.Info($"[{contract.ModuleName}] Debug close: user chose Quit Anyway (discarded unsaved changes).");
+                        isExiting = true;
+                        unEventHooks();
+                        wb.Saved = true;
+                        cancel = false;
+                        QuitExcelIfLastWorkbook(wb);
+                        return;
+                    case ExitResolution.Cancel:
+                    default:
+                        cancel = true;
+                        return;
+                }
+#endif
 
                 try { xlApp.ScreenUpdating = false; } catch { }
                 try { xlApp.EnableEvents = false; } catch { }

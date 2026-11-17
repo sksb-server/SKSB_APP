@@ -91,6 +91,7 @@ Build in Debug mode (dotnet build SKSB_App.slnx -c Debug).
 Every Excel-DNA module exposes a Debug Controls Ribbon group in DEBUG builds containing:
 Simulate Server Offline (ServerEnvironment.SimulateOffline): Forces ServerEnvironment.GuardConnection() to throw a TimeoutException on any PostgreSqlService call, testing local JSON fallback (OfflineSnapshot) and ExitConflictDialog workflows.
 Debug diagnostics are always written to the runtime log via AppLogger (no toggle, no popups).
+DEBUG Save Intercept: in DEBUG builds, every save (SaveEntry.Save) and workbook close (SaveEntry.InterceptClose) first shows an ExitConflictDialog (isDebugPrompt: true) before committing to PostgreSQL, so the developer can choose Save to Server, Save Offline, Quit Anyway (close only, discards changes) or Cancel. Release builds save directly.
 Inspect runtime execution traces and COM event stack traces in %USERPROFILE%\Documents\SKSB_App\Data\ or via AppLogger (Core/Diagnostics/Diagnoestics.AppLogger.cs).
 3. Architectural Code Style & Conventions
 Namespaces, File Naming & Structure
