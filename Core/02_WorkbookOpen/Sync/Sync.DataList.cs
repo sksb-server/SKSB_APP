@@ -22,16 +22,6 @@ public static class DataList
     }
 
     /// <summary>
-    /// Synchronizes specific entity models requested by an operational manager.
-    /// Preserves column row-alignment across compound fields (e.g., StaffID and StaffName).
-    /// </summary>
-    public static int SyncEntities(params Type[] entityTypes)
-    {
-        if (entityTypes == null || entityTypes.Length == 0) return 0;
-        return ExecuteEntityBlockSync(headersOnly: false, entityTypes);
-    }
-
-    /// <summary>
     /// Discovers and synchronizes all public entities decorated with [DataList] across all assemblies.
     /// Dedicated strictly for Template Edit Mode.
     /// </summary>
@@ -117,21 +107,6 @@ public static class DataList
 
         SyncHelper.SyncEntityBlocks(TargetSheet, entityBlocks);
         return entityBlocks.Sum(b => b.ColumnNames.Count);
-    }
-
-    public static bool SyncData<TEntity>(IEnumerable<TEntity>? entities = null) where TEntity : class
-    {
-        var records = entities?.ToList() ?? OfflineSnapshot.Load<List<TEntity>>();
-        if (records == null) return false;
-
-        var descriptors = DiscoverDecoratedProperties(typeof(TEntity));
-        if (descriptors.Count == 0) return false;
-
-        var block = BuildEntityBlock(typeof(TEntity).Name, descriptors, records, injectPlaceholderIfEmpty: SheetOperations.IsTemplateEditMode);
-        if (block == null) return false;
-
-        SyncHelper.SyncEntityBlocks(TargetSheet, new List<EntityTableBlock> { block });
-        return true;
     }
 
     public static bool SyncProperty<TEntity, TProp>(

@@ -1,7 +1,6 @@
 namespace SKSB_App.Core.RuntimeUI.RuleEngine;
 
 using System;
-using System.Collections;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Reflection;
@@ -12,8 +11,6 @@ using SKSB_App.Core.WorkbookSave.SheetMapper;
 public readonly record struct EffectiveColumnFormat(
     ColumnFormatKind Kind,
     ZeroBehavior Zero,
-    int DecimalPlaces,
-    string? CustomUnit,
     string? ExcelNumberFormat);
 
 public static partial class RuleRegistry
@@ -46,18 +43,16 @@ public static partial class RuleRegistry
         {
             kind = explicitAttr.Kind;
             zero = explicitAttr.Zero;
-            decimals = explicitAttr.DecimalPlaces;
-            unit = explicitAttr.CustomUnit;
         }
         else
         {
             kind = InferKind(prop, headerName, defaultAttr);
-            zero = kind is ColumnFormatKind.Text or ColumnFormatKind.General or ColumnFormatKind.None
+            zero = kind is ColumnFormatKind.Text or ColumnFormatKind.General or ColumnFormatKind.None or ColumnFormatKind.Id
                 ? ZeroBehavior.Blank
                 : ZeroBehavior.Dash;
         }
 
-        return new EffectiveColumnFormat(kind, zero, decimals, unit, BuildExcelNumberFormatString(kind, decimals, zero, unit));
+        return new EffectiveColumnFormat(kind, zero, BuildExcelNumberFormatString(kind, decimals, zero, unit));
     }
 
     private static ColumnFormatKind InferKind(PropertyInfo prop, string header, ColumnDefaultAttribute? defaultAttr)
@@ -86,7 +81,8 @@ public static partial class RuleRegistry
         if (Has("Hours")) return ColumnFormatKind.Hours;
         if (Has("Shift")) return ColumnFormatKind.Shifts;
         if (Has("Cost") || Has("Price") || Has("Return") || Has("Margin") || Has("Amount") ||
-            Has("Claim") || Has("Salary") || Has("Earned"))
+            Has("Claim") || Has("Salary") || Has("Earned") ||
+            prop.Name.EndsWith("Cost", StringComparison.OrdinalIgnoreCase))
             return ColumnFormatKind.Currency;
 
         return isDec ? ColumnFormatKind.Decimal : ColumnFormatKind.Integer;

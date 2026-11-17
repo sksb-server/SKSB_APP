@@ -160,12 +160,6 @@ public abstract class ManagerRibbonBase : ExcelRibbon
                                 imageMso='AccessSetOfflineStatus'
                                 getPressed='GetSimulateOfflinePressed'
                                 onAction='OnToggleOfflineClicked' />
-                  <toggleButton id='btnToggleMasterDebug'
-                                label='Debug Logs Active'
-                                size='large'
-                                imageMso='TraceDependents'
-                                getPressed='GetMasterDebugPressed'
-                                onAction='OnToggleMasterDebugClicked' />
                 </group>";
 #else
         return string.Empty;
@@ -236,7 +230,7 @@ public abstract class ManagerRibbonBase : ExcelRibbon
             try
             {
                 dynamic xlApp = ExcelDnaUtil.Application;
-                dynamic ws = xlApp.ActiveWorkbook?.ActiveSheet;
+                dynamic? ws = xlApp.ActiveWorkbook?.ActiveSheet;
                 if (ws != null)
                 {
                     TableRowManager.CleanActiveSheetTables(ws);
@@ -259,7 +253,7 @@ public abstract class ManagerRibbonBase : ExcelRibbon
             try
             {
                 dynamic xlApp = ExcelDnaUtil.Application;
-                dynamic ws = xlApp.ActiveWorkbook?.ActiveSheet;
+                dynamic? ws = xlApp.ActiveWorkbook?.ActiveSheet;
                 if (ws == null) return;
 
                 int tablesCleaned = TableRowManager.CleanActiveSheetTables(ws);
@@ -281,7 +275,7 @@ public abstract class ManagerRibbonBase : ExcelRibbon
             try
             {
                 dynamic xlApp = ExcelDnaUtil.Application;
-                dynamic ws = xlApp.ActiveWorkbook?.ActiveSheet;
+                dynamic? ws = xlApp.ActiveWorkbook?.ActiveSheet;
                 if (ws == null) return;
 
                 bool origEvents = true;
@@ -296,13 +290,10 @@ public abstract class ManagerRibbonBase : ExcelRibbon
 
                 try
                 {
-                    SheetProtections.ExecuteWithBypass((object)ws, new Action(() =>
+                    foreach (dynamic table in ws.ListObjects)
                     {
-                        foreach (dynamic table in ws.ListObjects)
-                        {
-                            totalDuplicatesRemoved += TableRowManager.CleanTableDuplicateRows(table, warnings);
-                        }
-                    }));
+                        totalDuplicatesRemoved += TableRowManager.CleanTableDuplicateRows(table, warnings);
+                    }
                 }
                 finally
                 {
@@ -351,7 +342,7 @@ public abstract class ManagerRibbonBase : ExcelRibbon
         try
         {
             dynamic xlApp = ExcelDnaUtil.Application;
-            dynamic table = xlApp.ActiveCell?.ListObject;
+            dynamic? table = xlApp.ActiveCell?.ListObject;
             if (table != null)
             {
                 return (bool)table.ShowTotals;
@@ -368,37 +359,34 @@ public abstract class ManagerRibbonBase : ExcelRibbon
             try
             {
                 dynamic xlApp = ExcelDnaUtil.Application;
-                dynamic ws = xlApp.ActiveWorkbook?.ActiveSheet;
+                dynamic? ws = xlApp.ActiveWorkbook?.ActiveSheet;
                 if (ws == null) return;
 
-                dynamic table = xlApp.ActiveCell?.ListObject;
+                dynamic? table = xlApp.ActiveCell?.ListObject;
                 if (table == null && ws.ListObjects.Count > 0)
                 {
                     table = ws.ListObjects[1]; // Fallback to first table on sheet
                 }
                 if (table == null) return;
 
-                SheetProtections.ExecuteWithBypass((object)ws, new Action(() =>
+                table.ShowTotals = isPressed;
+
+                if (isPressed)
                 {
-                    table.ShowTotals = isPressed;
-
-                    if (isPressed)
+                    // Configure default calculation for summable columns
+                    int colCount = (int)table.ListColumns.Count;
+                    for (int c = 1; c <= colCount; c++)
                     {
-                        // Configure default calculation for summable columns
-                        int colCount = (int)table.ListColumns.Count;
-                        for (int c = 1; c <= colCount; c++)
-                        {
-                            dynamic col = table.ListColumns[c];
-                            string header = col.Name?.ToString() ?? string.Empty;
+                        dynamic col = table.ListColumns[c];
+                        string header = col.Name?.ToString() ?? string.Empty;
 
-                            if (ShouldSumColumnInTotalRow(header))
-                            {
-                                col.TotalsCalculation = 1; // xlTotalsCalculationSum
-                                try { col.Total.NumberFormat = "#,##0.00"; } catch { }
-                            }
+                        if (ShouldSumColumnInTotalRow(header))
+                        {
+                            col.TotalsCalculation = 1; // xlTotalsCalculationSum
+                            try { col.Total.NumberFormat = "#,##0.00"; } catch { }
                         }
                     }
-                }));
+                }
 
                 RibbonUi?.InvalidateControl(control.Id);
                 SheetOperations.ShowStatusConfirmation(isPressed ? "Total row enabled." : "Total row hidden.");
@@ -420,21 +408,5 @@ public abstract class ManagerRibbonBase : ExcelRibbon
     public void OnToggleOfflineClicked(IRibbonControl control, bool pressed)
         => ServerEnvironment.ToggleSimulatedOffline(RibbonUi, control.Id, pressed);
 
-    public bool GetMasterDebugPressed(IRibbonControl control)
-        => DebugDialog.DebugEnabled;
-
-    public void OnToggleMasterDebugClicked(IRibbonControl control, bool pressed)
-    {
-        DebugDialog.DebugEnabled = pressed;
-        RibbonUi?.InvalidateControl(control.Id);
-        MessageBox.Show(
-            pressed
-                ? "Debug diagnostics are now ENABLED across all operations."
-                : "Debug diagnostics are now MUTED.",
-            "Debug Log Switch",
-            MessageBoxButtons.OK,
-            pressed ? MessageBoxIcon.Information : MessageBoxIcon.Warning
-        );
-    }
 #endif
 }

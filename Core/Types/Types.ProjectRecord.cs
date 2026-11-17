@@ -2,6 +2,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Text.Json.Serialization;
 using SKSB_App.Core.Types.Attributes;
 
 // =========================================================================
@@ -97,7 +98,6 @@ public record ProjectRecord
 public record ProjectDetails
 {
     [ExcelColumn("Reference No")]
-    [ColumnRule(IsRequired = false)]
     public string ReferenceNo { get; set; } = string.Empty;
 
     /// <summary>Multi-select; stored in Excel and PostgreSQL as "Pipe_Repair, Road_Reinstatement".</summary>
@@ -121,7 +121,6 @@ public record ProjectDetails
     [ExcelColumn("Company ID", isRequired: true)]
     [ColumnRule("CompaniesTable[Company ID]", IsRequired = true)]
     [ColumnSync("Company Name", "CompaniesTable[Company ID]", "CompaniesTable[Short Company Name]")]
-    [ColumnFormat(ColumnFormatKind.Id, zero: ZeroBehavior.Blank)]
     public long CompanyID { get; set; }
 
     [ExcelColumn("Company Name")]
@@ -132,7 +131,6 @@ public record ProjectDetails
     [ExcelColumn("Staff ID")]
     [ColumnRule("StaffIDList", IsRequired = false, IsWarningOnly = true)]
     [ColumnSync("PIC", "StaffIDList", "StaffShortNameList")]
-    [ColumnFormat(ColumnFormatKind.Id, zero: ZeroBehavior.Blank)]
     public long? StaffID { get; set; }
 
     [ExcelColumn("PIC")]
@@ -145,93 +143,68 @@ public record ProjectDetails
     public ProjectDistrict District { get; set; } = ProjectDistrict.None;
 
     [ExcelColumn("Address")]
-    [ColumnRule(IsRequired = false)]
     public string Address { get; set; } = string.Empty;
 
     [ExcelColumn("Start Date", isRequired: true)]
-    [ColumnRule(IsRequired = true)]
     [ColumnDefault(DefaultKind.Today)]
-    [ColumnFormat(ColumnFormatKind.Date)]
     public DateOnly StartDate { get; set; } = DateOnly.FromDateTime(DateTime.Today);
 
     [ExcelColumn("Target End Date", isRequired: true)]
-    [ColumnRule(IsRequired = true)]
     [ColumnDefault(DefaultKind.DateOffsetDays, referenceHeader: "Start Date", offset: 365)]
     [ColumnDateGreaterThan("Start Date")]
-    [ColumnFormat(ColumnFormatKind.Date)]
     public DateOnly TargetEndDate { get; set; } = DateOnly.FromDateTime(DateTime.Today.AddDays(365));
 
     [ExcelColumn("Actual End Date")]
-    [ColumnRule(IsRequired = false)]
-    [ColumnFormat(ColumnFormatKind.Date)]
     public DateOnly? ActualEndDate { get; set; }
 
     [ExcelColumn("Estimated Cost")]
-    [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
-    [ColumnFormat(ColumnFormatKind.Currency)]
     public decimal EstimatedCost { get; set; }
 
     [ExcelColumn("Promised Return")]
-    [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
-    [ColumnFormat(ColumnFormatKind.Currency)]
     public decimal PromisedReturn { get; set; }
 
     [ExcelColumn("Actual Return")]
-    [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
-    [ColumnFormat(ColumnFormatKind.Currency)]
     public decimal ActualReturn { get; set; }
 
     [ExcelColumn("Remarks")]
-    [ColumnRule(IsRequired = false)]
     public string Remarks { get; set; } = string.Empty;
 
     // ---- Work / cost totals (plain columns; Actual Project Cost and Profit / Margin are calculated below) ----
     [ExcelColumn("Days Worked")]
-    [ColumnFormat(ColumnFormatKind.Days)]
     public int? DaysWorked { get; set; }
 
     /// <summary>Sum of Regular Shifts across every daily summary row.</summary>
     [ExcelColumn("Total Regular Shifts")]
-    [ColumnFormat(ColumnFormatKind.Shifts)]
     public decimal? TotalRegularShifts { get; set; }
 
     [ExcelColumn("Total Hours")]
-    [ColumnFormat(ColumnFormatKind.Hours)]
     public decimal? TotalHours { get; set; }
 
     [ExcelColumn("Overtime Shifts")]
-    [ColumnFormat(ColumnFormatKind.Shifts)]
     public int? OvertimeShifts { get; set; }
 
     [ExcelColumn("Total Overtime Hours")]
-    [ColumnFormat(ColumnFormatKind.Hours)]
     public decimal? TotalOvertimeHours { get; set; }
 
     [ExcelColumn("Total Odometer")]
-    [ColumnFormat(ColumnFormatKind.Kilometers)]
     public decimal? TotalOdometer { get; set; }
 
     [ExcelColumn("Fuel Cost")]
-    [ColumnFormat(ColumnFormatKind.Currency)]
     public decimal? FuelCost { get; set; }
 
     [ExcelColumn("Labour Cost")]
-    [ColumnFormat(ColumnFormatKind.Currency)]
     public decimal? LabourCost { get; set; }
 
     [ExcelColumn("Claim Cost")]
-    [ColumnFormat(ColumnFormatKind.Currency)]
     public decimal? ClaimCost { get; set; }
 
     // ---- Excel formula columns (Z:AA): never written by PopulateTableSafe; mirrored in C# for the database ----
     [ColumnCalculate("[Fuel Cost] + [Labour Cost] + [Claim Cost]")]
     [ExcelColumn("Actual Project Cost")]
-    [ColumnFormat(ColumnFormatKind.Currency)]
     public decimal? ActualProjectCost { get; set; }
 
     [ColumnCalculate("IF([Actual Return] > 0, [Actual Return], [Promised Return]) - [Actual Project Cost]")]
     [ExcelColumn("Profit / Margin")]
-    [ColumnFormat(ColumnFormatKind.Currency)]
     public decimal? ProfitMargin { get; set; }
 }
 
@@ -245,18 +218,100 @@ public record CompanyRecord
 {
     [DataList("CompanyIDList")]
     [ExcelColumn("Company ID", isRequired: true)]
-    [ColumnRule(IsRequired = true)]
     [ColumnDefault(DefaultKind.AutoIncrement)]
-    [ColumnFormat(ColumnFormatKind.Id, zero: ZeroBehavior.Blank)]
     public long CompanyID { get; set; }
 
     [DataList("LegalCompanyNameList")]
     [ExcelColumn("Legal Company Name", isRequired: true)]
-    [ColumnRule(IsRequired = true)]
     public string LegalCompanyName { get; set; } = string.Empty;
 
     [DataList("CompanyNameList")]
     [ExcelColumn("Short Company Name", isRequired: true)]
-    [ColumnRule(IsRequired = true)]
     public string ShortCompanyName { get; set; } = string.Empty;
+}
+
+// =========================================================================
+// 4. PROJECT SUMMARY ROW ("ProjectSummaryTable")
+// One row per working day of the project picked in the sheet's selector cells (Project Summary!A2 = project,
+// B2 = date filter; see ParameterCells). The table is a derived VIEW: nothing here is persisted to PostgreSQL.
+//
+// Source wiring is not implemented yet. Columns marked "(derived)" are meant to be filled from the daily
+// schedule / attendance tables and the vehicle module, and must never be typed by the user. Only
+// "Total Hours" is computed in-row today; the others stay plain properties until their sources exist,
+// and the sheet-level lock for them is the template's custom '=FALSE' validation.
+// =========================================================================
+
+[ExcelTable("ProjectSummaryTable")]
+public record ProjectSummaryRow
+{
+    [ExcelColumn("Date", isRequired: true)]
+    [ColumnDefault(DefaultKind.Today)]
+    public DateOnly Date { get; set; } = DateOnly.FromDateTime(DateTime.Today);
+
+    [ExcelColumn("Team Lead")]
+    [ColumnRule("StaffNameList", IsRequired = false, IsWarningOnly = true)]
+    public string TeamLead { get; set; } = string.Empty;
+
+    [ExcelColumn("Time Start")]
+    public TimeOnly TimeStart { get; set; } = TimeOnly.MinValue;
+
+    [ExcelColumn("Time End")]
+    public TimeOnly TimeEnd { get; set; } = TimeOnly.MinValue;
+
+    /// <summary>Strictly calculated: worked hours between Time Start and Time End, rounded down to 0.5.</summary>
+    [JsonIgnore]
+    [ColumnCalculate("FLOOR(HOURS([Time Start], [Time End]), 0.5)")]
+    [ExcelColumn("Total Hours")]
+    public decimal? TotalHours { get; set; }
+
+    /// <summary>(derived) Count of distinct workers present that day.</summary>
+    [ExcelColumn("Workers")]
+    public int Workers { get; set; }
+
+    [ExcelColumn("Regular Shifts")]
+    [ColumnRule(IsRequired = false, AllowNonNegativeZero = true, RoundDownStep = 0.5)]
+    public decimal RegularShifts { get; set; }
+
+    [ExcelColumn("Overtime Shifts")]
+    [ColumnRule(IsRequired = false, AllowNonNegativeZero = true, RoundDownStep = 0.5)]
+    public decimal OvertimeShifts { get; set; }
+
+    [ExcelColumn("Overtime Hours")]
+    [ColumnRule(IsRequired = false, AllowNonNegativeZero = true, RoundDownStep = 0.5)]
+    public decimal OvertimeHours { get; set; }
+
+    [ExcelColumn("Additional OT Hours")]
+    [ColumnRule(IsRequired = false, AllowNonNegativeZero = true, RoundDownStep = 0.5)]
+    public decimal AdditionalOTHours { get; set; }
+
+    [ExcelColumn("Is Holiday")]
+    public bool IsHoliday { get; set; }
+
+    /// <summary>(derived) Sum of the day's attendance salaries (DailyAttendanceTable "Total Earned").</summary>
+    [ExcelColumn("Labour Cost")]
+    public decimal? LabourCost { get; set; }
+
+    /// <summary>(derived, multi-select, not an input) Plates of every vehicle used that day, e.g. "VAB1234, WXY5678".</summary>
+    [ExcelColumn("Vehicles Used")]
+    [ColumnRule("VehiclePlateList", IsRequired = false, IsMultiSelect = true)]
+    public List<string> VehiclesUsed { get; set; } = new();
+
+    /// <summary>(derived, multi-select, not an input) Distinct types of the Vehicles Used, e.g. "Lorry, Van".</summary>
+    [JsonIgnore]
+    [ExcelColumn("Vehicle Types")]
+    [ColumnRule("VehicleTypeList", IsRequired = false, IsMultiSelect = true)]
+    public List<VehicleType> VehicleTypes { get; set; } = new();
+
+    /// <summary>(derived) Distance / engine hours of the vehicles used (per-row unit follows the vehicle type).</summary>
+    [ExcelColumn("Odometer Used")]
+    public decimal? OdometerUsed { get; set; }
+
+    [ExcelColumn("Fuel Cost")]
+    public decimal? FuelCost { get; set; }
+
+    [ExcelColumn("Claims Made")]
+    public decimal? ClaimsMade { get; set; }
+
+    [ExcelColumn("Pending Claims")]
+    public decimal? PendingClaims { get; set; }
 }

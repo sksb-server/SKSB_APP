@@ -1,6 +1,5 @@
 ﻿namespace SKSB_App.Core.Bootstrap.Environment;
 
-using System;
 
 public static class ExcelRegistry
 {
@@ -13,18 +12,7 @@ public static class ExcelRegistry
         _officeBitness = BinaryInspector.GetExcelBitness(_excelPath);
     }
 
-    public static string ExcelPath
-    {
-        get => _excelPath;
-        set
-        {
-            if (string.IsNullOrWhiteSpace(value))
-                throw new ArgumentException("Excel path cannot be null or empty.", nameof(value));
-
-            _excelPath = value;
-            _officeBitness = BinaryInspector.GetExcelBitness(value);
-        }
-    }
+    public static string ExcelPath => _excelPath;
 
     public static Bitness OfficeBitness => _officeBitness;
 }

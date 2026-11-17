@@ -4,7 +4,6 @@ using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.RuntimeUI.RuleEngine;
 using SKSB_App.Core.RuntimeUI.TableRowManager;
 using SKSB_App.Core.Types.Attributes;
-using SKSB_App.Core.WorkbookOpen.Sheet;
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -22,13 +21,13 @@ public static class TableMapper
 
     public static dynamic? ResolveTable(dynamic worksheet, params string[] candidateNames)
     {
-        if (worksheet == null || candidateNames == null || candidateNames.Length == 0) return null;
+        if (worksheet == null || candidateNames == null || candidateNames!.Length == 0) return null;
 
-        foreach (var name in candidateNames)
+        foreach (var name in candidateNames!)
         {
             try
             {
-                dynamic t = worksheet.ListObjects[name];
+                dynamic t = worksheet!.ListObjects[name];
                 if (t != null) return t;
             }
             catch { }
@@ -36,7 +35,7 @@ public static class TableMapper
 
         try
         {
-            foreach (dynamic t in worksheet.ListObjects)
+            foreach (dynamic t in worksheet!.ListObjects)
             {
                 string tName = NormalizeHeader(t.Name?.ToString() ?? string.Empty);
                 foreach (var name in candidateNames)
@@ -51,13 +50,7 @@ public static class TableMapper
         return null;
     }
 
-    public static List<T> ExtractFromTable<T>(dynamic worksheet, string tableName) where T : new() =>
-        ExtractFromTable<T>(worksheet, null, new[] { tableName });
-
-    public static List<T> ExtractFromTable<T>(dynamic worksheet, params string[] candidateTableNames) where T : new() =>
-        ExtractFromTable<T>(worksheet, null, candidateTableNames);
-
-    public static List<T> ExtractFromTable<T>(dynamic worksheet, List<string>? warnings, params string[] candidateTableNames) where T : new()
+    public static List<T> ExtractFromTable<T>(dynamic worksheet, params string[] candidateTableNames) where T : new()
     {
         var records = new List<T>();
         dynamic? table = ResolveTable(worksheet, candidateTableNames);
@@ -67,17 +60,12 @@ public static class TableMapper
 
         // VALIDATION DEDUPLICATION: Clean and delete duplicate rows before reading body
         var dedupeWarnings = new List<string>();
-        int dupes = 0;
-        SheetProtections.ExecuteWithBypass((object)worksheet, new Action(() =>
-        {
-            dupes = TableRowManager.CleanTableDuplicateRows(table, dedupeWarnings);
-        }));
+        int dupes = TableRowManager.CleanTableDuplicateRows(table, dedupeWarnings);
 
         if (dupes > 0)
         {
             foreach (var w in dedupeWarnings)
             {
-                warnings?.Add(w);
                 AppLogger.Warn(w);
             }
         }
@@ -102,22 +90,6 @@ public static class TableMapper
             {
                 headerMap[normalized] = c;
             }
-        }
-
-        if (typeof(T) == typeof(string))
-        {
-            int targetCol = headerMap.Values.FirstOrDefault(1);
-            for (int r = 1; r <= rowCount; r++)
-            {
-                object? rawVal = dataGrid[r, targetCol];
-                if (rawVal == null || SheetMapperHelper.IsComError(rawVal)) continue;
-                string s = rawVal.ToString()?.Trim() ?? string.Empty;
-                if (!string.IsNullOrWhiteSpace(s))
-                {
-                    records.Add((T)(object)s);
-                }
-            }
-            return records;
         }
 
         var propBindings = ResolvePropertyBindings<T>(headerMap);
@@ -189,10 +161,10 @@ public static class TableMapper
         if (table == null) return;
 
         string tName = table.Name?.ToString() ?? "Table";
-        int recordCount = records.Count;
+        int recordCount = records!.Count;
         using var _ = AppLogger.Scope($"PopulateTableSafe<{typeof(T).Name}>({tName}, count={recordCount})");
 
-        dynamic xlApp = worksheet.Application;
+        dynamic xlApp = worksheet!.Application;
         bool origEvents = true;
         bool origUpdating = true;
         try { origEvents = (bool)xlApp.EnableEvents; xlApp.EnableEvents = false; } catch { }
@@ -259,24 +231,6 @@ public static class TableMapper
             int headerRow = (int)table.HeaderRowRange.Row;
             int startCol = (int)table.HeaderRowRange.Column;
 
-            // Simple 1-column string table
-            if (typeof(T) == typeof(string))
-            {
-                dynamic colRange = worksheet.Range[
-                    worksheet.Cells[headerRow + 1, startCol],
-                    worksheet.Cells[headerRow + effectiveRows, startCol]
-                ];
-                object[,] colData = new object[effectiveRows, 1];
-                for (int r = 0; r < recordCount; r++)
-                {
-                    colData[r, 0] = records[r]?.ToString() ?? string.Empty;
-                }
-                try { colRange.NumberFormat = "@"; } catch { }
-                colRange.Value2 = colData;
-                return;
-            }
-
-            // Complex typed entity table
             var columnMap = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             for (int c = 1; c <= colCount; c++)
             {
@@ -328,7 +282,7 @@ public static class TableMapper
                 object[,] colData = new object[effectiveRows, 1];
                 for (int r = 0; r < recordCount; r++)
                 {
-                    object? target = binding.TargetInstance(records[r]);
+                    object? target = binding.TargetInstance(records[r]!);
                     object? val = target != null ? binding.Property.GetValue(target) : null;
 
                     if (isTimeColumn)
@@ -346,7 +300,7 @@ public static class TableMapper
                     }
                     else
                     {
-                        colData[r, 0] = FormatForExcel(val, rule);
+                        colData[r, 0] = FormatForExcel(val, rule)!;
                     }
                 }
 
@@ -405,11 +359,6 @@ public static class TableMapper
                     ApplyOdometerUnitFormats(worksheet, records, headerRow, binding.ColumnIndex);
                 }
             }
-
-            // 4. Pin table boundary
-            int finalEndRow = headerRow + effectiveRows;
-            int finalEndCol = startCol + colCount - 1;
-            dynamic lockRange = worksheet.Range[worksheet.Cells[headerRow, startCol], worksheet.Cells[finalEndRow, finalEndCol]];
 
             // 5. Physical size verification
             dynamic? finalBody = table.DataBodyRange;
@@ -664,7 +613,7 @@ public static class TableMapper
         return Convert.ChangeType(rawValue, underlyingType);
     }
 
-    internal static string NormalizeHeader(string header) =>
+    public static string NormalizeHeader(string header) =>
         RuleRegistry.NormalizeIdentifier(
             (header ?? string.Empty).Replace("reciept", "receipt", StringComparison.OrdinalIgnoreCase));
 

@@ -1,12 +1,10 @@
 ﻿namespace SKSB_App.Core.RuntimeUI.TemplateEditor;
 
 using System;
-using System.Reflection;
 using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using ExcelDna.Integration;
 using ExcelDna.Integration.CustomUI;
-using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.RuntimeUI.DropDown;
 using SKSB_App.Core.RuntimeUI.TemplateEditor.RulesAudit;
 using SKSB_App.Core.WorkbookOpen.Sheet;
@@ -19,19 +17,6 @@ public class RibbonController : ExcelRibbon
 
     public override string GetCustomUI(string ribbonId)
     {
-#if DEBUG
-        string debugGroupXml = @"
-                <group id='grpGlobalDebug' label='Diagnostics Control'>
-                  <toggleButton id='btnToggleMasterDebug'
-                                label='Debug Logs Active'
-                                size='large'
-                                imageMso='VisualBasic'
-                                getPressed='GetMasterDebugPressed'
-                                onAction='OnToggleMasterDebugClicked' />
-                </group>";
-#else
-        string debugGroupXml = string.Empty;
-#endif
 
         return $@"
         <customUI xmlns='http://schemas.microsoft.com/office/2009/07/customui' onLoad='OnRibbonLoad'>
@@ -91,7 +76,6 @@ public class RibbonController : ExcelRibbon
                             imageMso='AccessRefreshAllLists'
                             onAction='OnSyncDataClicked' />
                 </group>
-                {debugGroupXml}
               </tab>
             </tabs>
           </ribbon>
@@ -109,9 +93,6 @@ public class RibbonController : ExcelRibbon
         {
             _ribbonUi?.InvalidateControl("btnToggleTemplateMode");
             _ribbonUi?.InvalidateControl("btnPurgeTemplateData");
-#if DEBUG
-            _ribbonUi?.InvalidateControl("btnToggleMasterDebug");
-#endif
         }
         catch (Exception ex)
         {
@@ -121,24 +102,6 @@ public class RibbonController : ExcelRibbon
 
     public bool GetTemplateModePressed(IRibbonControl control) => SheetOperations.IsTemplateEditMode;
     public bool GetPurgeVisible(IRibbonControl control) => SheetOperations.IsTemplateEditMode;
-
-#if DEBUG
-    public bool GetMasterDebugPressed(IRibbonControl control) => DebugDialog.DebugEnabled;
-
-    public void OnToggleMasterDebugClicked(IRibbonControl control, bool isPressed)
-    {
-        DebugDialog.DebugEnabled = isPressed;
-        _ribbonUi?.InvalidateControl("btnToggleMasterDebug");
-        MessageBox.Show(
-            isPressed
-                ? "Debug diagnostics are now ENABLED across all operations."
-                : "Debug diagnostics are now MUTED. No popup inspection logs will appear.",
-            "Debug Log Switch",
-            MessageBoxButtons.OK,
-            isPressed ? MessageBoxIcon.Information : MessageBoxIcon.Warning
-        );
-    }
-#endif
 
     public void OnToggleTemplateModeClicked(IRibbonControl control, bool isPressed)
     {

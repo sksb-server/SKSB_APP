@@ -7,7 +7,6 @@ using SKSB_App.Core.RuntimeUI.TableRowManager;
 using SKSB_App.Core.Types;
 using SKSB_App.Core.WorkbookOpen.Sheet;
 using SKSB_App.Core.WorkbookSave.SheetMapper;
-using SKSB_App.Core.WorkbookSave.Storage;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
@@ -53,28 +52,20 @@ internal static partial class SheetMapper
             : new List<VehicleRecord>();
 
         // 1. Load Staff Directory first so the PDF parser can use known staff names to split Station vs Driver
-        var staffList = OfflineSnapshot.Load<List<StaffRecord>>() ?? new List<StaffRecord>();
-        var staffExactMap = new Dictionary<string, long>(StringComparer.OrdinalIgnoreCase);
+        var staffList = StaffLookupHelper.LoadCachedStaff();
+        var staffExactMap = StaffLookupHelper.BuildExactNameMap(staffList);
         var staffShortNameMap = new Dictionary<long, string>();
         var knownDriverNames = new List<string>();
 
         foreach (var s in staffList)
         {
             if (s.StaffID <= 0) continue;
-            string fn = NormalizeName(s.StaffDetails?.StaffName);
-            string sn = NormalizeName(s.StaffDetails?.StaffShortName);
+            string fn = StaffLookupHelper.NormalizeName(s.StaffDetails?.StaffName);
+            string sn = StaffLookupHelper.NormalizeName(s.StaffDetails?.StaffShortName);
             string resolvedShort = !string.IsNullOrEmpty(sn) ? sn : fn;
 
-            if (!string.IsNullOrEmpty(sn))
-            {
-                staffExactMap[sn] = s.StaffID;
-                knownDriverNames.Add(sn);
-            }
-            if (!string.IsNullOrEmpty(fn))
-            {
-                if (!staffExactMap.ContainsKey(fn)) staffExactMap[fn] = s.StaffID;
-                knownDriverNames.Add(fn);
-            }
+            if (!string.IsNullOrEmpty(sn)) knownDriverNames.Add(sn);
+            if (!string.IsNullOrEmpty(fn)) knownDriverNames.Add(fn);
 
             staffShortNameMap[s.StaffID] = resolvedShort;
         }
@@ -109,7 +100,7 @@ internal static partial class SheetMapper
 
         foreach (var ex in existingLogs)
         {
-            long id = GetProp<long>(ex, "FuelTransactionID", "TransactionID", "OdometerID");
+            long id = ex.OdometerID;
             if (id > maxTxId) maxTxId = id;
             if (ex.Date != default && ex.Amount > 0)
                 existingSignatures.Add(BuildFuelSignature(ex));
@@ -138,7 +129,7 @@ internal static partial class SheetMapper
             long staffId = raw.StaffID;
             string staffName = raw.StaffName;
             if (staffId <= 0 && !string.IsNullOrWhiteSpace(staffName))
-                staffId = ResolveStaffId(staffName, staffExactMap, staffList);
+                staffId = StaffLookupHelper.ResolveStaffId(staffName, staffExactMap, staffList);
 
             if (staffId <= 0 && matchedCard != null)
             {
@@ -150,7 +141,7 @@ internal static partial class SheetMapper
                 }
                 else if (!string.IsNullOrWhiteSpace(matchedCard.CardOwnerName))
                 {
-                    staffId = ResolveStaffId(matchedCard.CardOwnerName, staffExactMap, staffList);
+                    staffId = StaffLookupHelper.ResolveStaffId(matchedCard.CardOwnerName, staffExactMap, staffList);
                     if (string.IsNullOrWhiteSpace(staffName)) staffName = matchedCard.CardOwnerName.Trim();
                 }
             }
@@ -172,7 +163,7 @@ internal static partial class SheetMapper
                 Amount = raw.Amount,
                 ReceiptNumber = raw.ReceiptNumber ?? string.Empty
             };
-            if (!string.IsNullOrWhiteSpace(vType)) SetProp(log, "VehicleType", vType);
+            if (!string.IsNullOrWhiteSpace(vType) && Enum.TryParse<VehicleType>(vType, true, out var parsedVType)) log.VehicleType = parsedVType;
             if (staffId > 0) log.StaffID = staffId;
             if (!string.IsNullOrWhiteSpace(staffName)) log.StaffName = staffName;
 
@@ -185,9 +176,9 @@ internal static partial class SheetMapper
             keySelector: BuildFuelSignature,
             displaySelector: log =>
             {
-                DateOnly d = GetProp<DateOnly>(log, "Date");
-                string pl = GetProp<string>(log, "VehiclePlate") ?? string.Empty;
-                decimal amt = GetProp<decimal>(log, "Amount", "TransactionAmount");
+                DateOnly d = log.Date;
+                string pl = log.VehiclePlate ?? string.Empty;
+                decimal amt = log.Amount;
                 return $"{d:dd/MM/yyyy} - {pl} (RM {amt:N2})";
             },
             entityLabel: "Fuel Transaction",
@@ -210,7 +201,7 @@ internal static partial class SheetMapper
         {
             maxTxId++;
             log.OdometerID = maxTxId;
-            totalAmount += GetProp<decimal>(log, "Amount", "TransactionAmount");
+            totalAmount += log.Amount;
         }
 
         if (cleanTransactions.Count > 0)
@@ -250,7 +241,6 @@ internal static partial class SheetMapper
         public bool NeedsMatch;
         public bool CanReject;              // no match found => zero the reading
         public bool Matched;
-        public bool Ambiguous;
     }
 
     private sealed class OdoCandidate
@@ -714,7 +704,6 @@ internal static partial class SheetMapper
                 // Never guess: keep the plate and ask for a human decision.
                 AppendRemarkTag(w.Log,
                     $"[Ambiguous Odometer {RawText(w.Raw)}: matches {string.Join(", ", hits.Take(4).Select(h => h.C.Plate))} — verify vehicle]");
-                w.Ambiguous = true;
                 w.NeedsMatch = false;
                 continue;
             }
@@ -863,14 +852,11 @@ internal static partial class SheetMapper
         return result;
     }
 
-    private static string SquashHeader(object? h) =>
-        Regex.Replace((h?.ToString() ?? string.Empty).ToLowerInvariant(), "[^a-z0-9]", "");
-
     private static int FindColumn(dynamic table, string squashedName)
     {
         int cols = (int)table.ListColumns.Count;
         for (int c = 1; c <= cols; c++)
-            if (SquashHeader(table.ListColumns[c].Name) == squashedName) return c;
+            if (TableMapper.NormalizeHeader(table.ListColumns[c].Name?.ToString() ?? string.Empty) == squashedName) return c;
         return 0;
     }
 
@@ -880,7 +866,7 @@ internal static partial class SheetMapper
         dynamic? body = table?.DataBodyRange;
         if (table == null || body == null) return 0;
 
-        int rows = (int)body.Rows.Count, cols = (int)table.ListColumns.Count;
+        int rows = (int)body!.Rows.Count, cols = (int)table!.ListColumns.Count;
         int plateCol = FindColumn(table, "vehicleplate");
         int dateCol = FindColumn(table, "date");
         int odoCol = FindColumn(table, "currentodometer");
@@ -901,11 +887,8 @@ internal static partial class SheetMapper
     /// <summary>Writes the reconciled list into OdometersTable, then refreshes each vehicle's Current Odometer.</summary>
     private static void WriteBackOdometers(dynamic xlApp, dynamic wsOdo, dynamic? wsMaster, List<OdometerLog> logs, IList<VehicleRecord> masters)
     {
-        SheetProtections.ExecuteWithBypass((object)wsOdo, new Action(() =>
-        {
-            TableMapper.PopulateTableSafe<OdometerLog>((object)wsOdo, logs, "OdometersTable");
-            try { xlApp.Calculate(); } catch { }
-        }));
+        TableMapper.PopulateTableSafe<OdometerLog>((object)wsOdo, logs, "OdometersTable");
+        try { xlApp.Calculate(); } catch { }
 
         try
         {
@@ -936,8 +919,8 @@ internal static partial class SheetMapper
         int odoCol = FindColumn(table, "currentodometer");
         if (plateCol == 0 || odoCol == 0) return;
 
-        int rows = (int)body.Rows.Count;
-        dynamic plateRange = table.ListColumns[plateCol].DataBodyRange;
+        int rows = (int)body!.Rows.Count;
+        dynamic plateRange = table!.ListColumns[plateCol].DataBodyRange;
         dynamic odoRange = table.ListColumns[odoCol].DataBodyRange;
         if ((odoRange.Cells[1, 1].Formula?.ToString() ?? string.Empty).StartsWith("=")) return;
 
@@ -973,11 +956,8 @@ internal static partial class SheetMapper
         try { origEvents = (bool)xlApp.EnableEvents; xlApp.EnableEvents = false; } catch { }
         try
         {
-            SheetProtections.ExecuteWithBypass((object)wsMaster, new Action(() =>
-            {
-                if (changed) odoRange.Value2 = output;
-                ApplyUnitFormatRuns(wsMaster, odoRange, isHours);
-            }));
+            if (changed) odoRange.Value2 = output;
+            ApplyUnitFormatRuns(wsMaster, odoRange, isHours);
         }
         finally
         {
@@ -1012,12 +992,6 @@ internal static partial class SheetMapper
         if (string.IsNullOrWhiteSpace(raw)) return string.Empty;
         // Strip quotes, spaces, and hyphens, keeping digits and '*'
         return Regex.Replace(raw.Trim(), @"['\s\-]+", "");
-    }
-
-    private static string NormalizeName(string? name)
-    {
-        if (string.IsNullOrWhiteSpace(name)) return string.Empty;
-        return Regex.Replace(name.Trim(), @"\s+", " ");
     }
 
     /// <summary>
@@ -1067,79 +1041,6 @@ internal static partial class SheetMapper
         return clean;
     }
 
-    /// <summary>
-    /// Resolves a driver name from the statement to a StaffID using multi-tier matching:
-    /// 1. Exact match on StaffShortName or StaffName
-    /// 2. Whole-word / token match (e.g. "SYUKUR" matches "MOHD SYUKUR")
-    /// 3. Substring fallback
-    /// </summary>
-    private static long ResolveStaffId(
-        string driverName,
-        Dictionary<string, long> staffExactMap,
-        List<StaffRecord> staffList)
-    {
-        string clean = NormalizeName(driverName);
-        if (string.IsNullOrWhiteSpace(clean)) return 0;
-
-        // Tier 1: Exact match against ShortName or FullName
-        if (staffExactMap.TryGetValue(clean, out long exactId))
-            return exactId;
-
-        var driverTokens = clean.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-
-        // Tier 2: Whole-word token match (prioritize StaffShortName first, then StaffName)
-        long bestStaffId = 0;
-        int bestMatchedWords = 0;
-
-        foreach (var s in staffList)
-        {
-            if (s.StaffID <= 0) continue;
-
-            string sn = NormalizeName(s.StaffDetails?.StaffShortName);
-            string fn = NormalizeName(s.StaffDetails?.StaffName);
-
-            foreach (var candidate in new[] { sn, fn })
-            {
-                if (string.IsNullOrEmpty(candidate)) continue;
-                var candidateTokens = candidate.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-
-                // Check if all tokens in driverName exist as whole words in candidate (or vice versa)
-                bool driverInCandidate = driverTokens.All(dt =>
-                    candidateTokens.Any(ct => ct.Equals(dt, StringComparison.OrdinalIgnoreCase)));
-                bool candidateInDriver = candidateTokens.All(ct =>
-                    driverTokens.Any(dt => dt.Equals(ct, StringComparison.OrdinalIgnoreCase)));
-
-                if (driverInCandidate || candidateInDriver)
-                {
-                    int overlap = driverTokens.Count(dt =>
-                        candidateTokens.Any(ct => ct.Equals(dt, StringComparison.OrdinalIgnoreCase)));
-                    if (overlap > bestMatchedWords)
-                    {
-                        bestMatchedWords = overlap;
-                        bestStaffId = s.StaffID;
-                    }
-                }
-            }
-        }
-
-        if (bestStaffId > 0) return bestStaffId;
-
-        // Tier 3: Substring containment fallback (only for names >= 3 chars to avoid false positives)
-        if (clean.Length >= 3)
-        {
-            foreach (var (name, id) in staffExactMap)
-            {
-                if (name.Length >= 3 &&
-                    (name.Contains(clean, StringComparison.OrdinalIgnoreCase) ||
-                     clean.Contains(name, StringComparison.OrdinalIgnoreCase)))
-                {
-                    return id;
-                }
-            }
-        }
-
-        return 0;
-    }
 }
 
 // =============================================================================
@@ -1165,8 +1066,6 @@ internal sealed class RawFuelItem
 
 internal static class FuelStatementParser
 {
-    private static readonly Regex PlateRegex = new(@"\b([A-Z]{1,3})\s*(\d{1,4})\s*([A-Z]?)\b", RegexOptions.Compiled);
-
     public static List<RawFuelItem> Parse(string filePath, List<string> knownDriverNames, out string providerName)
     {
         providerName = "Unknown Portal";
@@ -1313,7 +1212,7 @@ internal static class FuelStatementParser
                     }
                     else
                     {
-                        double fallbackWidth = Math.Min(prev.GlyphRectangle.Width, prev.GlyphRectangle.Height);
+                        double fallbackWidth = Math.Min(prev.BoundingBox.Width, prev.BoundingBox.Height);
                         if (fallbackWidth < 1.0) fallbackWidth = 4.2;
                         gap = (currStart - prevStart) - fallbackWidth;
                     }
@@ -1439,7 +1338,7 @@ internal static class FuelStatementParser
 
                 string finalPlate = carryPlate;
                 if ((finalPlate.Equals("SPARE", StringComparison.OrdinalIgnoreCase) || string.IsNullOrEmpty(finalPlate)) &&
-                    PlateRegex.IsMatch(driver))
+                    VehiclePlateHelper.PlateRegex.IsMatch(driver))
                 {
                     finalPlate = driver;
                 }
@@ -1481,7 +1380,7 @@ internal static class FuelStatementParser
         clean = Regex.Replace(clean, @"^(PSS)(?=[A-Z0-9])", "$1 ");
 
         // 1. Check if the driver column holds a vehicle plate (e.g. SPARE cards)
-        var plateMatch = PlateRegex.Match(clean);
+        var plateMatch = VehiclePlateHelper.PlateRegex.Match(clean);
         if (plateMatch.Success && clean.EndsWith(plateMatch.Value, StringComparison.OrdinalIgnoreCase))
         {
             driver = plateMatch.Value.Trim();

@@ -2,7 +2,6 @@
 
 using System;
 using System.Collections.Generic;
-using System.Linq;
 using SKSB_App.Core.Types.Attributes;
 
 // =========================================================================
@@ -76,9 +75,7 @@ public record StaffRecord
 {
     [DataList("StaffIDList")]
     [ExcelColumn("Staff ID", isRequired: true)]
-    [ColumnRule(IsRequired = true)]
     [ColumnDefault(DefaultKind.AutoIncrement)]
-    [ColumnFormat(ColumnFormatKind.Id, zero: ZeroBehavior.Blank)]
     public long StaffID { get; set; } = 0;
 
     [DataDetail]
@@ -88,25 +85,10 @@ public record StaffRecord
     public List<VehicleLicense> VehicleLicenses { get; set; } = new();
     public List<SkillLicense> SkillLicenses { get; set; } = new();
 
-    public ContractStatus OverallStatus => StaffDetails.ContractStatus;
-
-    public ContractStatus EvaluateContractStatus(DateOnly asOfDate)
-    {
-        if (StaffDetails.ResignDate.HasValue && StaffDetails.ResignDate.Value <= asOfDate)
-            return ContractStatus.Resigned;
-
-        return StaffDetails.ContractStatus == ContractStatus.None
-            ? ContractStatus.Active
-            : StaffDetails.ContractStatus;
-    }
 }
 
 public record StaffDetails
 {
-    // Restored on StaffDetails for backward compatibility with Importer and Sync commands
-    [ColumnFormat(ColumnFormatKind.Id, zero: ZeroBehavior.Blank)]
-    public long StaffID { get; set; } = 0;
-
     [DataList("StaffNameList")]
     [ExcelColumn("Staff Name", isRequired: true)]
     [ColumnRule(IsRequired = true, Transform = TransformKind.Trim)]
@@ -139,26 +121,19 @@ public record StaffDetails
 
     // Restored as long for backward compatibility with legacy importer/database mapping
     [ExcelColumn("IC Number")]
-    [ColumnRule(IsRequired = false)]
     public long NRIC { get; set; } = 0;
 
     [ExcelColumn("Passport Number")]
-    [ColumnRule(IsRequired = false)]
     public string Passport { get; set; } = string.Empty;
 
     [ExcelColumn("Phone Number")]
-    [ColumnRule(IsRequired = false)]
     public string Phone { get; set; } = string.Empty;
 
     [ExcelColumn("Join Date", isRequired: true)]
-    [ColumnRule(IsRequired = true)]
     [ColumnDefault(DefaultKind.Today)]
-    [ColumnFormat(ColumnFormatKind.Date)]
     public DateOnly JoinDate { get; set; } = DateOnly.FromDateTime(DateTime.Today);
 
     [ExcelColumn("Resign Date")]
-    [ColumnRule(IsRequired = false)]
-    [ColumnFormat(ColumnFormatKind.Date)]
     public DateOnly? ResignDate { get; set; } = null;
 
     [ExcelColumn("Contract Status", isRequired: true)]
@@ -185,38 +160,20 @@ public record StaffDetails
 
         return ContractStatus.Active;
     }
-
-    public bool IsActiveOn(DateOnly targetDate) => GetContractStatusOn(targetDate) == ContractStatus.Active;
 }
 
-// =========================================================================
-// 3. VEHICLE LICENSES TABLE ("VehicleLicensesTable")
-// =========================================================================
-
-[ExcelTable("VehicleLicensesTable")]
-public record VehicleLicense
+/// <summary>Shared staff-license columns: owning Staff ID / Name (two-way lookup), renew / expiry dates and cost.</summary>
+public abstract record StaffLicenseBase
 {
-    [ExcelColumn("Vehicle License ID", isRequired: true)]
-    [ColumnRule(IsRequired = true)]
-    [ColumnDefault(DefaultKind.AutoIncrement)]
-    [ColumnFormat(ColumnFormatKind.Id, zero: ZeroBehavior.Blank)]
-    public long VehicleLicenseID { get; set; } = 0;
-
     [ExcelColumn("Staff ID", isRequired: true)]
     [ColumnRule("AllStaffsTable[Staff ID]", IsRequired = true)]
     [ColumnSync("Staff Name", "AllStaffsTable[Staff ID]", "AllStaffsTable[Staff Name]")]
-    [ColumnFormat(ColumnFormatKind.Id, zero: ZeroBehavior.Blank)]
     public long StaffID { get; set; } = 0;
 
     [ExcelColumn("Staff Name")]
     [ColumnRule("AllStaffsTable[Staff Name]", IsRequired = false, IsWarningOnly = true)]
     [ColumnSync("Staff ID", "AllStaffsTable[Staff Name]", "AllStaffsTable[Staff ID]")]
     public string StaffName { get; set; } = string.Empty;
-
-    [ExcelColumn("Vehicle License Class", isRequired: true)]
-    [ColumnRule("VehicleLicenseClassList", IsRequired = true)]
-    [ColumnDefault(DefaultKind.Literal, literalValue: "D")]
-    public VehicleLicenseClass VehicleLicenseClass { get; set; } = VehicleLicenseClass.D;
 
     [ExcelColumn("Renew Date", isRequired: true)]
     [ColumnRule(IsRequired = true)]
@@ -237,6 +194,26 @@ public record VehicleLicense
         set => _expiryDate = value;
     }
     private DateOnly? _expiryDate;
+
+    [ExcelColumn("Cost")]
+    public decimal Cost { get; set; } = 0.00m;
+}
+
+// =========================================================================
+// 3. VEHICLE LICENSES TABLE ("VehicleLicensesTable")
+// =========================================================================
+
+[ExcelTable("VehicleLicensesTable")]
+public record VehicleLicense : StaffLicenseBase
+{
+    [ExcelColumn("Vehicle License ID", isRequired: true)]
+    [ColumnDefault(DefaultKind.AutoIncrement)]
+    public long VehicleLicenseID { get; set; } = 0;
+
+    [ExcelColumn("Vehicle License Class", isRequired: true)]
+    [ColumnRule("VehicleLicenseClassList", IsRequired = true)]
+    [ColumnDefault(DefaultKind.Literal, literalValue: "D")]
+    public VehicleLicenseClass VehicleLicenseClass { get; set; } = VehicleLicenseClass.D;
 
     [ExcelColumn("Status", isRequired: true)]
     [ColumnRule("VehicleLicenseStatusList", IsRequired = true)]
@@ -256,11 +233,6 @@ public record VehicleLicense
         set => _status = value;
     }
     private VehicleLicenseStatus _status = VehicleLicenseStatus.Valid;
-
-    [ExcelColumn("Cost")]
-    [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
-    [ColumnFormat(ColumnFormatKind.Currency)]
-    public decimal Cost { get; set; } = 0.00m;
 }
 
 // =========================================================================
@@ -268,48 +240,15 @@ public record VehicleLicense
 // =========================================================================
 
 [ExcelTable("SkillLicensesTable")]
-public record SkillLicense
+public record SkillLicense : StaffLicenseBase
 {
     [ExcelColumn("Skill License ID", isRequired: true)]
-    [ColumnRule(IsRequired = true)]
     [ColumnDefault(DefaultKind.AutoIncrement)]
-    [ColumnFormat(ColumnFormatKind.Id, zero: ZeroBehavior.Blank)]
     public long SkillLicenseID { get; set; } = 0;
-
-    [ExcelColumn("Staff ID", isRequired: true)]
-    [ColumnRule("AllStaffsTable[Staff ID]", IsRequired = true)]
-    [ColumnSync("Staff Name", "AllStaffsTable[Staff ID]", "AllStaffsTable[Staff Name]")]
-    [ColumnFormat(ColumnFormatKind.Id, zero: ZeroBehavior.Blank)]
-    public long StaffID { get; set; } = 0;
-
-    [ExcelColumn("Staff Name")]
-    [ColumnRule("AllStaffsTable[Staff Name]", IsRequired = false, IsWarningOnly = true)]
-    [ColumnSync("Staff ID", "AllStaffsTable[Staff Name]", "AllStaffsTable[Staff ID]")]
-    public string StaffName { get; set; } = string.Empty;
 
     [ExcelColumn("Skill License Type", isRequired: true)]
     [ColumnRule("SkillLicenseTypesTable[Skill License Type]", IsRequired = true)]
     public string SkillLicenseType { get; set; } = string.Empty;
-
-    [ExcelColumn("Renew Date", isRequired: true)]
-    [ColumnRule(IsRequired = true)]
-    [ColumnDefault(DefaultKind.Today)]
-    public DateOnly RenewDate
-    {
-        get => _renewDate;
-        set => _renewDate = value;
-    }
-    private DateOnly _renewDate = DateOnly.FromDateTime(DateTime.Today);
-
-    [ExcelColumn("Expiry Date", isRequired: true)]
-    [ColumnRule(IsRequired = true)]
-    [ColumnDefault(DefaultKind.DateOffsetDays, referenceHeader: "Renew Date", offset: 365)]
-    public DateOnly ExpiryDate
-    {
-        get => _expiryDate ?? _renewDate.AddYears(1);
-        set => _expiryDate = value;
-    }
-    private DateOnly? _expiryDate;
 
     [ExcelColumn("Status", isRequired: true)]
     [ColumnRule("SkillLicenseStatusList", IsRequired = true)]
@@ -329,11 +268,6 @@ public record SkillLicense
         set => _status = value;
     }
     private SkillLicenseStatus _status = SkillLicenseStatus.Valid;
-
-    [ExcelColumn("Cost")]
-    [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
-    [ColumnFormat(ColumnFormatKind.Currency)]
-    public decimal Cost { get; set; } = 0.00m;
 }
 
 [ExcelTable("SkillLicenseTypesTable")]
@@ -343,7 +277,6 @@ public record SkillLicenseType
 
     [DataList("SkillLicenseTypeList")]
     [ExcelColumn("Skill License Type", isRequired: true)]
-    [ColumnRule(IsRequired = true)]
     public string SkillLicenseName { get; set; } = string.Empty;
 
     public string Description { get; set; } = string.Empty;

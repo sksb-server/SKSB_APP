@@ -2,23 +2,20 @@
 
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Drawing;
 using System.Globalization;
 using System.Linq;
 using System.Runtime.InteropServices;
-using System.Text;
 using System.Windows.Forms;
 using ExcelDna.Integration;
 using SKSB_App.Core.Bootstrap.Environment;
-using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.RuntimeUI.RuleEngine;
 
 public static class Arrow
 {
-    private static ArrowHostForm? _arrowHost;
+    private static NoActivateOverlayForm? _arrowHost;
     private static Button? _arrowButton;
-    private static PopupHostForm? _popupHost;
+    private static NoActivateOverlayForm? _popupHost;
     private static ListBox? _listBox;
     private static dynamic? _activeCell;
     private static Action<string>? _onItemSelected;
@@ -27,14 +24,6 @@ public static class Arrow
     // Multi-select session state: the popup stays open while items are toggled, and checked items are drawn with a tick.
     private static bool _isMultiSelectSession = false;
     private static HashSet<string> _checkedTokens = new(StringComparer.OrdinalIgnoreCase);
-
-    private class DropdownItem
-    {
-        public string Display { get; set; } = string.Empty;
-        public string Raw { get; set; } = string.Empty;
-        public int Section { get; set; } = 0;
-        public bool IsValid { get; set; } = true;
-    }
 
     [DllImport("user32.dll")]
     private static extern bool SetWindowPos(IntPtr hWnd, IntPtr hWndInsertAfter, int X, int Y, int cx, int cy, uint uFlags);
@@ -84,31 +73,10 @@ public static class Arrow
     private const uint SWP_NOACTIVATE = 0x0010;
     private const uint SWP_SHOWWINDOW = 0x0040;
 
-    private class ArrowHostForm : Form
+    /// <summary>Borderless, non-activating, tool-window overlay shared by the arrow button and the popup list.</summary>
+    private sealed class NoActivateOverlayForm : Form
     {
-        public ArrowHostForm()
-        {
-            FormBorderStyle = FormBorderStyle.None;
-            ShowInTaskbar = false;
-            StartPosition = FormStartPosition.Manual;
-            AutoScaleMode = AutoScaleMode.None;
-        }
-        protected override CreateParams CreateParams
-        {
-            get
-            {
-                var cp = base.CreateParams;
-                cp.ExStyle |= 0x00000080;
-                cp.ExStyle |= 0x08000000;
-                return cp;
-            }
-        }
-        protected override bool ShowWithoutActivation => true;
-    }
-
-    private class PopupHostForm : Form
-    {
-        public PopupHostForm()
+        public NoActivateOverlayForm()
         {
             FormBorderStyle = FormBorderStyle.None;
             ShowInTaskbar = false;
@@ -136,7 +104,7 @@ public static class Arrow
 
     private static void InitializeArrowHost()
     {
-        _arrowHost = new ArrowHostForm { BackColor = Color.FromArgb(218, 220, 224) };
+        _arrowHost = new NoActivateOverlayForm { BackColor = Color.FromArgb(218, 220, 224) };
         _arrowButton = new Button
         {
             Dock = DockStyle.Fill,
@@ -168,7 +136,7 @@ public static class Arrow
 
     private static void InitializePopupHost()
     {
-        _popupHost = new PopupHostForm
+        _popupHost = new NoActivateOverlayForm
         {
             BackColor = Color.FromArgb(160, 165, 175),
             Padding = new Padding(1)
@@ -227,7 +195,7 @@ public static class Arrow
             xlApp.WindowDeactivate += new Action<dynamic, dynamic>((wb, wn) => HideAll());
             xlApp.SheetDeactivate += new Action<dynamic>(ws => HideAll());
             _isEventsHooked = true;
-            if (_activeCell != null && _arrowHost != null && _arrowHost.Visible)
+            if (_activeCell != null && _arrowHost != null && _arrowHost!.Visible)
             {
                 ShowArrowForCell(_activeCell);
             }
@@ -239,7 +207,7 @@ public static class Arrow
     {
         if (e.Index < 0 || e.Index >= _listBox!.Items.Count) return;
         object rawObj = _listBox.Items[e.Index];
-        if (rawObj is not DropdownItem item)
+        if (rawObj is not DropdownOption item)
         {
             e.DrawBackground();
             using var defBrush = new SolidBrush(Color.Gray);
@@ -358,7 +326,6 @@ public static class Arrow
 
     private static void PopulateAndOpenMenu(dynamic singleCell)
     {
-        var swTotal = Stopwatch.StartNew();
         try
         {
             dynamic xlApp = ExcelDnaUtil.Application;
@@ -380,10 +347,9 @@ public static class Arrow
             try { table = singleCell.ListObject; } catch { }
 
             PropertyRuleDescriptor? rule = RuleRegistry.GetRuleForCell(singleCell);
-            var processedItems = new List<DropdownItem>();
-            var parameterItems = ParameterCells.GetItems(singleCell, wb);
+            var processedItems = new List<DropdownOption>();
 
-            _isMultiSelectSession = parameterItems == null && rule != null && rule.HasDropdown && rule.IsMultiSelect;
+            _isMultiSelectSession = rule != null && rule.HasDropdown && rule.IsMultiSelect;
             _checkedTokens = _isMultiSelectSession
                 ? new HashSet<string>(RuleEvaluator.SplitMultiSelectTokens(inCellText), StringComparer.OrdinalIgnoreCase)
                 : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -391,47 +357,10 @@ public static class Arrow
             // =========================================================================
             // PATH A: Unified C# Attribute Rule Engine (Zero COM formula evaluations)
             // =========================================================================
-            if (parameterItems != null)
-            {
-                // PATH C: code-registered selector cell outside any table (e.g. Project Summary!A2)
-                foreach (var itm in parameterItems)
-                {
-                    processedItems.Add(new DropdownItem { Display = itm, Raw = itm, Section = 0, IsValid = true });
-                }
-
-                _onItemSelected = chosenDisplay =>
-                {
-                    var targetItem = processedItems.FirstOrDefault(i => i.Display.Equals(chosenDisplay, StringComparison.OrdinalIgnoreCase));
-                    if (targetItem == null) return;
-
-                    bool origEvents = true;
-                    try { origEvents = (bool)xlApp.EnableEvents; xlApp.EnableEvents = false; } catch { }
-                    try
-                    {
-                        singleCell.Value2 = targetItem.Display;
-                    }
-                    finally
-                    {
-                        try { xlApp.EnableEvents = origEvents; } catch { }
-                    }
-
-                    // Events were suppressed for the write, so notify module observers explicitly.
-                    ParameterCells.NotifyChanged(sheet, singleCell);
-                };
-            }
-            else if (rule != null && rule.HasDropdown)
+            if (rule != null && rule.HasDropdown)
             {
                 var evaluatedOptions = RuleEvaluator.GetEvaluatedDropdownOptions(wb, table, row, rule);
-                foreach (var opt in evaluatedOptions)
-                {
-                    processedItems.Add(new DropdownItem
-                    {
-                        Display = opt.Display,
-                        Raw = opt.Raw,
-                        Section = opt.Section,
-                        IsValid = opt.IsValid
-                    });
-                }
+                processedItems.AddRange(evaluatedOptions);
 
                 _onItemSelected = chosenDisplay =>
                 {
@@ -482,7 +411,7 @@ public static class Arrow
                     foreach (var itm in items)
                     {
                         string disp = FormatIfDate(itm);
-                        processedItems.Add(new DropdownItem { Display = disp, Raw = itm, Section = 0, IsValid = true });
+                        processedItems.Add(new DropdownOption { Display = disp, Raw = itm, Section = 0, IsValid = true });
                     }
                 }
 
@@ -524,7 +453,7 @@ public static class Arrow
                 if (!string.IsNullOrWhiteSpace(inCellText) && (rule == null || !rule.IsMultiSelect))
                 {
                     string q = inCellText.Trim();
-                    Func<DropdownItem, int> ranker = i =>
+                    Func<DropdownOption, int> ranker = i =>
                     {
                         if (i.Display.Equals(q, StringComparison.OrdinalIgnoreCase)) return 0;
                         if (i.Display.StartsWith(q, StringComparison.OrdinalIgnoreCase)) return 1;
@@ -538,12 +467,12 @@ public static class Arrow
                 foreach (var item in sortedValid) _listBox.Items.Add(item);
                 foreach (var item in sortedInvalid) _listBox.Items.Add(item);
 
-                int firstValid = _listBox.Items.Cast<object>().ToList().FindIndex(o => o is DropdownItem d && d.IsValid);
+                int firstValid = _listBox.Items.Cast<object>().ToList().FindIndex(o => o is DropdownOption d && d.IsValid);
                 if (firstValid >= 0) _listBox.SelectedIndex = firstValid;
             }
             else
             {
-                _listBox.Items.Add(new DropdownItem { Display = "(No options available)", IsValid = false });
+                _listBox.Items.Add(new DropdownOption { Display = "(No options available)", IsValid = false });
             }
 
             dynamic window = xlApp.ActiveWindow;
@@ -558,8 +487,6 @@ public static class Arrow
 
             if (!_popupHost!.Visible) _popupHost.Show();
             SetWindowPos(_popupHost.Handle, HWND_TOP, cellLeftPx, cellBottomPx, popupWidthPx, calculatedHeightPx, SWP_SHOWWINDOW | SWP_NOACTIVATE);
-
-            swTotal.Stop();
         }
         catch (Exception ex)
         {
@@ -569,7 +496,7 @@ public static class Arrow
 
     private static void WriteSelectedValueToCell(
         dynamic singleCell,
-        DropdownItem targetItem,
+        DropdownOption targetItem,
         PropertyRuleDescriptor rule,
         string existingCellText)
     {
@@ -659,7 +586,7 @@ public static class Arrow
 
     private static void CommitSelection()
     {
-        if (_listBox!.SelectedItem is DropdownItem item && _onItemSelected != null)
+        if (_listBox!.SelectedItem is DropdownOption item && _onItemSelected != null)
         {
             _onItemSelected(item.Display);
         }

@@ -2,25 +2,20 @@
 
 using ExcelDna.Integration;
 using SKSB_App.Core.Diagnostics;
+using SKSB_App.Core.RuntimeUI.RuleEngine;
 using SKSB_App.Core.WorkbookOpen.Sheet;
 using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
-using System.Reflection;
 using System.Runtime.CompilerServices;
 
 public static class SheetMapperHelper
 {
-    private static readonly string[] UniversalDateFormats =
-    {
-        "dd/MM/yyyy", "d/M/yyyy", "dd-MM-yyyy", "d-M-yyyy", "yyyy-MM-dd"
-    };
-
     /// <summary>
     /// Resizes a ListObject table cleanly, logging its physical range and row count before and after.
     /// </summary>
-    public static void ResizeTable(dynamic table, int dataRowCount, int? explicitColSpan = null)
+    public static void ResizeTable(dynamic table, int dataRowCount)
     {
         if (table == null) return;
         try
@@ -30,7 +25,7 @@ public static class SheetMapperHelper
 
             int headerRow = (int)table.HeaderRowRange.Row;
             int startCol = (int)table.HeaderRowRange.Column;
-            int finalColSpan = explicitColSpan ?? (int)table.ListColumns.Count;
+            int finalColSpan = (int)table.ListColumns.Count;
             if (finalColSpan < 1) finalColSpan = 1;
 
             int endCol = startCol + finalColSpan - 1;
@@ -85,31 +80,6 @@ public static class SheetMapperHelper
         catch (Exception ex)
         {
             System.Diagnostics.Debug.WriteLine($"ResizeTable outer exception: {ex.Message}");
-        }
-    }
-
-    public static void ResizeTable(
-        string sheetName,
-        int dataRowCount,
-        int columnSpan,
-        [CallerMemberName] string callerMember = "",
-        [CallerFilePath] string callerFile = "",
-        [CallerLineNumber] int callerLine = 0)
-    {
-        string sourceFile = System.IO.Path.GetFileName(callerFile);
-        AppLogger.Warn($"[LEGACY OVERLOAD] ResizeTable('{sheetName}', targetRows={dataRowCount}, span={columnSpan}) called by [{sourceFile}:{callerLine} {callerMember}]");
-
-        try
-        {
-            dynamic xlApp = ExcelDnaUtil.Application;
-            dynamic ws = xlApp.ActiveWorkbook.Sheets[sheetName];
-            if (ws == null || ws.ListObjects.Count == 0) return;
-            dynamic table = ws.ListObjects[1];
-            ResizeTable(table, dataRowCount, columnSpan, callerMember, callerFile, callerLine);
-        }
-        catch (Exception ex)
-        {
-            AppLogger.Error($"Legacy ResizeTable('{sheetName}') error", ex);
         }
     }
 
@@ -189,23 +159,14 @@ public static class SheetMapperHelper
 
         try
         {
-            var distinctList = items
+            var distinctList = items!
                 .Where(x => !string.IsNullOrWhiteSpace(x))
                 .Select(x => x.Trim())
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .OrderBy(x => x)
                 .ToList();
 
-            dynamic? targetTable = null;
-            foreach (dynamic ws in workbook.Sheets)
-            {
-                try
-                {
-                    targetTable = ws.ListObjects[tableName];
-                    if (targetTable != null) break;
-                }
-                catch { }
-            }
+            dynamic? targetTable = RuleDataCache.FindTableInWorkbook(workbook, tableName);
 
             if (targetTable == null)
             {
@@ -265,56 +226,6 @@ public static class SheetMapperHelper
         }
     }
 
-    public static List<string> ExtractDistinctColumnValues(dynamic workbook, string tableName, int scanRowLimit = 100)
-    {
-        var distinctValues = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        dynamic? targetTable = null;
-
-        foreach (dynamic ws in workbook.Sheets)
-        {
-            try
-            {
-                targetTable = ws.ListObjects[tableName];
-                if (targetTable != null) break;
-            }
-            catch { }
-        }
-
-        if (targetTable == null) return distinctValues.ToList();
-
-        dynamic sheet = targetTable.Parent;
-        dynamic headerRange = targetTable.HeaderRowRange;
-        int headerRow = (int)headerRange.Row;
-        int col = (int)headerRange.Column;
-
-        try
-        {
-            dynamic scanRange = sheet.Range[sheet.Cells[headerRow + 1, col], sheet.Cells[headerRow + scanRowLimit, col]];
-            object[,] colGrid = scanRange.Value2;
-
-            if (colGrid != null)
-            {
-                int rCount = colGrid.GetLength(0);
-                for (int r = 1; r <= rCount; r++)
-                {
-                    string val = CleanString(colGrid[r, 1]);
-                    if (!string.IsNullOrWhiteSpace(val) &&
-                        !val.StartsWith("#") &&
-                        !val.Equals("System.__ComObject", StringComparison.OrdinalIgnoreCase))
-                    {
-                        distinctValues.Add(val);
-                    }
-                }
-            }
-        }
-        catch (Exception ex)
-        {
-            System.Diagnostics.Debug.WriteLine($"[SheetMapperHelper.ExtractDistinctColumnValues Error] {ex.Message}");
-        }
-
-        return distinctValues.OrderBy(x => x).ToList();
-    }
-
     // =========================================================================
     // SHARED MANAGER MAPPING UTILITIES
     // =========================================================================
@@ -349,15 +260,15 @@ public static class SheetMapperHelper
     }
 
     /// <summary>
-    /// DEBUG-only audit dialog listing the location and dimensions of each inspected table after a populate pass.
-    /// Compiles to a no-op in Release builds and stays silent unless <see cref="DebugDialog.DebugEnabled"/> is on.
+    /// DEBUG-only audit listing the location and dimensions of each inspected table after a populate pass.
+    /// Written to the runtime log via <see cref="AppLogger"/> (no popup); compiles to a no-op in Release builds.
     /// </summary>
     public static void ShowPopulateDiagnostics(object wbObj, string auditTitle, string masterLabel, int masterCount, params string[] inspectTables)
     {
 #if DEBUG
         try
         {
-            if (!DebugDialog.DebugEnabled || wbObj == null) return;
+            if (wbObj == null) return;
 
             dynamic wb = wbObj;
             var sb = new System.Text.StringBuilder();
@@ -397,67 +308,10 @@ public static class SheetMapperHelper
                 }
             }
 
-            DebugDialog.ShowLog(auditTitle, sb.ToString());
+            AppLogger.Info($"[{auditTitle}]\n{sb}");
         }
         catch { }
 #endif
-    }
-
-    /// <summary>Reads the first non-null property among <paramref name="propNames"/> (case-insensitive), converted to <typeparamref name="T"/>.</summary>
-    public static T GetProp<T>(object target, params string[] propNames)
-    {
-        if (target == null) return default!;
-        Type type = target.GetType();
-        foreach (var name in propNames)
-        {
-            var p = type.GetProperty(name, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
-            if (p != null)
-            {
-                object? val = p.GetValue(target);
-                if (val != null)
-                {
-                    if (val is T directVal) return directVal;
-                    Type tType = Nullable.GetUnderlyingType(typeof(T)) ?? typeof(T);
-                    if (tType == typeof(DateOnly) && val is DateTime dtVal)
-                        return (T)(object)DateOnly.FromDateTime(dtVal);
-                    try { return (T)Convert.ChangeType(val, tType); }
-                    catch { }
-                }
-            }
-        }
-        return default!;
-    }
-
-    /// <summary>Sets a property by name (case-insensitive) with tolerant DateOnly / TimeOnly / enum conversion. Silently ignores unknown properties.</summary>
-    public static void SetProp(object target, string propName, object? value)
-    {
-        if (target == null || value == null) return;
-        var p = target.GetType().GetProperty(propName, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
-        if (p != null && p.CanWrite)
-        {
-            try
-            {
-                Type uType = Nullable.GetUnderlyingType(p.PropertyType) ?? p.PropertyType;
-                if (uType == typeof(DateOnly) && value is DateTime dt)
-                    p.SetValue(target, DateOnly.FromDateTime(dt));
-                else if (uType == typeof(DateOnly) && value is DateOnly dOnly)
-                    p.SetValue(target, dOnly);
-                else if (uType == typeof(TimeOnly) && value is string st && TimeOnly.TryParse(st, out var to))
-                    p.SetValue(target, to);
-                else if (uType.IsEnum)
-                {
-                    if (Enum.TryParse(uType, value.ToString(), true, out var ev))
-                        p.SetValue(target, ev);
-                }
-                else if (uType.IsInstanceOfType(value))
-                    p.SetValue(target, value);
-                else
-                {
-                    p.SetValue(target, Convert.ChangeType(value, uType));
-                }
-            }
-            catch { }
-        }
     }
 
     internal static bool IsComError(object? val) =>
@@ -466,28 +320,49 @@ public static class SheetMapperHelper
         (val is long l && l < -2000000000) ||
         val.ToString()?.StartsWith("#") == true;
 
-    public static string CleanString(object? val)
+    /// <summary>
+    /// Reads the archetype (first data) row's formulas in ONE COM call. Returns a 1-based array (index 0 unused) of
+    /// length <paramref name="colSpan"/> + 1; unreadable cells are empty strings.
+    /// </summary>
+    public static string[] ReadArchetypeFormulas(dynamic worksheet, int archRow, int startCol, int colSpan)
+    {
+        var formulas = new string[colSpan + 1];
+        Array.Fill(formulas, string.Empty);
+        try
+        {
+            dynamic archRange = worksheet.Range[worksheet.Cells[archRow, startCol], worksheet.Cells[archRow, startCol + colSpan - 1]];
+            object? raw = archRange.Formula;
+            if (raw is object[,] mat)
+            {
+                for (int c = 1; c <= colSpan; c++)
+                    formulas[c] = mat[1, c]?.ToString() ?? string.Empty;
+            }
+            else if (raw is string single)
+            {
+                formulas[1] = single;
+            }
+        }
+        catch { }
+        return formulas;
+    }
+
+    /// <summary>Row-input form: the em-dash null placeholder counts as empty (no user input).</summary>
+    public static string CleanCellText(object? val) => CleanString(val, treatDashAsEmpty: true);
+
+    /// <summary>
+    /// Single cell-text normaliser: COM errors / "#..." / "System.__ComObject" become empty, whole doubles lose the
+    /// ".0", the rest is trimmed. <paramref name="treatDashAsEmpty"/> also maps the em-dash null placeholder to empty.
+    /// </summary>
+    public static string CleanString(object? val, bool treatDashAsEmpty = false)
     {
         if (val == null || IsComError(val)) return string.Empty;
+        if (val is double d && Math.Abs(d - Math.Round(d)) < 0.00001 && d < 1e15)
+            return ((long)Math.Round(d)).ToString(CultureInfo.InvariantCulture);
         string s = val.ToString()?.Trim() ?? string.Empty;
+        if (s.Equals("System.__ComObject", StringComparison.OrdinalIgnoreCase)) return string.Empty;
+        if (treatDashAsEmpty && s == "—") return string.Empty;
         if (long.TryParse(s, out long num) && num < -2000000000) return string.Empty;
         return s;
     }
 
-    public static DateOnly ParseDate(object? cell)
-    {
-        if (cell is double d) return DateOnly.FromDateTime(DateTime.FromOADate(d));
-        string clean = CleanString(cell);
-        if (string.IsNullOrWhiteSpace(clean)) return default;
-        if (double.TryParse(clean, NumberStyles.Any, CultureInfo.InvariantCulture, out double parsedD) && parsedD > 30000 && parsedD < 80000)
-            return DateOnly.FromDateTime(DateTime.FromOADate(parsedD));
-        if (DateOnly.TryParseExact(clean, UniversalDateFormats, CultureInfo.InvariantCulture, DateTimeStyles.None, out DateOnly dOnly))
-            return dOnly;
-        if (DateTime.TryParse(clean, new CultureInfo("en-GB"), DateTimeStyles.None, out DateTime dt))
-            return DateOnly.FromDateTime(dt);
-        return default;
-    }
-
-    public static string FormatDate(DateOnly date) =>
-        date == default ? string.Empty : date.ToString("dd/MM/yyyy");
 }

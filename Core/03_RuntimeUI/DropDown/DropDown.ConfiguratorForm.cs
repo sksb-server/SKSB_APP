@@ -5,7 +5,7 @@ using System.Drawing;
 using System.Windows.Forms;
 using ExcelDna.Integration;
 
-public partial class ConfiguratorForm : Form
+public class ConfiguratorForm : Form
 {
     private readonly dynamic _singleCell;
     private readonly TextBox _txtSource;

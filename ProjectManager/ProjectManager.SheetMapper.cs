@@ -76,12 +76,6 @@ internal static partial class SheetMapper
     internal static (List<ProjectRecord>? Data, List<string> Errors, List<string> Warnings) ExtractProjectRecordsWithDiagnostics()
         => WorkbookMapper.ExtractMasterAndChildrenWithDiagnostics(Mapping);
 
-    internal static List<ProjectRecord> ExtractProjectRecords()
-    {
-        var (data, _, _) = ExtractProjectRecordsWithDiagnostics();
-        return data ?? new List<ProjectRecord>();
-    }
-
     internal static void PopulateWorksheet(List<ProjectRecord> records)
         => WorkbookMapper.PopulateMasterAndChildren(Mapping, records);
 

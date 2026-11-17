@@ -4,7 +4,7 @@ using System;
 using System.Drawing;
 using System.Windows.Forms;
 
-public partial class InstallationProgressForm : Form
+public class InstallationProgressForm : Form
 {
     private readonly Label _lblTitle;
     private readonly Label _lblStatus;

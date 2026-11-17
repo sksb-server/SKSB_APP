@@ -1,7 +1,6 @@
 ﻿namespace SKSB_App.Core.RuntimeUI.DateFilter;
 
 using System;
-using System.Collections.Generic;
 using System.Linq;
 
 public static class DateFilterHelper
@@ -34,28 +33,5 @@ public static class DateFilterHelper
             "daily" or "today" => DateFilterScope.Day,
             _ => DateFilterScope.All_Time
         };
-    }
-
-    public static IEnumerable<T> FilterByDateScope<T>(
-        this IEnumerable<T>? items,
-        Func<T, DateOnly> dateSelector,
-        DateOnly anchorDate,
-        DateFilterScope scope)
-    {
-        if (items == null) return Enumerable.Empty<T>();
-        return items.Where(item => scope.IsWithinScope(dateSelector(item), anchorDate));
-    }
-
-    public static decimal SumByDateScope<T>(
-        this IEnumerable<T>? items,
-        Func<T, DateOnly> dateSelector,
-        Func<T, decimal> amountSelector,
-        DateOnly anchorDate,
-        DateFilterScope scope)
-    {
-        if (items == null) return 0.00m;
-        return items
-            .Where(item => scope.IsWithinScope(dateSelector(item), anchorDate))
-            .Sum(amountSelector);
     }
 }

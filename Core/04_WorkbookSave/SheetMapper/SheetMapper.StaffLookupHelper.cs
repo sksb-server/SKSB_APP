@@ -45,13 +45,6 @@ public static class StaffLookupHelper
         return map;
     }
 
-    /// <summary>Resolves against the cached staff directory. Returns 0 when no match is found.</summary>
-    public static long ResolveStaffId(string? name)
-    {
-        var staffList = LoadCachedStaff();
-        return ResolveStaffId(name, BuildExactNameMap(staffList), staffList);
-    }
-
     /// <summary>
     /// Resolves a name to a StaffID using multi-tier matching:
     /// 1. Exact match on StaffShortName or StaffName

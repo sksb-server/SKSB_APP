@@ -4,7 +4,6 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
-using System.Reflection;
 using SKSB_App.Core.WorkbookSave.SheetMapper;
 
 public static class RuleDataCache
@@ -53,7 +52,7 @@ public static class RuleDataCache
             try
             {
                 dynamic? nameObj = null;
-                try { nameObj = wb.Names.Item(clean); } catch { }
+                try { nameObj = wb!.Names.Item(clean); } catch { }
                 if (nameObj != null)
                 {
                     dynamic? targetRange = null;
@@ -141,7 +140,7 @@ public static class RuleDataCache
         if (wb == null || string.IsNullOrWhiteSpace(tableName)) return null;
         string normTarget = RuleRegistry.NormalizeIdentifier(tableName);
 
-        foreach (dynamic ws in wb.Sheets)
+        foreach (dynamic ws in wb!.Sheets)
         {
             try
             {
@@ -171,7 +170,7 @@ public static class RuleDataCache
 
         try
         {
-            int colCount = (int)table.ListColumns.Count;
+            int colCount = (int)table!.ListColumns.Count;
             for (int c = 1; c <= colCount; c++)
             {
                 string cName = table.ListColumns[c].Name?.ToString() ?? string.Empty;
@@ -273,36 +272,21 @@ public static class RuleDataCache
             {
                 for (int c = cStart; c <= cEnd; c++)
                 {
-                    list.Add(NormalizeCellToString(matrix[r, c]));
+                    list.Add(SheetMapperHelper.CleanString(matrix[r, c]));
                 }
             }
         }
         else if (raw is object[] vec)
         {
             foreach (var item in vec)
-                list.Add(NormalizeCellToString(item));
+                list.Add(SheetMapperHelper.CleanString(item));
         }
         else
         {
-            list.Add(NormalizeCellToString(raw));
+            list.Add(SheetMapperHelper.CleanString(raw));
         }
 
         return list;
-    }
-
-    private static string NormalizeCellToString(object? val)
-    {
-        if (val == null || SheetMapperHelper.IsComError(val)) return string.Empty;
-        if (val is double d)
-        {
-            if (Math.Abs(d - Math.Round(d)) < 0.00001 && d < 1e15)
-                return ((long)Math.Round(d)).ToString(CultureInfo.InvariantCulture);
-            return d.ToString(CultureInfo.InvariantCulture);
-        }
-        string s = val.ToString()?.Trim() ?? string.Empty;
-        if (s.StartsWith("#") || s.Equals("System.__ComObject", StringComparison.OrdinalIgnoreCase))
-            return string.Empty;
-        return s;
     }
 
     private static List<string> FilterList(List<string> raw, bool preserveDuplicates)

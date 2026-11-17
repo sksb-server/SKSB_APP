@@ -30,12 +30,6 @@ public class PostgreSqlService
         return db.Query<T>(sql, param);
     }
 
-    public int Execute(string sql, object? param = null)
-    {
-        using var db = CreateConnection();
-        return db.Execute(sql, param);
-    }
-
     public void ExecuteTransaction<T>(string sql, IEnumerable<T> records)
     {
         using var db = CreateConnection();

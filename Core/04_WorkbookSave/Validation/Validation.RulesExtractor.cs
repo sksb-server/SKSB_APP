@@ -4,30 +4,22 @@ using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.RuntimeUI.DropDown;
 using SKSB_App.Core.RuntimeUI.RuleEngine;
 using SKSB_App.Core.RuntimeUI.TableRowManager;
-using SKSB_App.Core.WorkbookOpen.Sheet;
 using SKSB_App.Core.WorkbookSave.SheetMapper;
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.Globalization;
 using System.Linq;
 
 public record ColumnRule(
-    int ColumnIndex,
     string Header,
     bool IsRequired,
-    int AlertStyle, // 1 = Stop (Error), 2 = Warning
-    string ErrorMessage,
-    Config DropDownConfig,
     bool IsFormula,
     PropertyRuleDescriptor? CSharpRule = null
 );
 
 public class SheetRulesCache
 {
-    public string CacheKey { get; set; } = string.Empty;
     public List<ColumnRule> ColumnRules { get; set; } = new();
-    public DateTime CachedAt { get; set; } = DateTime.UtcNow;
 }
 
 public static class RulesExtractor
@@ -57,7 +49,7 @@ public static class RulesExtractor
         }
 
         AppLogger.Info($"[RulesExtractor] Initializing rule cache for '{tableName}' on '{sheetName}'...");
-        var cache = new SheetRulesCache { CacheKey = cacheKey };
+        var cache = new SheetRulesCache();
 
         // Bulk-read header row and archetype formulas in 2 COM calls instead of 3 * columnSpan calls
         int endCol = startCol + columnSpan - 1;
@@ -66,22 +58,7 @@ public static class RulesExtractor
             1, columnSpan
         );
 
-        var archFormulas = new string[columnSpan + 1];
-        try
-        {
-            dynamic archRange = worksheet.Range[worksheet.Cells[headerRow + 1, startCol], worksheet.Cells[headerRow + 1, endCol]];
-            object? rawFormulas = archRange.Formula;
-            if (rawFormulas is object[,] fMat)
-            {
-                for (int c = 1; c <= columnSpan; c++)
-                    archFormulas[c] = fMat[1, c]?.ToString() ?? string.Empty;
-            }
-            else if (rawFormulas is string singleF)
-            {
-                archFormulas[1] = singleF;
-            }
-        }
-        catch { }
+        var archFormulas = SheetMapperHelper.ReadArchetypeFormulas((object)worksheet, headerRow + 1, startCol, columnSpan);
 
         for (int c = 0; c < columnSpan; c++)
         {
@@ -95,31 +72,22 @@ public static class RulesExtractor
                 : Metadata.ReadConfig(worksheet.Cells[headerRow + 1, colIndex]);
 
             bool isRequired = false;
-            int alertStyle = 1;
-            string errorMsg = string.Empty;
 
             if (!isFormula)
             {
                 if (csharpRule != null)
                 {
                     isRequired = csharpRule.IsRequired && !csharpRule.IsWarningOnly;
-                    alertStyle = csharpRule.IsWarningOnly ? 2 : 1;
-                    errorMsg = $"Field '{headerText}' has an invalid or missing value.";
                 }
                 else if (!legacyConfig.IsEmpty)
                 {
                     isRequired = !legacyConfig.IsMultiSelect && !legacyConfig.IsWarningOnly;
-                    alertStyle = legacyConfig.IsWarningOnly ? 2 : 1;
                 }
             }
 
             cache.ColumnRules.Add(new ColumnRule(
-                ColumnIndex: colIndex,
                 Header: headerText,
                 IsRequired: isRequired,
-                AlertStyle: alertStyle,
-                ErrorMessage: errorMsg,
-                DropDownConfig: legacyConfig,
                 IsFormula: isFormula,
                 CSharpRule: csharpRule
             ));
@@ -171,7 +139,7 @@ public static class RulesExtractor
                 int startCol = (int)table.HeaderRowRange.Column;
                 int colSpan = (int)table.ListColumns.Count;
 
-                var (_, tblErrors, tblWarnings) = EvaluateAndExtractInternal(
+                var (tblErrors, tblWarnings) = EvaluateAndExtractInternal(
                     worksheet: (object)ws,
                     tableObj: (object)table,
                     bodyRangeObj: (object)bodyRange,
@@ -190,40 +158,7 @@ public static class RulesExtractor
         return (errors, warnings);
     }
 
-    public static (List<Dictionary<string, object?>> Rows, List<string> Errors, List<string> Warnings) EvaluateAndExtract(
-        object worksheet,
-        int startRow,
-        int maxRows,
-        int startCol,
-        int columnSpan,
-        int driverColIndex = 1)
-    {
-        if (worksheet == null || maxRows <= 0 || columnSpan <= 0)
-            return (new(), new(), new());
-
-        dynamic wsDynamic = worksheet;
-        dynamic? table = null;
-        dynamic? bodyRange = null;
-        try
-        {
-            table = wsDynamic.Cells[startRow, startCol].ListObject;
-            bodyRange = table?.DataBodyRange;
-        }
-        catch { }
-
-        return EvaluateAndExtractInternal(
-            worksheet,
-            table,
-            bodyRange,
-            startRow,
-            maxRows,
-            startCol,
-            columnSpan,
-            new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase)
-        );
-    }
-
-    private static (List<Dictionary<string, object?>> Rows, List<string> Errors, List<string> Warnings) EvaluateAndExtractInternal(
+    private static (List<string> Errors, List<string> Warnings) EvaluateAndExtractInternal(
         object worksheet,
         object? tableObj,
         object? bodyRangeObj,
@@ -233,7 +168,6 @@ public static class RulesExtractor
         int columnSpan,
         Dictionary<string, List<string>> sharedSourceCache)
     {
-        var rows = new List<Dictionary<string, object?>>();
         var errors = new List<string>();
         var warnings = new List<string>();
 
@@ -254,12 +188,7 @@ public static class RulesExtractor
 
             // 2. VALIDATION DEDUPLICATION: Detect, Warn, Delete, and Skip
             var dedupeWarnings = new List<string>();
-            int dupesRemoved = 0;
-
-            SheetProtections.ExecuteWithBypass((object)wsDynamic, new Action(() =>
-            {
-                dupesRemoved = TableRowManager.CleanTableDuplicateRows(table, dedupeWarnings);
-            }));
+            int dupesRemoved = TableRowManager.CleanTableDuplicateRows(table, dedupeWarnings);
 
             if (dupesRemoved > 0)
             {
@@ -272,7 +201,7 @@ public static class RulesExtractor
                 dynamic? refreshedBody = table.DataBodyRange;
                 if (refreshedBody == null)
                 {
-                    return (rows, errors, warnings);
+                    return (errors, warnings);
                 }
 
                 bodyRangeObj = refreshedBody;
@@ -295,7 +224,7 @@ public static class RulesExtractor
         catch (Exception ex)
         {
             AppLogger.Error($"[Validation] Failed reading 2D Array for '{tableName}'", ex);
-            return (rows, errors, warnings);
+            return (errors, warnings);
         }
 
         int rowCount = Math.Min(maxRows, grid.GetLength(0));
@@ -376,7 +305,7 @@ public static class RulesExtractor
                 var rule = rules.ColumnRules[c];
                 object? cellObj = grid[r, c + 1];
                 rowObjectsOneBased[c + 1] = cellObj;
-                string valStr = CleanString(cellObj);
+                string valStr = SheetMapperHelper.CleanString(cellObj);
                 rowStringsOneBased[c + 1] = valStr;
 
                 if (rule.IsFormula) continue;
@@ -392,8 +321,6 @@ public static class RulesExtractor
 
             if (!hasMeaningfulData) continue;
 
-            var rowDict = new Dictionary<string, object?>(StringComparer.OrdinalIgnoreCase);
-            bool rowHasError = false;
 
             for (int c = 0; c < columnSpan; c++)
             {
@@ -402,7 +329,6 @@ public static class RulesExtractor
                 object? rawVal = rowObjectsOneBased[c + 1];
                 string strVal = rowStringsOneBased[c + 1];
 
-                rowDict[rule.Header] = rawVal;
                 if (rule.IsFormula) continue;
 
                 if (string.IsNullOrWhiteSpace(strVal))
@@ -410,7 +336,6 @@ public static class RulesExtractor
                     if (rule.IsRequired)
                     {
                         errors.Add($"  Row {excelRow} [{sheetName}]: Field '{rule.Header}' is required and cannot be empty.");
-                        rowHasError = true;
                     }
                     continue;
                 }
@@ -425,13 +350,11 @@ public static class RulesExtractor
                     if (!double.TryParse(strVal, NumberStyles.Any, CultureInfo.InvariantCulture, out double dNum))
                     {
                         errors.Add($"  Row {excelRow} [{sheetName}]: Value '{strVal}' in '{rule.Header}' must be a valid number.");
-                        rowHasError = true;
                         continue;
                     }
                     if (cRule.AllowNonNegativeZero && dNum < -0.0001)
                     {
                         errors.Add($"  Row {excelRow} [{sheetName}]: Value '{strVal}' in '{rule.Header}' cannot be negative.");
-                        rowHasError = true;
                         continue;
                     }
                 }
@@ -448,7 +371,6 @@ public static class RulesExtractor
                             if (thisDate <= refDate)
                             {
                                 errors.Add($"  Row {excelRow} [{sheetName}]: '{rule.Header}' ({thisDate:dd/MM/yyyy}) must be strictly later than '{colHeadersOneBased[refCol]}' ({refDate:dd/MM/yyyy}).");
-                                rowHasError = true;
                                 continue;
                             }
                         }
@@ -468,7 +390,6 @@ public static class RulesExtractor
                             if (!IsTokenInNormalizedSet(allowedSet, token))
                             {
                                 errors.Add($"  Row {excelRow} [{sheetName}]: '{token}' is not a valid option for '{rule.Header}'.");
-                                rowHasError = true;
                             }
                         }
                     }
@@ -478,7 +399,6 @@ public static class RulesExtractor
                         {
                             string displayVal = RuleEvaluator.FormatDisplayValue(rawVal, cRule);
                             errors.Add($"  Row {excelRow} [{sheetName}]: '{displayVal}' is not a valid option for '{rule.Header}'.");
-                            rowHasError = true;
                         }
                     }
                 }
@@ -522,20 +442,14 @@ public static class RulesExtractor
                             else
                             {
                                 errors.Add(conflictMsg);
-                                rowHasError = true;
                             }
                         }
                     }
                 }
             }
-
-            if (!rowHasError)
-            {
-                rows.Add(rowDict);
-            }
         }
 
-        return (rows, errors, warnings);
+        return (errors, warnings);
     }
 
     private static string NormalizeLookupToken(string? s)
@@ -591,14 +505,4 @@ public static class RulesExtractor
         return false;
     }
 
-    private static string CleanString(object? val)
-    {
-        if (val == null || SheetMapperHelper.IsComError(val)) return string.Empty;
-        if (val is double d && Math.Abs(d - Math.Round(d)) < 0.00001 && d < 1e15)
-            return ((long)Math.Round(d)).ToString(CultureInfo.InvariantCulture);
-        string s = val.ToString()?.Trim() ?? string.Empty;
-        if (s.Equals("System.__ComObject", StringComparison.OrdinalIgnoreCase)) return string.Empty;
-        if (long.TryParse(s, out long num) && num < -2000000000) return string.Empty;
-        return s;
-    }
 }

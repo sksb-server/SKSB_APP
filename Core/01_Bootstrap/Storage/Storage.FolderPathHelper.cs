@@ -37,9 +37,6 @@ public sealed class AppFolder
         }
         return fullPath;
     }
-
-    public override string ToString() => _path;
-    public static implicit operator string(AppFolder folder) => folder?._path ?? string.Empty;
 }
 
 public sealed class TemplateAddInPair
@@ -99,6 +96,4 @@ public sealed class TemplateAddInPair
         return Path.Combine(FolderRegistry.AddIns.GetPath(), addInFileName);
 #endif
     }
-
-    public static implicit operator string(TemplateAddInPair pair) => nameof(pair) ?? string.Empty;
 }

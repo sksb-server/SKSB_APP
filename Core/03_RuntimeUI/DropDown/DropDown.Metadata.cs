@@ -1,6 +1,6 @@
 ﻿namespace SKSB_App.Core.RuntimeUI.DropDown;
 
-using ExcelDna.Integration;
+using SKSB_App.Core.RuntimeUI.RuleEngine;
 using SKSB_App.Core.WorkbookOpen.Sheet;
 using System;
 using System.Collections.Generic;
@@ -125,7 +125,7 @@ public static class Metadata
             if (!string.IsNullOrEmpty(key))
             {
                 dynamic wb = singleCell.Worksheet.Parent;
-                dynamic nameObj = null;
+                dynamic? nameObj = null;
                 try { nameObj = wb.Names.Item(key); } catch { }
                 if (nameObj != null)
                 {
@@ -197,7 +197,7 @@ public static class Metadata
 
             // Reliable Worksheet Evaluation for modern 365 formulas (XLOOKUP, VSTACK, cross-sheet array joins)
             dynamic wb = xlApp.ActiveWorkbook;
-            dynamic dataWs = null;
+            dynamic? dataWs = null;
             try { dataWs = wb.Sheets[SheetOperations.DataSheetName]; } catch { }
             if (dataWs == null && wb.Sheets.Count > 0) dataWs = wb.Sheets[1];
 
@@ -263,19 +263,21 @@ public static class Metadata
                 dynamic wb = xlApp.ActiveWorkbook;
                 if (wb == null) return match.Value;
 
-                foreach (dynamic ws in wb.Sheets)
+                dynamic? tbl = RuleDataCache.FindTableInWorkbook(wb, tableName);
+                dynamic? ws = tbl?.Parent;
+                if (tbl != null)
                 {
-                    dynamic tbl = null;
-                    try { tbl = ws.ListObjects[tableName]; } catch { }
-                    if (tbl == null)
+                    dynamic? colObj = null;
+                    try { colObj = tbl.ListColumns[colName]; } catch { }
+                    if (colObj == null)
                     {
                         try
                         {
-                            foreach (dynamic t in ws.ListObjects)
+                            foreach (dynamic c in tbl.ListColumns)
                             {
-                                if (string.Equals(t.Name?.ToString(), tableName, StringComparison.OrdinalIgnoreCase))
+                                if (string.Equals(c.Name?.ToString(), colName, StringComparison.OrdinalIgnoreCase))
                                 {
-                                    tbl = t;
+                                    colObj = c;
                                     break;
                                 }
                             }
@@ -283,38 +285,17 @@ public static class Metadata
                         catch { }
                     }
 
-                    if (tbl != null)
+                    if (colObj != null)
                     {
-                        dynamic colObj = null;
-                        try { colObj = tbl.ListColumns[colName]; } catch { }
-                        if (colObj == null)
-                        {
-                            try
-                            {
-                                foreach (dynamic c in tbl.ListColumns)
-                                {
-                                    if (string.Equals(c.Name?.ToString(), colName, StringComparison.OrdinalIgnoreCase))
-                                    {
-                                        colObj = c;
-                                        break;
-                                    }
-                                }
-                            }
-                            catch { }
-                        }
+                        dynamic colRange = colObj.DataBodyRange ?? colObj.Range;
+                        string sName = ws!.Name?.ToString() ?? string.Empty;
+                        string cleanSheet = sName.Replace("'", "''");
 
-                        if (colObj != null)
+                        string addr = string.Empty;
+                        try { addr = colRange.Address?.ToString() ?? string.Empty; } catch { }
+                        if (!string.IsNullOrEmpty(addr))
                         {
-                            dynamic colRange = colObj.DataBodyRange ?? colObj.Range;
-                            string sName = ws.Name?.ToString() ?? string.Empty;
-                            string cleanSheet = sName.Replace("'", "''");
-
-                            string addr = string.Empty;
-                            try { addr = colRange.Address?.ToString() ?? string.Empty; } catch { }
-                            if (!string.IsNullOrEmpty(addr))
-                            {
-                                return $"'{cleanSheet}'!{addr}";
-                            }
+                            return $"'{cleanSheet}'!{addr}";
                         }
                     }
                 }

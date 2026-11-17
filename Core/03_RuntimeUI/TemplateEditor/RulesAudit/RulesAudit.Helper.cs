@@ -26,14 +26,14 @@ public static class RulesAuditHelper
 
         try
         {
-            dynamic s = wb.Sheets[cleanName];
+            dynamic s = wb!.Sheets[cleanName];
             if (s != null) return s;
         }
         catch { }
 
         try
         {
-            foreach (dynamic ws in wb.Sheets)
+            foreach (dynamic ws in wb!.Sheets)
             {
                 string sName = ws.Name?.ToString() ?? string.Empty;
                 if (string.Equals(sName.Trim(), cleanName, StringComparison.OrdinalIgnoreCase))
@@ -45,7 +45,7 @@ public static class RulesAuditHelper
         try
         {
             string cleanTarget = Regex.Replace(cleanName, @"[\s_\-]+", "").ToLowerInvariant();
-            foreach (dynamic ws in wb.Sheets)
+            foreach (dynamic ws in wb!.Sheets)
             {
                 string sName = ws.Name?.ToString() ?? string.Empty;
                 string cleanSheet = Regex.Replace(sName, @"[\s_\-]+", "").ToLowerInvariant();

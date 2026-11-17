@@ -69,10 +69,4 @@ public static class EnumList
 
         SyncHelper.SyncDictionary(TargetSheet, mappings, WriteMode.SequentialReset, injectPlaceholderIfEmpty: false);
     }
-
-    public static void SyncDictionary(Dictionary<string, string[]> enumMappings)
-    {
-        var dict = enumMappings.ToDictionary(k => k.Key, v => (IEnumerable<string>?)v.Value);
-        SyncHelper.SyncDictionary(TargetSheet, dict, WriteMode.SequentialReset, injectPlaceholderIfEmpty: false);
-    }
 }

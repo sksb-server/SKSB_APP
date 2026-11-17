@@ -133,16 +133,6 @@ public static class RuleCalculator
 
     private static readonly ConcurrentDictionary<string, ExprNode> _astCache = new(StringComparer.Ordinal);
 
-    /// <summary>Evaluates a [ColumnCalculate] expression against an in-memory Excel row (null => 0).</summary>
-    public static decimal EvaluateRowExpression(
-        string expression, string[] colHeaders, object?[] rawObjects, Func<string, decimal> parameterResolver) =>
-        EvaluateRowExpressionNullable(expression, colHeaders, rawObjects, parameterResolver) ?? 0m;
-
-    /// <summary>Evaluates an expression with caller supplied resolvers (null => 0). Errors yield 0.</summary>
-    public static decimal EvaluateRowExpression(
-        string expression, Func<string, object?> columnResolver, Func<string, decimal> parameterResolver) =>
-        EvaluateRowExpressionNullable(expression, columnResolver, parameterResolver) ?? 0m;
-
     /// <summary>
     /// Null-aware evaluation of an Excel row. null means "no value" (shown as an em-dash) and propagates:
     /// a difference / product / quotient with a null operand is null, a sum is null only when every operand is null,
@@ -305,14 +295,11 @@ public static class RuleCalculator
 
     /// <summary>
     /// Enforces RoundDownStep and evaluates [ColumnCalculate] (two passes so dependent columns settle)
-    /// on a single child row object. <paramref name="extraContext"/> lets expressions also read parent members.
+    /// on a single child row object.
     /// </summary>
-    public static void ApplyRowCalculationsOnObject(
-        object item, IReadOnlyDictionary<string, decimal>? parameters = null, IReadOnlyList<object>? extraContext = null)
+    private static void ApplyRowCalculationsOnObject(object item, IReadOnlyDictionary<string, decimal>? parameters = null)
     {
-        var targets = new List<object> { item };
-        if (extraContext != null) targets.AddRange(extraContext);
-        ApplyCalculations(item, targets, parameters, includeRounding: true);
+        ApplyCalculations(item, new List<object> { item }, parameters, includeRounding: true);
     }
 
     private static void ApplyCalculations(
@@ -758,13 +745,9 @@ public static class RuleCalculator
             var result = new SourceTable(Array.Empty<string>(), null, 0);
             try
             {
-                dynamic wb = wbObj;
-                foreach (dynamic sheet in wb.Worksheets)
+                dynamic? tbl = RuleDataCache.FindTableInWorkbook((object)wbObj, tableName);
+                if (tbl != null)
                 {
-                    dynamic? tbl = null;
-                    try { tbl = sheet.ListObjects[tableName]; } catch { }
-                    if (tbl == null) continue;
-
                     int cols = (int)tbl.ListColumns.Count;
                     object[,] hdr = TableMapper.GetRange2DValues(tbl.HeaderRowRange, 1, cols);
                     var headers = new string[cols + 1];
@@ -780,7 +763,6 @@ public static class RuleCalculator
                     {
                         result = new SourceTable(headers, null, 0);
                     }
-                    break;
                 }
             }
             catch { }

@@ -10,9 +10,7 @@ using SKSB_App.Core.WorkbookSave.SheetMapper;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
-using System.Globalization;
 using System.Linq;
-using System.Text;
 using System.Windows.Forms;
 
 public enum TableInsertMode
@@ -31,11 +29,7 @@ public static partial class TableRowManager
 {
     private static bool _isManagingRows = false;
     private const string InsertAtTopDefinedName = "__SKSB_INSERT_AT_TOP";
-    private const string DebounceSigDefinedName = "__SKSB_ROW_SIG";
     private static bool _inMemoryFallback = false;
-
-    private static readonly ConcurrentDictionary<string, TableInsertMode> TableModes =
-        new(StringComparer.OrdinalIgnoreCase);
 
     private static readonly ConcurrentDictionary<string, TableNature> TableNatures =
         new(StringComparer.OrdinalIgnoreCase);
@@ -67,14 +61,6 @@ public static partial class TableRowManager
         TableNatures["InsuranceClaimsTable"] = TableNature.Additive;
         TableNatures["StaffLicensesTable"] = TableNature.Additive;
         TableNatures["StaffLeavesTable"] = TableNature.Additive;
-    }
-
-    public static void SetTableNature(string tableName, TableNature nature)
-    {
-        if (!string.IsNullOrWhiteSpace(tableName))
-        {
-            TableNatures[tableName.Trim()] = nature;
-        }
     }
 
     public static TableNature GetTableNature(dynamic table)
@@ -126,26 +112,8 @@ public static partial class TableRowManager
         set => SetWorkbookInsertAtTop(value);
     }
 
-    public static void SetTableInsertMode(string tableName, TableInsertMode mode)
+    public static TableInsertMode GetTableInsertMode()
     {
-        if (!string.IsNullOrWhiteSpace(tableName))
-        {
-            TableModes[tableName.Trim()] = mode;
-        }
-    }
-
-    public static TableInsertMode GetTableInsertMode(dynamic table)
-    {
-        try
-        {
-            string tableName = table?.Name?.ToString() ?? string.Empty;
-            if (!string.IsNullOrEmpty(tableName) && TableModes.TryGetValue(tableName, out var mode))
-            {
-                return mode;
-            }
-        }
-        catch { }
-
         return IsInsertAtTopEnabled ? TableInsertMode.InsertAtTop : TableInsertMode.InsertAtBottom;
     }
 
@@ -223,34 +191,31 @@ public static partial class TableRowManager
             );
             if (confirmResult != DialogResult.Yes) return;
 
-            SheetProtections.ExecuteWithBypass((object)worksheet, new Action(() =>
+            foreach (int idx in rowIndicesToDelete.OrderByDescending(x => x))
             {
-                foreach (int idx in rowIndicesToDelete.OrderByDescending(x => x))
+                if ((int)table.ListRows.Count > 1)
                 {
-                    if ((int)table.ListRows.Count > 1)
-                    {
-                        table.ListRows[idx].Delete();
-                    }
-                    else
-                    {
-                        // Keep 1 clean archetype row if deleting the final row
-                        dynamic lastRowRange = table.ListRows[1].Range;
-                        int colCount = (int)table.ListColumns.Count;
-                        int headerRow = (int)table.HeaderRowRange.Row;
-                        int startCol = (int)table.HeaderRowRange.Column;
+                    table.ListRows[idx].Delete();
+                }
+                else
+                {
+                    // Keep 1 clean archetype row if deleting the final row
+                    dynamic lastRowRange = table.ListRows[1].Range;
+                    int colCount = (int)table.ListColumns.Count;
+                    int headerRow = (int)table.HeaderRowRange.Row;
+                    int startCol = (int)table.HeaderRowRange.Column;
 
-                        for (int c = 1; c <= colCount; c++)
+                    for (int c = 1; c <= colCount; c++)
+                    {
+                        dynamic archCell = worksheet.Cells[headerRow + 1, startCol + c - 1];
+                        string archFormula = archCell.Formula?.ToString() ?? string.Empty;
+                        if (!archFormula.StartsWith("="))
                         {
-                            dynamic archCell = worksheet.Cells[headerRow + 1, startCol + c - 1];
-                            string archFormula = archCell.Formula?.ToString() ?? string.Empty;
-                            if (!archFormula.StartsWith("="))
-                            {
-                                lastRowRange.Cells[1, c].Value2 = null;
-                            }
+                            lastRowRange.Cells[1, c].Value2 = null;
                         }
                     }
                 }
-            }));
+            }
 
             SheetOperations.ShowStatusConfirmation($"Deleted {rowIndicesToDelete.Count} row(s) from '{tableName}'.");
         }
@@ -265,10 +230,10 @@ public static partial class TableRowManager
         if (target == null || SheetOperations.IsTemplateEditMode || _isManagingRows) return;
 
         dynamic? table = null;
-        try { table = target.ListObject; } catch { }
+        try { table = target!.ListObject; } catch { }
         if (table == null)
         {
-            try { table = target.Cells[1, 1].ListObject; } catch { }
+            try { table = target!.Cells[1, 1].ListObject; } catch { }
         }
         if (table == null) return;
 
@@ -294,9 +259,9 @@ public static partial class TableRowManager
         int rowCount = dataBody != null ? (int)dataBody.Rows.Count : 0;
         int lastDataRow = bodyStartRow + Math.Max(1, rowCount) - 1;
 
-        TableInsertMode insertMode = GetTableInsertMode(table);
+        TableInsertMode insertMode = GetTableInsertMode();
 
-        int targetTopRow = (int)target.Row;
+        int targetTopRow = (int)target!.Row;
         int targetRowCount = (int)target.Rows.Count;
         int targetBottomRow = targetTopRow + targetRowCount - 1;
 
@@ -335,44 +300,41 @@ public static partial class TableRowManager
                 xlApp.EnableEvents = false;
                 dynamic worksheet = table.Parent;
 
-                SheetProtections.ExecuteWithBypass((object)worksheet, new Action(() =>
-                {
-                    dynamic currentBody = table.DataBodyRange;
-                    int startCol = (int)table.HeaderRowRange.Column;
-                    int colCount = (int)table.ListColumns.Count;
-                    int headerRow = (int)table.HeaderRowRange.Row;
+                dynamic currentBody = table.DataBodyRange;
+                int startCol = (int)table.HeaderRowRange.Column;
+                int colCount = (int)table.ListColumns.Count;
+                int headerRow = (int)table.HeaderRowRange.Row;
 
-                    if (currentBody == null)
+                if (currentBody == null)
+                {
+                    SpawnRowSafely(worksheet, table, startCol, colCount, headerRow, false, auditTrail);
+                    return;
+                }
+
+                int curRowCount = (int)currentBody.Rows.Count;
+                int curBodyStartRow = (int)currentBody.Row;
+
+                if (insertMode == TableInsertMode.InsertAtBottom)
+                {
+                    int lastRowIdx = curBodyStartRow + curRowCount - 1;
+                    bool lastRowHasInput = CheckRowHasUserInput(worksheet, table, lastRowIdx, startCol, colCount, headerRow);
+                    if (lastRowHasInput && touchesBottom)
                     {
                         SpawnRowSafely(worksheet, table, startCol, colCount, headerRow, false, auditTrail);
-                        return;
                     }
-
-                    int curRowCount = (int)currentBody.Rows.Count;
-                    int curBodyStartRow = (int)currentBody.Row;
-
-                    if (insertMode == TableInsertMode.InsertAtBottom)
+                }
+                else if (insertMode == TableInsertMode.InsertAtTop)
+                {
+                    int topRowIdx = curBodyStartRow;
+                    bool topRowHasInput = CheckRowHasUserInput(worksheet, table, topRowIdx, startCol, colCount, headerRow);
+                    if (topRowHasInput && touchesTop)
                     {
-                        int lastRowIdx = curBodyStartRow + curRowCount - 1;
-                        bool lastRowHasInput = CheckRowHasUserInput(worksheet, table, lastRowIdx, startCol, colCount, headerRow);
-                        if (lastRowHasInput && touchesBottom)
-                        {
-                            SpawnRowSafely(worksheet, table, startCol, colCount, headerRow, false, auditTrail);
-                        }
+                        SpawnRowSafely(worksheet, table, startCol, colCount, headerRow, true, auditTrail);
                     }
-                    else if (insertMode == TableInsertMode.InsertAtTop)
-                    {
-                        int topRowIdx = curBodyStartRow;
-                        bool topRowHasInput = CheckRowHasUserInput(worksheet, table, topRowIdx, startCol, colCount, headerRow);
-                        if (topRowHasInput && touchesTop)
-                        {
-                            SpawnRowSafely(worksheet, table, startCol, colCount, headerRow, true, auditTrail);
-                        }
-                    }
+                }
 
-                    // Auto-delete / compact empty buffer rows
-                    CleanTableEmptyRows(table, insertMode, auditTrail);
-                }));
+                // Auto-delete / compact empty buffer rows
+                CleanTableEmptyRows(table, insertMode, auditTrail);
             }
             catch (Exception ex)
             {
@@ -397,15 +359,12 @@ public static partial class TableRowManager
         int tablesCleaned = 0;
         try
         {
-            SheetProtections.ExecuteWithBypass((object)worksheet, new Action(() =>
+            foreach (dynamic table in worksheet.ListObjects)
             {
-                foreach (dynamic table in worksheet.ListObjects)
-                {
-                    TableInsertMode mode = GetTableInsertMode(table);
-                    CleanTableEmptyRows(table, mode, null);
-                    tablesCleaned++;
-                }
-            }));
+                TableInsertMode mode = GetTableInsertMode();
+                CleanTableEmptyRows(table, mode, null);
+                tablesCleaned++;
+            }
         }
         finally
         {
@@ -501,7 +460,7 @@ public static partial class TableRowManager
                 if (RuleRegistry.IsZeroOrEmptyValue(cell.Value2, rule)) continue;
 
                 if (rule?.DefaultRule?.Kind == DefaultKind.Literal &&
-                    string.Equals(cellVal, rule.DefaultRule.LiteralValue, StringComparison.OrdinalIgnoreCase))
+                    string.Equals(cellVal, rule!.DefaultRule!.LiteralValue, StringComparison.OrdinalIgnoreCase))
                 {
                     continue;
                 }
@@ -591,7 +550,7 @@ public static partial class TableRowManager
             if (RuleRegistry.ShouldApplyFormat(rule) && rule!.EffectiveFormatKind != ColumnFormatKind.OdometerDynamic &&
                 !string.Equals(archetypeCell.NumberFormat?.ToString(), "@", StringComparison.Ordinal))
             {
-                try { newCell.NumberFormat = rule.ExcelNumberFormat; } catch { }
+                try { newCell.NumberFormat = rule!.ExcelNumberFormat; } catch { }
             }
         }
 
@@ -610,10 +569,10 @@ public static partial class TableRowManager
         try
         {
             dynamic xlApp = ExcelDnaUtil.Application;
-            dynamic wb = xlApp?.ActiveWorkbook;
+            dynamic? wb = xlApp.ActiveWorkbook;
             if (wb != null)
             {
-                dynamic nameObj = null;
+                dynamic? nameObj = null;
                 try { nameObj = wb.Names.Item(InsertAtTopDefinedName); } catch { }
                 if (nameObj != null)
                 {
@@ -632,7 +591,7 @@ public static partial class TableRowManager
         try
         {
             dynamic xlApp = ExcelDnaUtil.Application;
-            dynamic wb = xlApp?.ActiveWorkbook;
+            dynamic? wb = xlApp.ActiveWorkbook;
             if (wb != null)
             {
                 try { wb.Names.Item(InsertAtTopDefinedName).Delete(); } catch { }
@@ -682,25 +641,10 @@ public static partial class TableRowManager
         {
             // 2. Identify formula columns in 1 COM call across archetype row
             int archetypeRow = headerRow + 1;
+            var archFormulas = SheetMapperHelper.ReadArchetypeFormulas((object)ws, archetypeRow, startCol, colCount);
             var isFormulaCol = new bool[colCount + 1];
-            try
-            {
-                dynamic archRange = ws.Range[ws.Cells[archetypeRow, startCol], ws.Cells[archetypeRow, startCol + colCount - 1]];
-                object? rawFormulas = archRange.Formula;
-                if (rawFormulas is object[,] fMat)
-                {
-                    for (int c = 1; c <= colCount; c++)
-                    {
-                        string f = fMat[1, c]?.ToString() ?? string.Empty;
-                        isFormulaCol[c] = f.StartsWith("=");
-                    }
-                }
-                else if (rawFormulas is string singleF)
-                {
-                    isFormulaCol[1] = singleF.StartsWith("=");
-                }
-            }
-            catch { }
+            for (int c = 1; c <= colCount; c++)
+                isFormulaCol[c] = archFormulas[c].StartsWith("=");
 
             // 3. Bulk-read entire table body in 1 COM call
             object[,] dataGrid = TableMapper.GetRange2DValues(currentBody, curRowCount, colCount);
@@ -716,7 +660,7 @@ public static partial class TableRowManager
                 for (int c = 1; c <= colCount; c++)
                 {
                     if (isFormulaCol[c]) continue;
-                    string cleanVal = CleanCellText(dataGrid[r, c]);
+                    string cleanVal = SheetMapperHelper.CleanCellText(dataGrid[r, c]);
                     if (string.IsNullOrWhiteSpace(cleanVal) || cleanVal == "0" || cleanVal == "0.00" ||
                         cleanVal == "-" || cleanVal == "\u2014" || cleanVal.Equals("None", StringComparison.OrdinalIgnoreCase))
                     {
@@ -735,7 +679,7 @@ public static partial class TableRowManager
                     if (keyColumnIndices != null && !keyColumnIndices.Contains(c)) continue;
                     if (isFormulaCol[c]) continue; // Skip calculated columns
 
-                    string cleanVal = CleanCellText(dataGrid[r, c]);
+                    string cleanVal = SheetMapperHelper.CleanCellText(dataGrid[r, c]);
                     sigParts.Add(cleanVal);
                 }
 
@@ -756,13 +700,10 @@ public static partial class TableRowManager
             // 5. Delete duplicate rows from bottom up under protection bypass
             if (duplicateIndices.Count > 0)
             {
-                SheetProtections.ExecuteWithBypass((object)ws, new Action(() =>
+                foreach (int idx in duplicateIndices.OrderByDescending(x => x))
                 {
-                    foreach (int idx in duplicateIndices.OrderByDescending(x => x))
-                    {
-                        table.ListRows[idx].Delete();
-                    }
-                }));
+                    table.ListRows[idx].Delete();
+                }
             }
 
             return duplicateIndices.Count;
@@ -776,13 +717,4 @@ public static partial class TableRowManager
         }
     }
 
-    private static string CleanCellText(object? val)
-    {
-        if (val == null || SheetMapperHelper.IsComError(val)) return string.Empty;
-        if (val is double d && Math.Abs(d - Math.Round(d)) < 0.00001 && d < 1e15)
-            return ((long)Math.Round(d)).ToString(CultureInfo.InvariantCulture);
-        string s = val.ToString()?.Trim() ?? string.Empty;
-        if (s.StartsWith("#") || s == " ") return string.Empty;
-        return s;
-    }
 }

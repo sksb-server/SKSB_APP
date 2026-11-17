@@ -5,7 +5,6 @@ using System.Globalization;
 using System.Text;
 using ExcelDna.Integration;
 using SKSB_App.Core.Diagnostics;
-using SKSB_App.Core.WorkbookOpen.Sheet;
 
 public static class SyncEngine
 {
@@ -148,9 +147,9 @@ public static class SyncEngine
         {
             try { xlApp.EnableEvents = origEvents; } catch { }
 #if DEBUG
-            if (DebugDialog.DebugEnabled && !DebugDialog.SuppressForSession && executedCount > 0)
+            if (executedCount > 0)
             {
-                DebugDialog.ShowLog("Auto-Fill Sync Audit", debugAudit.ToString());
+                AppLogger.Info($"[Auto-Fill Sync Audit]\n{debugAudit}");
             }
 #endif
         }

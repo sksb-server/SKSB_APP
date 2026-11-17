@@ -3,34 +3,21 @@
 using System;
 using System.Collections.Generic;
 using System.Linq;
-using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.Integration.Database;
 using SKSB_App.Core.Types;
-using SKSB_App.Core.WorkbookOpen.Sheet;
 using SKSB_App.Core.WorkbookSave.SheetMapper;
-using SKSB_App.Core.WorkbookSave.Storage;
 
 internal static partial class SheetMapper
 {
-    private static (List<string> Errors, List<string> Warnings) ExtractAndPersistAuxiliaryTables(object wbObj)
+    /// <summary>
+    /// Pre-validation step: re-adds fuel companies still referenced by a fuel card onto the sheet and reports it.
+    /// Persistence to PostgreSQL / the offline snapshot happens once, in ServerSyncCommands.SaveVehiclesSilent.
+    /// </summary>
+    private static (List<string> Errors, List<string> Warnings) RestoreReferencedAuxiliaryRows(object wbObj)
     {
         var errors = new List<string>();
         var warnings = new List<string>();
         dynamic wb = wbObj;
-
-        List<Workshop> workshops = new();
-        dynamic? wsWorkshop = SheetMapperHelper.ResolveSheetSafely((object)wb, WorkshopAliases, "Workshops");
-        if (wsWorkshop != null)
-        {
-            workshops = TableMapper.ExtractFromTable<Workshop>((object)wsWorkshop, "WorkshopsTable");
-        }
-
-        List<InsuranceCompanyRecord> insuranceCompanies = new();
-        dynamic? wsIns = SheetMapperHelper.ResolveSheetSafely((object)wb, InsuranceAliases, "Insurances");
-        if (wsIns != null)
-        {
-            insuranceCompanies = TableMapper.ExtractFromTable<InsuranceCompanyRecord>((object)wsIns, "InsuranceCompaniesTable");
-        }
 
         List<FuelCardRecord> fuelCards = new();
         List<FuelCompanyNameRecord> fuelCompanyRecords = new();
@@ -77,27 +64,6 @@ internal static partial class SheetMapper
         if (restoredCompanies.Count > 0 && wsOdo != null)
         {
             SheetMapperHelper.SyncReferenceTable((object)wb, "FuelCompanyNamesTable", "", fuelCompanies);
-        }
-
-        // Persist Auxiliary Tables
-        try
-        {
-            OfflineSnapshot.Save(workshops, writeToDatabase: false);
-            OfflineSnapshot.Save(insuranceCompanies, writeToDatabase: false);
-            OfflineSnapshot.Save(fuelCards, writeToDatabase: false);
-            OfflineSnapshot.Save(fuelCompanyRecords, writeToDatabase: false);
-
-            ServerDispatcher.SaveAuxiliaryTables(
-                workshops,
-                insuranceCompanies,
-                fuelCards,
-                fuelCompanies
-            );
-        }
-        catch (Exception ex)
-        {
-            AppLogger.Error("Failed persisting auxiliary tables to database", ex);
-            errors.Add($"Failed saving auxiliary tables to database: {ex.Message}");
         }
 
         return (errors, warnings);

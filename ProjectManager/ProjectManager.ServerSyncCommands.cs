@@ -59,54 +59,22 @@ internal static class ServerSyncCommands
     // =========================================================================
     // 2. FETCH PROJECTS WITH OFFLINE FALLBACK
     // =========================================================================
-    internal static List<ProjectRecord> FetchProjectRecords()
-    {
-        using var _ = AppLogger.Scope("ProjectManager.FetchProjectRecords");
-
-        try
+    internal static List<ProjectRecord> FetchProjectRecords() =>
+        ServerSyncHelper.FetchAuthoritativeList(Module, "ProjectRecord (project_master)", db =>
         {
-            var db = new PostgreSqlService();
-
             var rawProjects = db.Query<dynamic>("SELECT * FROM project_master ORDER BY project_id;").ToList();
             AppLogger.Info($"[PostgreSQL Query] project_master returned {rawProjects.Count} record(s).");
-
             var projects = new List<ProjectRecord>();
-            foreach (var p in rawProjects)
-            {
-                projects.Add(BuildProject(p));
-            }
-
-            if (projects.Count > 0)
-            {
-                try { OfflineSnapshot.Save(projects, writeToDatabase: false); } catch { }
-                OfflineSnapshot.LogDataSource(Module, "ProjectRecord (project_master)", "SERVER", $"{projects.Count} project(s)");
-                return projects;
-            }
-
-            // Server reachable but empty: the server is authoritative, so reset the local cache too.
-            try { OfflineSnapshot.Save(new List<ProjectRecord>(), writeToDatabase: false); } catch { }
-            OfflineSnapshot.LogDataSource(Module, "ProjectRecord", "SERVER", "server reachable but project_master is empty; local cache reset");
-            return new List<ProjectRecord>();
-        }
-        catch (Exception ex)
-        {
-            AppLogger.Error("FetchProjectRecords server query failed", ex);
-            OfflineSnapshot.LogDataSource(Module, "ProjectRecord", "OFFLINE CACHE", $"server query failed: {ex.GetType().Name}: {ex.Message}");
-        }
-
-        var fallback = OfflineSnapshot.Load<List<ProjectRecord>>() ?? new List<ProjectRecord>();
-        AppLogger.Warn($"[Server Offline Fallback] Loaded {fallback.Count} project records from local offline snapshot.");
-        return fallback;
-    }
+            foreach (var p in rawProjects) projects.Add(BuildProject(p));
+            return projects;
+        });
 
     private static ProjectRecord BuildProject(dynamic p)
     {
-        static DateOnly Date(object? v, DateOnly fallback) => v != null ? DateOnly.FromDateTime(Convert.ToDateTime(v)) : fallback;
-        static decimal Dec(object? v) => v != null ? Convert.ToDecimal(v) : 0m;
-        static decimal? DecN(object? v) => v != null ? Convert.ToDecimal(v) : null;
-        // DapperRow is an IDictionary: reading a column that does not exist yet (database not migrated) yields null.
-        static object? Col(object row, string name) =>
-            row is IDictionary<string, object?> d && d.TryGetValue(name, out var v) ? v : null;
+        static DateOnly Date(object? v, DateOnly fallback) => ServerSyncHelper.DateOrDefault(v, fallback);
+        static decimal Dec(object? v) => ServerSyncHelper.Dec(v);
+        static decimal? DecN(object? v) => ServerSyncHelper.DecN(v);
+        static object? Col(object row, string name) => ServerSyncHelper.Col(row, name);
         static string Str(object? v) => v?.ToString() ?? string.Empty;
 
         Enum.TryParse<ProjectCategory>(Str(p.category), true, out var category);
@@ -287,27 +255,10 @@ internal static class ServerSyncCommands
     // =========================================================================
     // 3. COMPANIES
     // =========================================================================
-    internal static List<CompanyRecord> FetchCompanies()
-    {
-        try
-        {
-            var db = new PostgreSqlService();
-            var list = db.Query<CompanyRecord>(@"
-                SELECT company_id AS CompanyID,
-                       legal_company_name AS LegalCompanyName,
-                       short_company_name AS ShortCompanyName
-                FROM company_master
-                ORDER BY company_id;").ToList();
-
-            try { OfflineSnapshot.Save(list, writeToDatabase: false); } catch { }
-            OfflineSnapshot.LogDataSource(Module, "CompaniesTable", "SERVER", $"{list.Count} row(s)");
-            return list;
-        }
-        catch (Exception ex)
-        {
-            AppLogger.Error($"[{Module}] company_master server query failed", ex);
-            OfflineSnapshot.LogDataSource(Module, "CompaniesTable", "OFFLINE CACHE", $"server query failed: {ex.GetType().Name}: {ex.Message}");
-            return OfflineSnapshot.Load<List<CompanyRecord>>() ?? new List<CompanyRecord>();
-        }
-    }
+    internal static List<CompanyRecord> FetchCompanies() => ServerSyncHelper.FetchAuxiliaryTable<CompanyRecord>(Module, "CompaniesTable", @"
+        SELECT company_id AS CompanyID,
+               legal_company_name AS LegalCompanyName,
+               short_company_name AS ShortCompanyName
+        FROM company_master
+        ORDER BY company_id;");
 }

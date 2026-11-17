@@ -23,41 +23,8 @@ public static class ServerDispatcher
             case IEnumerable<StaffRecord> staffBatch:
                 PersistStaff(staffBatch.ToList(), isFullBatch: true);
                 break;
-            case StaffRecord singleStaff:
-                PersistStaff(new[] { singleStaff }, isFullBatch: false);
-                break;
-
-            // Project Manager
-            case IEnumerable<ProjectRecord> projectBatch:
-                PersistProjects(projectBatch.ToList(), isFullBatch: true);
-                break;
-            case ProjectRecord singleProject:
-                PersistProjects(new[] { singleProject }, isFullBatch: false);
-                break;
-
-            // Company Master
-            case IEnumerable<CompanyRecord> companyBatch:
-                PersistCompanies(companyBatch.ToList(), isFullBatch: true);
-                break;
-            case CompanyRecord singleCompany:
-                PersistCompanies(new[] { singleCompany }, isFullBatch: false);
-                break;
-
-            // Vehicle Manager
-            case IEnumerable<VehicleRecord> vehicleBatch:
-                PersistVehicles(vehicleBatch.ToList(), isFullBatch: true);
-                break;
-            case VehicleRecord singleVehicle:
-                PersistVehicles(new[] { singleVehicle }, isFullBatch: false);
-                break;
 
             // Standalone Child Entity Collections
-            case IEnumerable<VehicleLicense> vLicenses:
-                PersistStaffVehicleLicenses(vLicenses);
-                break;
-            case IEnumerable<SkillLicense> sLicenses:
-                PersistStaffSkillLicenses(sLicenses);
-                break;
             case IEnumerable<SkillLicenseType> sTypes:
                 PersistSkillLicenseTypes(sTypes);
                 break;
@@ -528,7 +495,7 @@ ALTER TABLE vehicle_maintenance ADD COLUMN IF NOT EXISTS workshop_address TEXT D
         sb.AppendLine($"Committed Vehicle Profiles: {validVehicles.Count}");
         sb.AppendLine($"InsuranceClaims: {insuranceClaimRecords.Count}");
         sb.AppendLine($"Timestamp: {DateTime.Now:yyyy-MM-dd HH:mm:ss}");
-        DebugDialog.ShowLog("[DEBUG] PostgreSQL Upload - Vehicle Summary", sb.ToString());
+        AppLogger.Info(sb.ToString());
 #endif
     }
 
@@ -538,20 +505,15 @@ ALTER TABLE vehicle_maintenance ADD COLUMN IF NOT EXISTS workshop_address TEXT D
         IEnumerable<FuelCardRecord> fuelCards,
         IEnumerable<string> fuelCompanies)
     {
-        var compList = fuelCompanies?
-            .Where(n => !string.IsNullOrWhiteSpace(n))
-            .Select(n => n.Trim())
-            .Distinct(StringComparer.OrdinalIgnoreCase)
-            .ToList() ?? new List<string>();
-
-        var workshopList = workshops?.ToList() ?? new List<Workshop>();
-        var insuranceList = insuranceCompanies?.ToList() ?? new List<InsuranceCompanyRecord>();
-        var cardList = fuelCards?.ToList() ?? new List<FuelCardRecord>();
         var companyNames = fuelCompanies?
             .Where(n => !string.IsNullOrWhiteSpace(n))
             .Select(n => n.Trim())
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray() ?? Array.Empty<string>();
+
+        var workshopList = workshops?.ToList() ?? new List<Workshop>();
+        var insuranceList = insuranceCompanies?.ToList() ?? new List<InsuranceCompanyRecord>();
+        var cardList = fuelCards?.ToList() ?? new List<FuelCardRecord>();
 
         Db.ExecuteInTransaction((conn, trans) =>
         {
@@ -585,7 +547,7 @@ ALTER TABLE vehicle_maintenance ADD COLUMN IF NOT EXISTS workshop_address TEXT D
             }
 
             // Fuel Companies Lookup - Sync
-            if (compList.Count > 0)
+            if (companyNames.Length > 0)
             {
                 // A. Delete only companies removed from Excel that are NO LONGER referenced by any fuel card
                 const string sqlReconcile = @"

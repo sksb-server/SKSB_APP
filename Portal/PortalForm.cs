@@ -10,7 +10,7 @@ using System.Text.Json;
 using System.Windows.Forms;
 using SKSB_App.Core.Bootstrap.Storage;
 
-public partial class PortalForm : Form
+public class PortalForm : Form
 {
     private readonly string _currentVersion;
 

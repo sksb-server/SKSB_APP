@@ -4,7 +4,6 @@ using SKSB_App.Core.Types;
 using SKSB_App.Core.WorkbookSave.SheetMapper;
 using System;
 using System.Collections.Generic;
-using System.Reflection;
 
 internal static partial class SheetMapper
 {
@@ -60,10 +59,10 @@ internal static partial class SheetMapper
             Child<OdometerLog>(OdometerAliases, "Odometers", "OdometersTable", v => v.OdometerLogs, o => o.VehiclePlate, (o, plate) => o.VehiclePlate = plate)
         },
 
-        // Workshops / insurance companies / fuel cards are extracted and persisted before rule validation runs.
+        // Fuel companies still referenced by a fuel card are restored onto the sheet before rule validation runs.
         PreValidationHook = (wb, masters, errors, warnings) =>
         {
-            var (auxErrors, auxWarnings) = ExtractAndPersistAuxiliaryTables((object)wb);
+            var (auxErrors, auxWarnings) = RestoreReferencedAuxiliaryRows((object)wb);
             errors.AddRange(auxErrors);
             warnings.AddRange(auxWarnings);
         },
@@ -143,70 +142,10 @@ internal static partial class SheetMapper
     internal static (List<VehicleRecord>? Data, List<string> Errors, List<string> Warnings) ExtractVehicleRecordsWithDiagnostics()
         => WorkbookMapper.ExtractMasterAndChildrenWithDiagnostics(Mapping);
 
-    internal static List<VehicleRecord> ExtractVehicleRecords()
-    {
-        var (data, _, _) = ExtractVehicleRecordsWithDiagnostics();
-        return data ?? new List<VehicleRecord>();
-    }
-
     internal static void PopulateWorksheet(List<VehicleRecord> records)
         => WorkbookMapper.PopulateMasterAndChildren(Mapping, records);
 
     // =========================================================================
     // 3. SHARED UTILITIES
     // =========================================================================
-    internal static T GetProp<T>(object target, params string[] propNames)
-    {
-        if (target == null) return default!;
-        Type type = target.GetType();
-        foreach (var name in propNames)
-        {
-            var p = type.GetProperty(name, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
-            if (p != null)
-            {
-                object? val = p.GetValue(target);
-                if (val != null)
-                {
-                    if (val is T directVal) return directVal;
-                    Type tType = Nullable.GetUnderlyingType(typeof(T)) ?? typeof(T);
-                    if (tType == typeof(DateOnly) && val is DateTime dtVal)
-                        return (T)(object)DateOnly.FromDateTime(dtVal);
-                    try { return (T)Convert.ChangeType(val, tType); }
-                    catch { }
-                }
-            }
-        }
-        return default!;
-    }
-
-    internal static void SetProp(object target, string propName, object? value)
-    {
-        if (target == null || value == null) return;
-        var p = target.GetType().GetProperty(propName, BindingFlags.Public | BindingFlags.Instance | BindingFlags.IgnoreCase);
-        if (p != null && p.CanWrite)
-        {
-            try
-            {
-                Type uType = Nullable.GetUnderlyingType(p.PropertyType) ?? p.PropertyType;
-                if (uType == typeof(DateOnly) && value is DateTime dt)
-                    p.SetValue(target, DateOnly.FromDateTime(dt));
-                else if (uType == typeof(DateOnly) && value is DateOnly dOnly)
-                    p.SetValue(target, dOnly);
-                else if (uType == typeof(TimeOnly) && value is string st && TimeOnly.TryParse(st, out var to))
-                    p.SetValue(target, to);
-                else if (uType.IsEnum)
-                {
-                    if (Enum.TryParse(uType, value.ToString(), true, out var ev))
-                        p.SetValue(target, ev);
-                }
-                else if (uType.IsInstanceOfType(value))
-                    p.SetValue(target, value);
-                else
-                {
-                    p.SetValue(target, Convert.ChangeType(value, uType));
-                }
-            }
-            catch { }
-        }
-    }
 }

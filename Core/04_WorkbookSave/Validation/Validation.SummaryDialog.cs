@@ -1,6 +1,5 @@
 ﻿namespace SKSB_App.Core.WorkbookSave.Validation;
 
-using System;
 using System.Collections.Generic;
 using System.Drawing;
 using System.Drawing.Drawing2D;
@@ -14,7 +13,7 @@ public enum ValidationDialogAction
     DebugQuitAnyway
 }
 
-public partial class SummaryDialog : Form
+public class SummaryDialog : Form
 {
     public ValidationDialogAction Action { get; private set; } = ValidationDialogAction.Cancel;
 
@@ -128,7 +127,7 @@ public partial class SummaryDialog : Form
                 Margin = new Padding(0, 0, 8, 0)
             };
             btnViewErrors.FlatAppearance.BorderColor = Color.FromArgb(252, 165, 165);
-            btnViewErrors.Click += (_, _) => ShowDetailsModal("Critical Validation Errors", errors, isError: true);
+            btnViewErrors.Click += (_, _) => ShowDetailsModal("Critical Validation Errors", errors);
             flowDrillDown.Controls.Add(btnViewErrors);
         }
 
@@ -146,7 +145,7 @@ public partial class SummaryDialog : Form
                 Margin = new Padding(0, 0, 8, 0)
             };
             btnViewWarnings.FlatAppearance.BorderColor = Color.FromArgb(253, 224, 71);
-            btnViewWarnings.Click += (_, _) => ShowDetailsModal("Validation Advisories & Warnings", warnings, isError: false);
+            btnViewWarnings.Click += (_, _) => ShowDetailsModal("Validation Advisories & Warnings", warnings);
             flowDrillDown.Controls.Add(btnViewWarnings);
         }
 
@@ -214,7 +213,7 @@ public partial class SummaryDialog : Form
         Controls.Add(layout);
     }
 
-    private void ShowDetailsModal(string title, List<string> items, bool isError)
+    private void ShowDetailsModal(string title, List<string> items)
     {
         using var detailsForm = new Form
         {

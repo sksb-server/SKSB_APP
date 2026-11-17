@@ -12,10 +12,8 @@ using System.Collections.Generic;
 public interface ISaveContract
 {
     string ModuleName { get; }
-    string WindowCaption { get; }
     string[] MasterSheetAliases { get; }
     string MasterTableName { get; }
-    Type[] EnumsToSync { get; }
     Action<bool>? SyncLookups { get; }
 
     /// <summary>Runs the full validate + persist pipeline (<see cref="SaveEntry.Save{T}"/>).</summary>
@@ -40,7 +38,6 @@ public class SaveContract<T> : ISaveContract
     public string[] MasterSheetAliases { get; set; } = Array.Empty<string>();
     public string MasterTableName { get; set; } = string.Empty;
     public Type[] EnumsToSync { get; set; } = Array.Empty<Type>();
-    public Action<dynamic>? OnAfterDelayedLoad { get; set; }
 
     // =========================================================================
     // 2. SAVE / LOAD PIPELINE DELEGATES

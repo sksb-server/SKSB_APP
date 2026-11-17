@@ -204,7 +204,6 @@ public static class RulesAuditImporter
                     {
                         string colLetter = GetField(cells, tableColMap, "Col", 1);
                         int explicitRow = int.TryParse(GetField(cells, tableColMap, "Row", 2), out int rNum) ? rNum : archetypeRow;
-                        string styleName = GetField(cells, tableColMap, "Style", 4);
                         string numFormat = GetField(cells, tableColMap, "NumberFormat", 5);
                         string engineType = GetField(cells, tableColMap, "EngineType", 6);
                         string inCellFormula = GetField(cells, tableColMap, "InCellFormula", 7);
@@ -296,7 +295,7 @@ public static class RulesAuditImporter
 
                             dynamic targetRange = currentWs.Range[appliesTo];
                             int xlCfType = ruleType.Equals("CellValue", StringComparison.OrdinalIgnoreCase) ? 1 : 2;
-                            dynamic newRule = null;
+                            dynamic? newRule = null;
 
                             if (xlCfType == 2)
                             {
@@ -336,7 +335,7 @@ public static class RulesAuditImporter
 
             diag.AppendLine();
             diag.AppendLine($"Summary: Parameter Cells={appliedHeaderCells}, Column Rules={appliedRulesCount}, CF Rules={appliedCfCount}");
-            DebugDialog.ShowLog("Import Diagnostics Log", diag.ToString());
+            AppLogger.Info($"[Import Diagnostics Log]\n{diag}");
 
             MessageBox.Show(
                 $"Import completed successfully from:\n{Path.GetFileName(selectedFilePath)}\n\n" +

@@ -33,7 +33,6 @@ public sealed class PropertyRuleDescriptor
 
     public double RoundDownStep { get; init; }
 
-    public ColumnFormatAttribute? FormatRule { get; init; }
     public ColumnFormatKind EffectiveFormatKind { get; init; }
     public ZeroBehavior EffectiveZeroBehavior { get; init; }
     public string? ExcelNumberFormat { get; init; }
@@ -218,7 +217,6 @@ public static partial class RuleRegistry
                 StateGuards = guardAttrs,
                 DateMustBeGreaterThanHeader = dateGreaterAttr?.ReferenceHeader,
                 RoundDownStep = ruleAttr?.RoundDownStep ?? 0.0,
-                FormatRule = formatAttr,
                 EffectiveFormatKind = fmt.Kind,
                 EffectiveZeroBehavior = fmt.Zero,
                 ExcelNumberFormat = fmt.ExcelNumberFormat,
@@ -229,19 +227,6 @@ public static partial class RuleRegistry
 
             colDict[normHeader] = descriptor;
         }
-    }
-
-    public static IReadOnlyList<PropertyRuleDescriptor> GetTableRules(string tableName)
-    {
-        EnsureInitialized();
-        if (string.IsNullOrWhiteSpace(tableName)) return Array.Empty<PropertyRuleDescriptor>();
-
-        if (TryResolveTableDictionary(tableName, out var colDict))
-        {
-            return colDict.Values.ToList();
-        }
-
-        return Array.Empty<PropertyRuleDescriptor>();
     }
 
     public static PropertyRuleDescriptor? GetRule(string tableName, string columnHeader)
@@ -279,12 +264,6 @@ public static partial class RuleRegistry
         }
     }
 
-    public static bool HasDropdown(string tableName, string columnHeader)
-    {
-        var rule = GetRule(tableName, columnHeader);
-        return rule != null && rule.HasDropdown;
-    }
-
     /// <summary>
     /// Auto-locks a C#-calculated column without sheet protection: a custom '=FALSE' Data Validation (Stop alert)
     /// blocks interactive typing while C# COM writes (.Value2) pass through. Paste / Delete are caught by the
@@ -292,16 +271,16 @@ public static partial class RuleRegistry
     /// </summary>
     internal static void ApplyCalculatedColumnLock(dynamic targetRange, PropertyRuleDescriptor? rule)
     {
-        if (targetRange == null || rule == null || !rule.IsStrictlyCalculated) return;
+        if (targetRange == null || rule == null || !rule!.IsStrictlyCalculated) return;
         try
         {
-            try { targetRange.Validation.Delete(); } catch { }
+            try { targetRange!.Validation.Delete(); } catch { }
 
             // Type 7 = xlValidateCustom, AlertStyle 1 = xlValidAlertStop, Operator 1 = xlBetween
-            targetRange.Validation.Add(7, 1, 1, "=FALSE");
+            targetRange!.Validation.Add(7, 1, 1, "=FALSE");
             targetRange.Validation.IgnoreBlank = false;
 
-            string formulaText = rule.DisplayFormula ?? "Calculated automatically by SKSB.";
+            string formulaText = rule!.DisplayFormula ?? "Calculated automatically by SKSB.";
             if (formulaText.Length > 220) formulaText = formulaText.Substring(0, 220);
 
             targetRange.Validation.InputTitle = "Formula Evaluated Cell (Locked)";
@@ -353,97 +332,94 @@ public static partial class RuleRegistry
                 try { tableCount = (int)ws.ListObjects.Count; } catch { }
                 if (tableCount == 0) continue;
 
-                SheetProtections.ExecuteWithBypass((object)ws, new Action(() =>
+                for (int t = 1; t <= tableCount; t++)
                 {
-                    for (int t = 1; t <= tableCount; t++)
+                    dynamic table = ws.ListObjects[t];
+                    string tableName = table.Name?.ToString() ?? string.Empty;
+
+                    int headerRow = (int)table.HeaderRowRange.Row;
+                    int startCol = (int)table.HeaderRowRange.Column;
+                    int colCount = (int)table.ListColumns.Count;
+                    dynamic? bodyRange = table.DataBodyRange;
+
+                    for (int c = 1; c <= colCount; c++)
                     {
-                        dynamic table = ws.ListObjects[t];
-                        string tableName = table.Name?.ToString() ?? string.Empty;
+                        int absCol = startCol + c - 1;
+                        string headerText = ws.Cells[headerRow, absCol].Value2?.ToString()?.Trim() ?? string.Empty;
+                        var rule = GetRule(tableName, headerText);
+                        if (rule == null) continue;
 
-                        int headerRow = (int)table.HeaderRowRange.Row;
-                        int startCol = (int)table.HeaderRowRange.Column;
-                        int colCount = (int)table.ListColumns.Count;
-                        dynamic? bodyRange = table.DataBodyRange;
+                        dynamic archCell = ws.Cells[headerRow + 1, absCol];
+                        string archFormula = archCell.Formula?.ToString() ?? string.Empty;
 
-                        for (int c = 1; c <= colCount; c++)
+                        if (rule.IsStrictlyCalculated)
                         {
-                            int absCol = startCol + c - 1;
-                            string headerText = ws.Cells[headerRow, absCol].Value2?.ToString()?.Trim() ?? string.Empty;
-                            var rule = GetRule(tableName, headerText);
-                            if (rule == null) continue;
-
-                            dynamic archCell = ws.Cells[headerRow + 1, absCol];
-                            string archFormula = archCell.Formula?.ToString() ?? string.Empty;
-
-                            if (rule.IsStrictlyCalculated)
+                            try
                             {
-                                try
+                                dynamic calcRange = (bodyRange != null) ? table.ListColumns[c].DataBodyRange : archCell;
+                                if (archFormula.StartsWith("="))
                                 {
-                                    dynamic calcRange = (bodyRange != null) ? table.ListColumns[c].DataBodyRange : archCell;
-                                    if (archFormula.StartsWith("="))
-                                    {
-                                        // Strip the legacy Excel formula; C# owns this column now.
-                                        object? existingVal = calcRange.Value2;
-                                        calcRange.Value2 = existingVal;
-                                    }
-                                    ApplyColumnNumberFormat(table, c, archCell, rule);
-                                    ApplyCalculatedColumnLock(calcRange, rule);
+                                    // Strip the legacy Excel formula; C# owns this column now.
+                                    object? existingVal = calcRange.Value2;
+                                    calcRange.Value2 = existingVal;
                                 }
-                                catch { }
-                                continue;
+                                ApplyColumnNumberFormat(table, c, archCell, rule);
+                                ApplyCalculatedColumnLock(calcRange, rule);
                             }
-
-                            if (!rule.IsStrictlyCalculated && rule.HasCSharpFormula && archFormula.StartsWith("="))
-                            {
-                                // Soft (DefaultOnly) C# formula: drop the legacy Excel formula but keep the values.
-                                try
-                                {
-                                    dynamic softRange = (bodyRange != null) ? table.ListColumns[c].DataBodyRange : archCell;
-                                    object? softVal = softRange.Value2;
-                                    softRange.Value2 = softVal;
-                                    archFormula = string.Empty;
-                                }
-                                catch { }
-                            }
-
-                            if (archFormula.StartsWith("=")) continue;
-
-                            // Inside RuleRegistry.ApplyDropdownStylesToWorkbook:
-                            if (rule.HasDropdown)
-                            {
-                                try
-                                {
-                                    // Pre-read the template's original format & style on the archetype cell
-                                    string origStyle = archCell.Style?.Name?.ToString() ?? string.Empty;
-                                    string origFmt = archCell.NumberFormat?.ToString() ?? string.Empty;
-                                    dynamic? origFmtLocal = null;
-                                    try { origFmtLocal = archCell.NumberFormatLocal; } catch { }
-
-                                    dynamic targetRange = (bodyRange != null) ? table.ListColumns[c].DataBodyRange : archCell;
-                                    if (targetRange != null)
-                                    {
-                                        // Only set DropDown style if the cell doesn't already have a custom unlocked style
-                                        if (string.IsNullOrEmpty(origStyle) || origStyle.Equals("Normal", StringComparison.OrdinalIgnoreCase))
-                                        {
-                                            targetRange.Style = Commands.DropDownStyleName;
-                                        }
-                                        try { targetRange.Validation.Delete(); } catch { }
-
-                                        // Restore the template's cell-level NumberFormat (e.g. Date format) if the style reset it
-                                        if (!string.IsNullOrWhiteSpace(origFmt) && !origFmt.Equals("General", StringComparison.OrdinalIgnoreCase))
-                                        {
-                                            try { targetRange.NumberFormat = origFmt; } catch { }
-                                            try { if (origFmtLocal != null) targetRange.NumberFormatLocal = origFmtLocal; } catch { }
-                                        }
-                                    }
-                                }
-                                catch { }
-                            }
-
-                            ApplyColumnNumberFormat(table, c, archCell, rule);
+                            catch { }
+                            continue;
                         }
+
+                        if (!rule.IsStrictlyCalculated && rule.HasCSharpFormula && archFormula.StartsWith("="))
+                        {
+                            // Soft (DefaultOnly) C# formula: drop the legacy Excel formula but keep the values.
+                            try
+                            {
+                                dynamic softRange = (bodyRange != null) ? table.ListColumns[c].DataBodyRange : archCell;
+                                object? softVal = softRange.Value2;
+                                softRange.Value2 = softVal;
+                                archFormula = string.Empty;
+                            }
+                            catch { }
+                        }
+
+                        if (archFormula.StartsWith("=")) continue;
+
+                        // Inside RuleRegistry.ApplyDropdownStylesToWorkbook:
+                        if (rule.HasDropdown)
+                        {
+                            try
+                            {
+                                // Pre-read the template's original format & style on the archetype cell
+                                string origStyle = archCell.Style?.Name?.ToString() ?? string.Empty;
+                                string origFmt = archCell.NumberFormat?.ToString() ?? string.Empty;
+                                dynamic? origFmtLocal = null;
+                                try { origFmtLocal = archCell.NumberFormatLocal; } catch { }
+
+                                dynamic targetRange = (bodyRange != null) ? table.ListColumns[c].DataBodyRange : archCell;
+                                if (targetRange != null)
+                                {
+                                    // Only set DropDown style if the cell doesn't already have a custom unlocked style
+                                    if (string.IsNullOrEmpty(origStyle) || origStyle.Equals("Normal", StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        targetRange.Style = Commands.DropDownStyleName;
+                                    }
+                                    try { targetRange.Validation.Delete(); } catch { }
+
+                                    // Restore the template's cell-level NumberFormat (e.g. Date format) if the style reset it
+                                    if (!string.IsNullOrWhiteSpace(origFmt) && !origFmt.Equals("General", StringComparison.OrdinalIgnoreCase))
+                                    {
+                                        try { targetRange.NumberFormat = origFmt; } catch { }
+                                        try { if (origFmtLocal != null) targetRange.NumberFormatLocal = origFmtLocal; } catch { }
+                                    }
+                                }
+                            }
+                            catch { }
+                        }
+
+                        ApplyColumnNumberFormat(table, c, archCell, rule);
                     }
-                }));
+                }
 
             }
 

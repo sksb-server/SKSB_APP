@@ -25,7 +25,7 @@ public class ImportSummaryReport
     public List<ImportSkippedRecord> SkippedErrors { get; init; } = new();
 }
 
-public partial class ImportResultDialog : Form
+public class ImportResultDialog : Form
 {
     private readonly ImportSummaryReport _report;
 

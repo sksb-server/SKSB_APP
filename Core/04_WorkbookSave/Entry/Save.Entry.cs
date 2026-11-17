@@ -1,5 +1,6 @@
 ﻿namespace SKSB_App.Core.WorkbookSave.Entry;
 
+using SKSB_App.Core.Diagnostics;
 using System;
 using System.Windows.Forms;
 using ExcelDna.Integration;
@@ -34,44 +35,6 @@ public static class SaveEntry
                         return;
                     }
                 }
-#if DEBUG
-                using var debugPrompt = new ExitConflictDialog(
-                    contract.ModuleName,
-                    string.Empty,
-                    allowSaveOffline: true,
-                    isClosing: false,
-                    isDebugPrompt: true
-                );
-                debugPrompt.ShowDialog();
-                switch (debugPrompt.Resolution)
-                {
-                    case ExitResolution.Retry:
-                        var (dbSuccess, dbErr) = contract.SaveToServer(data!);
-                        if (dbSuccess)
-                        {
-                            OfflineSnapshot.ClearPendingSnapshot<T>();
-                            contract.PopulateWorksheet?.Invoke(data!);
-                            try { ((dynamic)ExcelDnaUtil.Application).ActiveWorkbook.Saved = true; } catch { }
-                            SaveNotificationDialog.ShowSuccess(contract.ModuleName, "Debug: Data committed to PostgreSQL server successfully.");
-                            return;
-                        }
-                        else
-                        {
-                            MessageBox.Show($"Server Save Failed:\n\n{dbErr}", "Debug Server Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                            continue;
-                        }
-                    case ExitResolution.SaveLocallyAndQuit:
-                        OfflineSnapshot.SaveOfflineSnapshot(data);
-                        contract.PopulateWorksheet?.Invoke(data!);
-                        try { ((dynamic)ExcelDnaUtil.Application).ActiveWorkbook.Saved = true; } catch { }
-                        SaveNotificationDialog.ShowOffline(contract.ModuleName, "Debug: Records stashed to offline JSON storage.");
-                        return;
-                    case ExitResolution.QuitAnyway:
-                    case ExitResolution.Cancel:
-                    default:
-                        return;
-                }
-#else
                 if (data == null || contract.IsDatasetEmpty(data))
                 {
                     SaveNotificationDialog.ShowSuccess(contract.ModuleName, "The worksheet contains no records to save.");
@@ -81,6 +44,7 @@ public static class SaveEntry
                 var (success, dbErrRelease) = contract.SaveToServer(data);
                 if (success)
                 {
+                    AppLogger.Info($"[{contract.ModuleName}] Save committed to PostgreSQL.");
                     OfflineSnapshot.ClearPendingSnapshot<T>();
                     contract.PopulateWorksheet?.Invoke(data);
                     try { ((dynamic)ExcelDnaUtil.Application).ActiveWorkbook.Saved = true; } catch { }
@@ -91,9 +55,7 @@ public static class SaveEntry
                 using var conflictDialog = new ExitConflictDialog(
                     contract.ModuleName,
                     string.IsNullOrWhiteSpace(dbErrRelease) ? "Could not establish a connection to PostgreSQL." : dbErrRelease,
-                    allowSaveOffline: true,
-                    isClosing: false,
-                    isDebugPrompt: false
+                    isClosing: false
                 );
                 conflictDialog.ShowDialog();
                 switch (conflictDialog.Resolution)
@@ -110,7 +72,6 @@ public static class SaveEntry
                     default:
                         return;
                 }
-#endif
             }
         }
         finally
@@ -182,59 +143,6 @@ public static class SaveEntry
                     }
                 }
 
-#if DEBUG
-                using var closePrompt = new ExitConflictDialog(
-                    contract.ModuleName,
-                    string.Empty,
-                    allowSaveOffline: true,
-                    isClosing: true,
-                    isDebugPrompt: true
-                );
-                closePrompt.ShowDialog();
-                switch (closePrompt.Resolution)
-                {
-                    case ExitResolution.Retry:
-                        try { xlApp.ScreenUpdating = false; } catch { }
-                        try { xlApp.EnableEvents = false; } catch { }
-                        var (dbSuccess, dbErr) = contract.SaveToServer(data!);
-                        if (dbSuccess)
-                        {
-                            OfflineSnapshot.ClearPendingSnapshot<T>();
-                            isExiting = true;
-                            unEventHooks();
-                            wb.Saved = true;
-                            cancel = false;
-                            QuitExcelIfLastWorkbook(wb);
-                            return;
-                        }
-                        else
-                        {
-                            try { xlApp.ScreenUpdating = true; } catch { }
-                            try { xlApp.EnableEvents = true; } catch { }
-                            MessageBox.Show($"Server Save Failed:\n\n{dbErr}", "Debug Server Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                            continue;
-                        }
-                    case ExitResolution.SaveLocallyAndQuit:
-                        OfflineSnapshot.SaveOfflineSnapshot(data);
-                        isExiting = true;
-                        unEventHooks();
-                        wb.Saved = true;
-                        cancel = false;
-                        QuitExcelIfLastWorkbook(wb);
-                        return;
-                    case ExitResolution.QuitAnyway:
-                        isExiting = true;
-                        unEventHooks();
-                        wb.Saved = true;
-                        cancel = false;
-                        QuitExcelIfLastWorkbook(wb);
-                        return;
-                    case ExitResolution.Cancel:
-                    default:
-                        cancel = true;
-                        return;
-                }
-#else
                 if (data == null || contract.IsDatasetEmpty(data))
                 {
                     isExiting = true;
@@ -266,9 +174,7 @@ public static class SaveEntry
                 using var dialog = new ExitConflictDialog(
                     contract.ModuleName,
                     string.IsNullOrWhiteSpace(dbError) ? "Could not persist records to the PostgreSQL server." : dbError,
-                    allowSaveOffline: true,
-                    isClosing: true,
-                    isDebugPrompt: false
+                    isClosing: true
                 );
                 dialog.ShowDialog();
 
@@ -289,12 +195,12 @@ public static class SaveEntry
                         cancel = true;
                         return;
                 }
-#endif
             }
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Error encountered during exit validation:\n\n{ex.Message}\n\n{ex.StackTrace}",
+            AppLogger.Error("Error encountered during exit validation", ex);
+            MessageBox.Show($"Error encountered during exit validation:\n\n{ex.Message}\n\nDetails were written to the runtime log.",
                 "Exit Validation Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             cancel = true;
         }
@@ -303,7 +209,7 @@ public static class SaveEntry
             // Restore active sheet if user cancelled out of the exit prompt
             if (activeSheetBefore != null && !isExiting && cancel)
             {
-                try { activeSheetBefore.Activate(); } catch { }
+                try { activeSheetBefore!.Activate(); } catch { }
             }
             try { xlApp.ScreenUpdating = origUpdating; } catch { }
             try { xlApp.EnableEvents = origEvents; } catch { }
@@ -320,9 +226,9 @@ public static class SaveEntry
             {
                 try
                 {
-                    if (app != null && (int)app.Workbooks.Count <= 1)
+                    if (app != null && (int)app!.Workbooks.Count <= 1)
                     {
-                        app.Quit();
+                        app!.Quit();
                     }
                 }
                 catch { }

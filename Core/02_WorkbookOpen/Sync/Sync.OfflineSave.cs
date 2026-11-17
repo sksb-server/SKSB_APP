@@ -24,9 +24,9 @@ public static class OfflineSave
             }
 
             dynamic xlApp = ExcelDnaUtil.Application;
-            dynamic wb = xlApp?.ActiveWorkbook;
+            dynamic? wb = xlApp.ActiveWorkbook;
             dynamic? activeSheetBefore = null;
-            try { activeSheetBefore = xlApp?.ActiveSheet; } catch { }
+            try { activeSheetBefore = xlApp.ActiveSheet; } catch { }
 
             AppLogger.Info("Calling contract.SyncLookups...");
             contract.SyncLookups?.Invoke(false);
@@ -68,39 +68,6 @@ public static class OfflineSave
                     AppLogger.Info($"LocalPendingUtc={localOfflineUtc:yyyy-MM-dd HH:mm:ss}, ServerLatestUtc={serverLastUpdateUtc:yyyy-MM-dd HH:mm:ss}");
 
                     bool canCommit = true;
-#if DEBUG
-                    var serverDataDebug = contract.FetchFromServer != null ? contract.FetchFromServer() : default;
-                    string diffMessage = contract.FormatConflictSummary != null && serverDataDebug != null
-                        ? contract.FormatConflictSummary(pendingData!, serverDataDebug)
-                        : string.Empty;
-
-                    string promptMessage =
-                        $"[DEBUG MODE] PENDING OFFLINE SAVE DETECTED\n" +
-                        $"Module: {contract.ModuleName}\n\n" +
-                        $"  Local Offline Save: {localOfflineUtc.ToLocalTime():yyyy-MM-dd HH:mm:ss}\n" +
-                        $"  Last Server Commit: {(serverLastUpdateUtc.HasValue ? serverLastUpdateUtc.Value.ToLocalTime().ToString("yyyy-MM-dd HH:mm:ss") : "Unknown / Server Offline")}\n\n" +
-                        (string.IsNullOrWhiteSpace(diffMessage) ? string.Empty : $"Changes:\n{diffMessage}\n\n") +
-                        $"Choose action:\n" +
-                        $"  [Yes]    Commit Offline Save to PostgreSQL Server\n" +
-                        $"  [No]     Delete Offline Save (Discard local and load Server)\n" +
-                        $"  [Cancel] Keep Offline Save on disk (Skip without uploading)";
-
-                    var debugChoice = MessageBox.Show(
-                        promptMessage,
-                        "[DEBUG] Offline Sync Decision",
-                        MessageBoxButtons.YesNoCancel,
-                        MessageBoxIcon.Question
-                    );
-
-                    if (debugChoice == DialogResult.Cancel) canCommit = false;
-                    else if (debugChoice == DialogResult.No)
-                    {
-                        OfflineSnapshot.ClearPendingSnapshot<T>();
-                        canCommit = false;
-                        AppLogger.Info("User discarded offline pending file.");
-                    }
-                    else canCommit = true;
-#else
                     if (serverLastUpdateUtc.HasValue && serverLastUpdateUtc.Value > localOfflineUtc)
                     {
                         var serverData = contract.FetchFromServer != null ? contract.FetchFromServer() : default;
@@ -121,9 +88,9 @@ public static class OfflineSave
                         );
 
                         canCommit = (dialogChoice == DialogResult.Yes);
+                        AppLogger.Info($"Offline sync conflict decision: {(canCommit ? "overwrite server with local offline save" : "discard offline save")}.");
                         if (!canCommit) OfflineSnapshot.ClearPendingSnapshot<T>();
                     }
-#endif
                     if (canCommit)
                     {
                         AppLogger.Info("Committing offline pending save to server...");

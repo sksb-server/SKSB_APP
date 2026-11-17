@@ -6,7 +6,6 @@ using System.Linq;
 using ExcelDna.Integration;
 using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.RuntimeUI.RuleEngine;
-using SKSB_App.Core.WorkbookOpen.Sheet;
 using SKSB_App.Core.WorkbookSave.Validation;
 
 // =============================================================================
@@ -125,10 +124,7 @@ public sealed class ChildTableBinding<TMaster, TChild, TKey> : IChildTableBindin
                 }
             }
 
-            SheetProtections.ExecuteWithBypass((object)ws, new Action(() =>
-            {
-                TableMapper.PopulateTableSafe<TChild>((object)ws, TableName, allChildren);
-            }));
+            TableMapper.PopulateTableSafe<TChild>((object)ws, TableName, allChildren);
         }
         catch (Exception ex)
         {
@@ -432,7 +428,7 @@ public static class WorkbookMapper
             }
             if (tbl == null || ws == null) return;
 
-            dynamic? body = tbl.DataBodyRange;
+            dynamic? body = tbl!.DataBodyRange;
             if (body == null) return;
 
             // Bulk reads: headers + whole body in 2 COM calls
@@ -559,11 +555,8 @@ public static class WorkbookMapper
             }
             else if (masterWs != null)
             {
-                SheetProtections.ExecuteWithBypass((object)masterWs, new Action(() =>
-                {
-                    map.OnBeforeMasterPopulate?.Invoke((object)masterWs);
-                    TableMapper.PopulateTableSafe<TMaster>((object)masterWs, map.MasterTableName, ordered);
-                }));
+                map.OnBeforeMasterPopulate?.Invoke((object)masterWs);
+                TableMapper.PopulateTableSafe<TMaster>((object)masterWs, map.MasterTableName, ordered);
             }
 
             // 5. Child tables

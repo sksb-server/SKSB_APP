@@ -1,6 +1,5 @@
 ﻿namespace SKSB_App.Core.Bootstrap.Environment;
 
-using System;
 using System.IO;
 
 public enum Bitness

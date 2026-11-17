@@ -89,7 +89,7 @@ public class EventsAutoOpen : IExcelAddIn
             RuleRegistry.EnsureInitialized();
             dynamic xlApp = ExcelDnaUtil.Application;
             dynamic? wb = null;
-            try { wb = xlApp?.ActiveWorkbook; } catch { }
+            try { wb = xlApp.ActiveWorkbook; } catch { }
             if (wb == null) return;
 
             string wbName = wb.Name?.ToString() ?? "Workbook";
@@ -140,7 +140,7 @@ public class EventsAutoOpen : IExcelAddIn
                     if (!activeSheetName.Equals(SheetOperations.LookupsSheetName, StringComparison.OrdinalIgnoreCase) &&
                         !activeSheetName.Equals(SheetOperations.DataSheetName, StringComparison.OrdinalIgnoreCase))
                     {
-                        try { activeSheetBefore.Activate(); } catch { }
+                        try { activeSheetBefore!.Activate(); } catch { }
                     }
                 }
 

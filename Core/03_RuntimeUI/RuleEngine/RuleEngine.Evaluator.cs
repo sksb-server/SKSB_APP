@@ -66,8 +66,7 @@ public static class RuleEvaluator
         dynamic worksheet,
         dynamic table,
         int excelRow,
-        int? editedAbsoluteCol = null,
-        bool isAlreadyUnprotected = false) // <-- Added parameter to prevent redundant unprotecting
+        int? editedAbsoluteCol = null)
     {
         var notices = new List<string>();
         if (_isEvaluating || worksheet == null || table == null) return notices;
@@ -76,14 +75,14 @@ public static class RuleEvaluator
         {
             _isEvaluating = true;
             dynamic xlApp = ExcelDnaUtil.Application;
-            dynamic wb = worksheet.Parent;
+            dynamic wb = worksheet!.Parent;
 
             bool origEvents = true;
             try { origEvents = (bool)xlApp.EnableEvents; xlApp.EnableEvents = false; } catch { }
 
             try
             {
-                string tableName = table.Name?.ToString() ?? string.Empty;
+                string tableName = table!.Name?.ToString() ?? string.Empty;
                 int headerRow = (int)table.HeaderRowRange.Row;
                 int startCol = (int)table.HeaderRowRange.Column;
                 int colCount = (int)table.ListColumns.Count;
@@ -111,7 +110,7 @@ public static class RuleEvaluator
 
                     object? valObj = worksheet.Cells[excelRow, absCol].Value2;
                     rawObjects[c] = valObj;
-                    rowValues[c] = CleanCellText(valObj);
+                    rowValues[c] = SheetMapperHelper.CleanCellText(valObj);
                 }
 
                 bool rowHasUserInput = false;
@@ -165,7 +164,7 @@ public static class RuleEvaluator
                                 {
                                     WriteCellSafe(worksheet.Cells[excelRow, editedAbsoluteCol.Value], (double)floored, editedRule);
                                     rawObjects[relEdited] = (double)floored;
-                                    rowValues[relEdited] = CleanCellText((double)floored);
+                                    rowValues[relEdited] = SheetMapperHelper.CleanCellText((double)floored);
                                     currentText = rowValues[relEdited];
                                 }
                             }
@@ -189,7 +188,7 @@ public static class RuleEvaluator
                                 }
                                 if (editedRule.SyncRules.Count > 0)
                                 {
-                                    ExecuteSyncRulesForColumn(wb, worksheet, table, excelRow, startCol, colCount, colHeaders, colRules, rowValues, rawObjects, editedRule, currentText);
+                                    ExecuteSyncRulesForColumn(wb, worksheet, excelRow, startCol, colHeaders, colRules, rowValues, rawObjects, editedRule, currentText);
                                 }
                             }
                         }
@@ -237,7 +236,7 @@ public static class RuleEvaluator
                         string cellFormula = worksheet.Cells[excelRow, absCol].Formula?.ToString() ?? string.Empty;
                         if (cellFormula.StartsWith("=")) continue;
 
-                        object? defaultVal = ComputeDefaultValue(wb, table, c, colHeaders, rawObjects, rowValues, rule.DefaultRule);
+                        object? defaultVal = ComputeDefaultValue(table, c, colHeaders, rawObjects, rule.DefaultRule);
                         if (defaultVal != null)
                         {
                             WriteCellSafe(worksheet.Cells[excelRow, absCol], defaultVal, rule);
@@ -280,7 +279,7 @@ public static class RuleEvaluator
                                     object written = computed.HasValue ? (double)computed.Value : NullDash;
                                     WriteCellSafe(worksheet.Cells[excelRow, absCol], written, rule);
                                     rawObjects[c] = written;
-                                    rowValues[c] = CleanCellText(written);
+                                    rowValues[c] = SheetMapperHelper.CleanCellText(written);
                                 }
 
                                 if (directlyEdited && !isDefaultOnly && pass == 0)
@@ -318,15 +317,7 @@ public static class RuleEvaluator
                     ApplyOdometerUnitFormat(worksheet, excelRow, startCol, colCount, colHeaders, rowValues);
                 });
 
-                // EXECUTION: Use existing bypass if batching, otherwise unprotect single row
-                if (isAlreadyUnprotected)
-                {
-                    healAction();
-                }
-                else
-                {
-                    SheetProtections.ExecuteWithBypass((object)worksheet, healAction);
-                }
+                healAction();
             }
             finally
             {
@@ -357,7 +348,7 @@ public static class RuleEvaluator
         try
         {
             _isEvaluating = true;
-            dynamic? body = table.DataBodyRange;
+            dynamic? body = table!.DataBodyRange;
             if (body == null) return allNotices;
 
             int startRow = (int)body.Row;
@@ -368,7 +359,7 @@ public static class RuleEvaluator
             if (rowCount <= 0 || colCount <= 0) return allNotices;
 
             string tableName = table.Name?.ToString() ?? string.Empty;
-            dynamic wb = worksheet.Parent;
+            dynamic wb = worksheet!.Parent;
 
             // 1. Bulk-read headers (1 COM call)
             object[,] headerGrid = TableMapper.GetRange2DValues(table.HeaderRowRange, 1, colCount);
@@ -383,28 +374,10 @@ public static class RuleEvaluator
             }
 
             // 2. Bulk-read archetype formulas on first data row to identify formula columns (1 COM call)
+            var archFormulas = SheetMapperHelper.ReadArchetypeFormulas((object)worksheet, startRow, startCol, colCount);
             var isFormulaCol = new bool[colCount + 1];
-            try
-            {
-                dynamic archRange = worksheet.Range[
-                    worksheet.Cells[startRow, startCol],
-                    worksheet.Cells[startRow, startCol + colCount - 1]
-                ];
-                object? rawFormulas = archRange.Formula;
-                if (rawFormulas is object[,] fMat)
-                {
-                    for (int c = 1; c <= colCount; c++)
-                    {
-                        string f = fMat[1, c]?.ToString() ?? string.Empty;
-                        isFormulaCol[c] = f.StartsWith("=") && colRules[c]?.HasCSharpFormula != true;
-                    }
-                }
-                else if (rawFormulas is string singleF)
-                {
-                    isFormulaCol[1] = singleF.StartsWith("=") && colRules[1]?.HasCSharpFormula != true;
-                }
-            }
-            catch { }
+            for (int c = 1; c <= colCount; c++)
+                isFormulaCol[c] = archFormulas[c].StartsWith("=") && colRules[c]?.HasCSharpFormula != true;
 
             // 3. Bulk-read entire DataBodyRange into memory (1 COM call)
             object[,] dataGrid = TableMapper.GetRange2DValues(body, rowCount, colCount);
@@ -448,7 +421,7 @@ public static class RuleEvaluator
                     long maxId = 0;
                     for (int r = 1; r <= rowCount; r++)
                     {
-                        string s = CleanCellText(dataGrid[r, c]);
+                        string s = SheetMapperHelper.CleanCellText(dataGrid[r, c]);
                         if (long.TryParse(s, NumberStyles.Any, CultureInfo.InvariantCulture, out long val) && val > maxId)
                             maxId = val;
                     }
@@ -468,7 +441,7 @@ public static class RuleEvaluator
                     for (int cc = 1; cc <= colCount; cc++)
                     {
                         rawGrid[rr, cc] = dataGrid[rr, cc];
-                        rowValuesGrid[rr, cc] = CleanCellText(dataGrid[rr, cc]);
+                        rowValuesGrid[rr, cc] = SheetMapperHelper.CleanCellText(dataGrid[rr, cc]);
                     }
 
                 RuleCalculator.EvaluateTableCrossRollups((object)wb, (object)worksheet, colRules, colHeaders, rowCount, colCount,
@@ -491,7 +464,7 @@ public static class RuleEvaluator
                 {
                     object? valObj = dataGrid[r, c];
                     rawObjects[c] = valObj;
-                    string clean = CleanCellText(valObj);
+                    string clean = SheetMapperHelper.CleanCellText(valObj);
                     rowValues[c] = clean;
 
                     if (isFormulaCol[c] || string.IsNullOrWhiteSpace(clean)) continue;
@@ -540,7 +513,7 @@ public static class RuleEvaluator
                     {
                         dirtyWrites.Add((excelRow, startCol + c - 1, (double)floored, rule));
                         rawObjects[c] = (double)floored;
-                        rowValues[c] = CleanCellText((double)floored);
+                        rowValues[c] = SheetMapperHelper.CleanCellText((double)floored);
                     }
                 }
 
@@ -611,7 +584,7 @@ public static class RuleEvaluator
 
                     object? defaultVal = rule.DefaultRule.Kind == DefaultKind.AutoIncrement
                         ? ++maxAutoIdByCol[c]
-                        : ComputeDefaultValue(wb, table, c, colHeaders, rawObjects, rowValues, rule.DefaultRule);
+                        : ComputeDefaultValue(table, c, colHeaders, rawObjects, rule.DefaultRule);
 
                     if (defaultVal != null)
                     {
@@ -642,7 +615,7 @@ public static class RuleEvaluator
                         object written = computed.HasValue ? (double)computed.Value : NullDash;
                         dirtyWrites.Add((excelRow, startCol + c - 1, written, rule));
                         rawObjects[c] = written;
-                        rowValues[c] = CleanCellText(written);
+                        rowValues[c] = SheetMapperHelper.CleanCellText(written);
                     }
                 }
 
@@ -654,7 +627,6 @@ public static class RuleEvaluator
 
                     string currentVal = rowValues[c];
                     string? enforcedValue = EvaluateStateGuardsForCell(colHeaders, rawObjects, rowValues, rule, currentVal, out string? guardReason);
-                    if (r == 1) AppLogger.Info($"[GuardDiag] {rule.TableName}.{colHeaders[c]} row1 current=[{currentVal}] enforced=[{enforcedValue}] guards={rule.StateGuards.Count}");
 
                     if (!string.IsNullOrWhiteSpace(enforcedValue) && !RuleDataCache.ValuesMatch(currentVal, enforcedValue))
                     {
@@ -715,7 +687,7 @@ public static class RuleEvaluator
         if (wb == null || rule == null) return options;
 
         // 1. If the column has explicit list Sources, load them by section
-        if (rule.Sources.Length > 0)
+        if (rule!.Sources.Length > 0)
         {
             for (int sec = 0; sec < rule.Sources.Length; sec++)
             {
@@ -736,7 +708,7 @@ public static class RuleEvaluator
         // 2. If the column has no list Source, but has a [ColumnDefault] (e.g. AutoIncrement ID or Date offset), show the computed default as a 1-click option
         else if (rule.DefaultRule != null && rule.DefaultRule.Kind != DefaultKind.None && table != null)
         {
-            int startCol = (int)table.HeaderRowRange.Column;
+            int startCol = (int)table!.HeaderRowRange.Column;
             int colCount = (int)table.ListColumns.Count;
             int headerRow = (int)table.HeaderRowRange.Row;
             dynamic ws = table.Parent;
@@ -751,12 +723,12 @@ public static class RuleEvaluator
                 int absCol = startCol + c - 1;
                 colHeaders[c] = ws.Cells[headerRow, absCol].Value2?.ToString()?.Trim() ?? string.Empty;
                 rawObjects[c] = ws.Cells[excelRow, absCol].Value2;
-                rowValues[c] = CleanCellText(rawObjects[c]);
+                rowValues[c] = SheetMapperHelper.CleanCellText(rawObjects[c]);
                 if (RuleRegistry.NormalizeIdentifier(colHeaders[c]).Equals(rule.NormalizedHeader, StringComparison.OrdinalIgnoreCase))
                     targetRelCol = c;
             }
 
-            object? computed = ComputeDefaultValue(wb, table, targetRelCol, colHeaders, rawObjects, rowValues, rule.DefaultRule);
+            object? computed = ComputeDefaultValue(table, targetRelCol, colHeaders, rawObjects, rule.DefaultRule);
             if (computed != null)
             {
                 string disp = FormatDisplayValue(computed, rule);
@@ -767,7 +739,7 @@ public static class RuleEvaluator
         // 3. Soft-calculated column ([ColumnCalculate] DefaultOnly): offer the computed value as a 1-click option
         else if (rule.CalculateRule != null && rule.CalculateRule.Mode == CalculationMode.DefaultOnly && table != null)
         {
-            int startCol = (int)table.HeaderRowRange.Column;
+            int startCol = (int)table!.HeaderRowRange.Column;
             int colCount = (int)table.ListColumns.Count;
             int headerRow = (int)table.HeaderRowRange.Row;
             dynamic ws = table.Parent;
@@ -797,7 +769,7 @@ public static class RuleEvaluator
         // 3. Evaluate relational gray-out (Partner Sync & StateGuards) on the current row
         try
         {
-            dynamic ws = table.Parent;
+            dynamic ws = table!.Parent;
             int startCol = (int)table.HeaderRowRange.Column;
             int colCount = (int)table.ListColumns.Count;
             int headerRow = (int)table.HeaderRowRange.Row;
@@ -811,7 +783,7 @@ public static class RuleEvaluator
                 int absCol = startCol + c - 1;
                 colHeaders[c] = ws.Cells[headerRow, absCol].Value2?.ToString()?.Trim() ?? string.Empty;
                 rawObjects[c] = ws.Cells[excelRow, absCol].Value2;
-                rowValues[c] = CleanCellText(rawObjects[c]);
+                rowValues[c] = SheetMapperHelper.CleanCellText(rawObjects[c]);
             }
 
             // A) Check if a partner column on this row already has a value that constrains this dropdown
@@ -897,10 +869,8 @@ public static class RuleEvaluator
     private static void ExecuteSyncRulesForColumn(
         dynamic wb,
         dynamic worksheet,
-        dynamic table,
         int excelRow,
         int startCol,
-        int colCount,
         string[] colHeaders,
         PropertyRuleDescriptor?[] colRules,
         string[] rowValues,
@@ -934,12 +904,10 @@ public static class RuleEvaluator
     }
 
     private static object? ComputeDefaultValue(
-        dynamic wb,
         dynamic table,
         int targetRelCol,
         string[] colHeaders,
         object?[] rawObjects,
-        string[] rowValues,
         ColumnDefaultAttribute defaultRule)
     {
         switch (defaultRule.Kind)
@@ -994,14 +962,14 @@ public static class RuleEvaluator
                                 int cStart = mat.GetLowerBound(1);
                                 for (int r = rStart; r <= rEnd; r++)
                                 {
-                                    string s = CleanCellText(mat[r, cStart]);
+                                    string s = SheetMapperHelper.CleanCellText(mat[r, cStart]);
                                     if (long.TryParse(s, NumberStyles.Any, CultureInfo.InvariantCulture, out long val) && val > maxId)
                                         maxId = val;
                                 }
                             }
                             else if (rawCol != null)
                             {
-                                string s = CleanCellText(rawCol);
+                                string s = SheetMapperHelper.CleanCellText(rawCol);
                                 if (long.TryParse(s, NumberStyles.Any, CultureInfo.InvariantCulture, out long val) && val > maxId)
                                     maxId = val;
                             }
@@ -1066,8 +1034,7 @@ public static class RuleEvaluator
         string? expectedValue,
         string[] colHeaders,
         object?[] rawObjects,
-        string[] rowValues,
-        string? currentCellVal = null)
+        string[] rowValues)
     {
         if (referenceHeaders == null || referenceHeaders.Length == 0) return false;
         DateOnly today = DateOnly.FromDateTime(DateTime.Today);
@@ -1100,15 +1067,6 @@ public static class RuleEvaluator
                 case StateConditionKind.ColumnEquals:
                     if (RuleDataCache.ValuesMatch(str, expectedValue))
                         return true;
-                    break;
-
-                case StateConditionKind.DateGreaterThan:
-                    if (RuleDataCache.TryParseDate(currentCellVal, out DateOnly thisDate) &&
-                        RuleDataCache.TryParseDate(str, out DateOnly refDate))
-                    {
-                        if (refDate >= thisDate)
-                            return true;
-                    }
                     break;
             }
         }
@@ -1260,7 +1218,7 @@ public static class RuleEvaluator
         if (val is DateTime dt) return dt.ToString("dd/MM/yyyy", CultureInfo.InvariantCulture);
         if (rule != null && rule.IsDateColumn && RuleDataCache.TryParseDate(val, out DateOnly parsed))
             return parsed.ToString("dd/MM/yyyy", CultureInfo.InvariantCulture);
-        return CleanCellText(val);
+        return SheetMapperHelper.CleanCellText(val);
     }
 
     private static string FormatIfDate(string input)
@@ -1273,13 +1231,4 @@ public static class RuleEvaluator
         return input;
     }
 
-    private static string CleanCellText(object? val)
-    {
-        if (val == null || SheetMapperHelper.IsComError(val)) return string.Empty;
-        if (val is double d && Math.Abs(d - Math.Round(d)) < 0.00001 && d < 1e15)
-            return ((long)Math.Round(d)).ToString(CultureInfo.InvariantCulture);
-        string s = val.ToString()?.Trim() ?? string.Empty;
-        if (s.StartsWith("#") || s == "—") return string.Empty;
-        return s;
-    }
 }

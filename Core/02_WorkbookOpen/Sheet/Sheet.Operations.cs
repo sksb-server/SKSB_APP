@@ -46,7 +46,7 @@ public static class SheetOperations
         try
         {
             dynamic xlApp = ExcelDnaUtil.Application;
-            dynamic? wb = xlApp?.ActiveWorkbook;
+            dynamic? wb = xlApp.ActiveWorkbook;
             if (wb == null) return false;
 
             string fileName = wb.Name?.ToString() ?? string.Empty;
@@ -112,7 +112,7 @@ public static class SheetOperations
         {
             using var _ = AppLogger.Scope($"SetAuxiliarySheetsVisibility(visible={visible})");
             dynamic xlApp = ExcelDnaUtil.Application;
-            dynamic wb = xlApp?.ActiveWorkbook;
+            dynamic? wb = xlApp.ActiveWorkbook;
             if (wb == null) return;
 
             bool origUpdating = true;
@@ -239,7 +239,7 @@ public static class SheetOperations
     public static void PurgeAllSheetsData()
     {
         dynamic xlApp = ExcelDnaUtil.Application;
-        dynamic wb = xlApp?.ActiveWorkbook;
+        dynamic? wb = xlApp.ActiveWorkbook;
         if (wb == null) return;
 
         bool origEvents = true;
@@ -260,17 +260,14 @@ public static class SheetOperations
                     continue;
                 }
 
-                SheetProtections.ExecuteWithBypass((object)ws, new Action(() =>
-                {
-                    int tableCount = 0;
-                    try { tableCount = (int)ws.ListObjects.Count; } catch { }
+                int tableCount = 0;
+                try { tableCount = (int)ws.ListObjects.Count; } catch { }
 
-                    for (int t = 1; t <= tableCount; t++)
-                    {
-                        dynamic table = ws.ListObjects[t];
-                        PurgeSingleTable(ws, table);
-                    }
-                }));
+                for (int t = 1; t <= tableCount; t++)
+                {
+                    dynamic table = ws.ListObjects[t];
+                    PurgeSingleTable(ws, table);
+                }
             }
         }
         catch (Exception ex)

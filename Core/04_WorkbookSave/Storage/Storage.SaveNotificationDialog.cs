@@ -1,6 +1,5 @@
 ﻿namespace SKSB_App.Core.WorkbookSave.Storage;
 
-using System;
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Windows.Forms;
@@ -8,12 +7,11 @@ using System.Windows.Forms;
 public enum SaveNotificationType
 {
     Success,
-    Warning,
     Error,
     Offline
 }
 
-public partial class SaveNotificationDialog : Form
+public class SaveNotificationDialog : Form
 {
     public SaveNotificationDialog(string moduleName, string message, SaveNotificationType type = SaveNotificationType.Success)
     {
@@ -51,7 +49,6 @@ public partial class SaveNotificationDialog : Form
             {
                 SaveNotificationType.Success => Color.FromArgb(16, 149, 193),
                 SaveNotificationType.Offline => Color.FromArgb(79, 70, 229),
-                SaveNotificationType.Warning => Color.FromArgb(217, 119, 6),
                 SaveNotificationType.Error => Color.FromArgb(220, 38, 38),
                 _ => Color.Gray
             };
@@ -85,7 +82,6 @@ public partial class SaveNotificationDialog : Form
             {
                 SaveNotificationType.Success => "Saved Successfully",
                 SaveNotificationType.Offline => "Saved Offline",
-                SaveNotificationType.Warning => "Validation Issue",
                 SaveNotificationType.Error => "Save Failed",
                 _ => "Save Status"
             },

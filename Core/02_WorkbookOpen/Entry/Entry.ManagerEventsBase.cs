@@ -221,14 +221,5 @@ public abstract class ManagerEventsBase<T> : IExcelAddIn
         if (wbObj == null || SheetOperations.IsTemplateEditMode) return;
 
         SheetOperations.SetAuxiliarySheetsVisibility(visible: false);
-
-        try
-        {
-            contract.OnAfterDelayedLoad?.Invoke(wbObj);
-        }
-        catch (Exception ex)
-        {
-            AppLogger.Error($"[{contract.ModuleName}] OnAfterDelayedLoad failed", ex);
-        }
     }
 }

@@ -6,7 +6,6 @@ using System.Globalization;
 using System.Linq;
 using ExcelDna.Integration;
 using SKSB_App.Core.Diagnostics;
-using SKSB_App.Core.WorkbookOpen.Sheet;
 
 public enum WriteMode
 {
@@ -18,7 +17,6 @@ public class EntityTableBlock
 {
     public string EntityName { get; set; } = string.Empty;
     public List<string> ColumnNames { get; set; } = new();
-    public List<string> Columns => ColumnNames;
     public object[,] Grid { get; set; } = new object[0, 0];
     public int RowCount => Grid.GetLength(0);
     public int ColCount => Grid.GetLength(1);
@@ -104,7 +102,7 @@ public static class SyncHelper
                 // =========================================================================
                 // VERIFICATION: Check whether data was written and Named Ranges are valid
                 // =========================================================================
-                bool verifySuccess = VerifyEntityBlocks(wb, ws, blocks);
+                bool verifySuccess = VerifyEntityBlocks(wb, blocks);
                 AppLogger.Info($"[SYNC VERIFICATION RESULT] EntityBlocks on '{targetSheet}': {(verifySuccess ? "SUCCESS" : "FAILED / PARTIAL")} (Blocks={totalBlocksWritten}, Cols={totalColumnsWritten})");
 
                 // Confirm active sheet never shifted
@@ -272,7 +270,7 @@ public static class SyncHelper
                 // =========================================================================
                 // VERIFICATION: Check whether columns and Defined Names exist
                 // =========================================================================
-                bool verifySuccess = VerifyNamedLists(wb, ws, mappings);
+                bool verifySuccess = VerifyNamedLists(wb, mappings);
                 AppLogger.Info($"[SYNC VERIFICATION RESULT] NamedLists on '{targetSheet}': {(verifySuccess ? "SUCCESS" : "FAILED / PARTIAL")} (Total Lists={mappings.Count})");
 
                 // Confirm active sheet was not shifted
@@ -315,7 +313,7 @@ public static class SyncHelper
         }
     }
 
-    private static bool VerifyEntityBlocks(dynamic wb, dynamic ws, List<EntityTableBlock> blocks)
+    private static bool VerifyEntityBlocks(dynamic wb, List<EntityTableBlock> blocks)
     {
         try
         {
@@ -334,7 +332,7 @@ public static class SyncHelper
                     }
 
                     dynamic range = nameObj.RefersToRange;
-                    if (range == null || (int)range.Rows.Count != block.RowCount)
+                    if (range == null || (int)range!.Rows.Count != block.RowCount)
                     {
                         AppLogger.Error($"[VERIFY FAILURE] Name '{colName}' points to invalid range rows: Expected {block.RowCount}");
                         return false;
@@ -350,7 +348,7 @@ public static class SyncHelper
         }
     }
 
-    private static bool VerifyNamedLists(dynamic wb, dynamic ws, Dictionary<string, string[]> mappings)
+    private static bool VerifyNamedLists(dynamic wb, Dictionary<string, string[]> mappings)
     {
         try
         {
@@ -367,7 +365,7 @@ public static class SyncHelper
                 }
 
                 dynamic range = nameObj.RefersToRange;
-                if (range == null || (int)range.Rows.Count != values.Length)
+                if (range == null || (int)range!.Rows.Count != values.Length)
                 {
                     AppLogger.Error($"[VERIFY FAILURE] Defined Name '{listName}' row count mismatch: Expected {values.Length}");
                     return false;

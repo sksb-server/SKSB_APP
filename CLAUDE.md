@@ -15,15 +15,15 @@ ExcelDna.AddIn	1.9.0	Core, StaffManager, VehicleManager, ProjectManager, Schedul
 ExcelDna.Integration	(Transitive via ExcelDna.AddIn)	Core & Add-In Modules	Provides IExcelAddIn, ExcelRibbon, ExcelDnaUtil.Application, ExcelAsyncUtil.QueueAsMacro, XlCall, and [ExcelCommand].
 Dapper	2.1.35	Core	Micro-ORM for parameterized SQL queries, bulk IEnumerable<T> execution, and snake_case to PascalCase mapping (Dapper.DefaultTypeMap.MatchNamesWithUnderscores = true).
 Npgsql	8.0.3	Core	ADO.NET data provider for PostgreSQL (PostgreSqlService).
-PdfPig	0.1.16	VehicleManager	PDF text extraction for parsing external fuel statement documents (VehicleManager.FuelImporter.cs).
+PdfPig	0.1.16	VehicleManager	PDF text extraction for parsing external fuel statement documents (VehicleManager.SheetMapper.FuelImport.cs).
 System.Text.Json	.NET 8 Built-in	Core	Local offline cache (*_data.json) and pending offline upload stashing (*_PendingUpload.json) via OfflineSnapshot and TolerantEnumConverterFactory.
 Solution & Project Topology
 Core/ (Core.csproj): Shared foundation library and base XLL add-in. Organized into 4 lifecycle phases plus shared subsystems:
 01_Bootstrap/: Binary inspection, Excel path discovery, registry configuration, and local folder paths (%USERPROFILE%\Documents\SKSB_App\Data).
-02_WorkbookOpen/: EventsAutoOpen (IExcelAddIn), SheetOperations, SheetProtections, EnumList, DataList, and OfflineSave.
+02_WorkbookOpen/: EventsAutoOpen (IExcelAddIn), SheetOperations, EnumList, DataList, and OfflineSave.
 03_RuntimeUI/: Interactive cell dropdowns (Arrow, Commands), live self-healing RuleEngine (RuleRegistry, RuleEvaluator, RuleDataCache), TableRowManager, DateFilter, and TemplateEditor.
 04_WorkbookSave/: SaveEntry, SaveContract<T>, TableMapper, SheetMapperHelper, OfflineSnapshot, RulesExtractor, and conflict/validation WinForms dialogs.
-Diagnostics/: Scoped session logging (AppLogger) and debug inspection dialogs (DebugDialog).
+Diagnostics/: Scoped session logging (AppLogger). All debug diagnostics (populate audits, PostgreSQL upload/download summaries, auto-fill sync audits) are written to %USERPROFILE%\Documents\SKSB_App\Data\SKSB_Runtime_Trace.log; no debug modal popups exist.
 Integration/: Database/ (PostgreSqlService, ServerDispatcher, ServerEnvironment) and Erp/ (SQL Payroll / ERP importers & exporters).
 Types/: Domain models (StaffRecord, VehicleRecord, ProjectRecord, ScheduleRecord) and declarative rule attributes (Attributes/).
 ThumbprintSync/: Biometric attendance device sync controllers (DeviceSyncManager.cs, VigilanceController.cs). Currently excluded from compilation in Core.csproj (<Compile Remove="ThumbprintSync\**" />) while staged to be wired into ScheduleManager.
@@ -90,14 +90,14 @@ This solution does not use an external xUnit/NUnit test runner project; verifica
 Build in Debug mode (dotnet build SKSB_App.slnx -c Debug).
 Every Excel-DNA module exposes a Debug Controls Ribbon group in DEBUG builds containing:
 Simulate Server Offline (ServerEnvironment.SimulateOffline): Forces ServerEnvironment.GuardConnection() to throw a TimeoutException on any PostgreSqlService call, testing local JSON fallback (OfflineSnapshot) and ExitConflictDialog workflows.
-Debug Logs Active (DebugDialog.DebugEnabled): Displays detailed modal audit summaries (DebugDialog.ShowLog) after worksheet population and PostgreSQL upload/download batches.
+Debug diagnostics are always written to the runtime log via AppLogger (no toggle, no popups).
 Inspect runtime execution traces and COM event stack traces in %USERPROFILE%\Documents\SKSB_App\Data\ or via AppLogger (Core/Diagnostics/Diagnoestics.AppLogger.cs).
 3. Architectural Code Style & Conventions
 Namespaces, File Naming & Structure
 File-Scoped Namespaces: Always use file-scoped namespaces at line 1 (e.g., namespace SKSB_App.StaffManager;, namespace SKSB_App.Core.WorkbookSave.SheetMapper;), followed by using directives placed inside the namespace declaration.
 Dot-Prefixed File Naming: Source files follow a <DomainOrFolder>.<Component>.cs naming convention:
 Domain modules: StaffManager.Events.cs, StaffManager.RibbonController.cs, StaffManager.ServerSyncCommands.cs, StaffManager.SheetMapper.cs, StaffManager.Importer.cs, StaffManager.Guard.cs.
-Core subsystems: Entry.EventsAutoOpen.cs, Sheet.Protections.cs, SheetMapper.TableMapper.cs, RuleEngine.Evaluator.cs, Database.ServerDispatcher.cs.
+Core subsystems: Entry.EventsAutoOpen.cs, Sheet.Operations.cs, SheetMapper.TableMapper.cs, RuleEngine.Evaluator.cs, Database.ServerDispatcher.cs.
 Visual Section Headers: Divide large static classes into logical sections using 3-line banner comments:
 csharp
 // =========================================================================
@@ -149,7 +149,7 @@ DELETE FROM staff_skill_licenses WHERE staff_id != ALL(@ActiveIds);
 DELETE FROM staff_master WHERE staff_id != ALL(@ActiveIds);
 Every ON CONFLICT DO UPDATE clause must update updated_at = CURRENT_TIMESTAMP.
 Dual-Write Local Cache (OfflineSnapshot):
-Saving via OfflineSnapshot.Save(records, writeToDatabase: true) first serializes the dataset to %USERPROFILE%\Documents\SKSB_App\Data\<typename>_data.json and then calls ServerDispatcher.Dispatch(data).
+Saving via OfflineSnapshot.Save(records, writeToDatabase: true) first serializes the dataset to %USERPROFILE%\Documents\SKSB_App\Data\<typename>_data.json and then calls ServerDispatcher.Dispatch(data). This is the StaffManager path (and SkillLicenseType). VehicleManager and ProjectManager call ServerDispatcher.PersistVehicles / SaveAuxiliaryTables / PersistProjects / PersistCompanies directly and then cache with OfflineSnapshot.Save(records, writeToDatabase: false).
 Always check ServerEnvironment.SimulateOffline (or let PostgreSqlService call ServerEnvironment.GuardConnection()) and fall back to OfflineSnapshot.Load<List<TRecord>>() if the PostgreSQL server (192.168.0.20:5432) is unreachable.
 5. Excel-DNA Thread Safety & COM Interop Guardrails
 
@@ -193,4 +193,4 @@ Re-entrancy Guards: Always guard recursive handlers like RuleEvaluator (_isEvalu
 Rule 5: Protect the User's Viewport & Table Structure
 Never Switch Active Tabs Unnecessarily: Operate directly on target Worksheet and ListObject references (targetTable.Parent) rather than calling .Select() or .Activate(). If an operation must inspect or modify multiple sheets, capture dynamic? activeSheetBefore = xlApp.ActiveSheet before starting and restore activeSheetBefore.Activate() in the finally block (never leave hidden Lookups or Data tabs active).
 Safe Table Resizing (SheetMapperHelper.ResizeTable): Always disable table.ShowTotals = false before calling table.Resize(newRange), clear any stale trailing rows when shrinking a table, and restore table.ShowTotals in the finally block.
-Table Protection (SheetProtections): Native Excel sheet protection (worksheet.Protect / Unprotect, with or without password) is completely deprecated and forbidden because it breaks table sorting, filtering, and row insertion. Never call ws.Unprotect("SKSB_Internal_Guard") or set cell.Locked (it has no effect without protection). Cell styles (such as Cost or Comma) must never be used to infer editable vs. locked status; styles are formatting only. Cell locking is authored purely via Excel Custom Data Validation (=FALSE, Stop alert) in the master templates (*.xltx). Code-driven table protection is strictly limited to: (1) header modification prevention via xlApp.Undo() in the SheetChange guard in Entry.EventsAutoOpen.cs; (2) formula self-healing via SheetProtections.HealFormulas(ws, table), which restores archetype column formulas; (3) header self-healing via SheetProtections.HealHeaders(table, headers), which restores canonical header names. SheetProtections.ExecuteWithBypass is a legacy pass-through that simply invokes the action.
+Table Protection: Native Excel sheet protection (worksheet.Protect / Unprotect, with or without password) is completely deprecated and forbidden because it breaks table sorting, filtering, and row insertion. Never call ws.Unprotect("SKSB_Internal_Guard") or set cell.Locked (it has no effect without protection). Cell styles (such as Cost or Comma) must never be used to infer editable vs. locked status; styles are formatting only. Cell locking is authored purely via Excel Custom Data Validation (=FALSE, Stop alert) in the master templates (*.xltx). Code-driven table protection is limited to header modification prevention via xlApp.Undo() in the SheetChange guard in Entry.EventsAutoOpen.cs. (The former SheetProtections helper class (HealFormulas, HealHeaders, ExecuteWithBypass) was removed as dead code.)

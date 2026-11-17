@@ -39,7 +39,6 @@ public class StaffImportResult
 {
     public List<StaffRecord> ImportedStaffs { get; set; } = new();
     public List<ImportSkippedRecord> SkippedErrors { get; set; } = new();
-    public int TotalRowsProcessed { get; set; } = 0;
 
     public ImportSummaryReport ToGenericReport() => new()
     {
@@ -63,7 +62,6 @@ public static class Importer
         {
             var row = doc.Rows[r];
             int excelRowNum = r + 2;
-            result.TotalRowsProcessed++;
 
             string rawCode = row.GetString("Code");
             string name = row.GetString("Name")?.Trim() ?? string.Empty;
@@ -158,7 +156,6 @@ public static class Importer
                 StaffID = staffId,
                 StaffDetails = new StaffDetails
                 {
-                    StaffID = staffId,
                     StaffName = name,
                     StaffShortName = shortName,
                     Department = mappedDept,

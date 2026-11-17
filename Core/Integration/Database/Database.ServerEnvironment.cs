@@ -1,5 +1,6 @@
 ﻿namespace SKSB_App.Core.Integration.Database;
 
+using SKSB_App.Core.Diagnostics;
 using System;
 
 public static class ServerEnvironment
@@ -24,28 +25,14 @@ public static class ServerEnvironment
         }
     }
 
-    public static bool IsSimulatedOffline()
-    {
-#if DEBUG
-        return SimulateOffline;
-#else
-        return false;
-#endif
-    }
-
     public static void ToggleSimulatedOffline(ExcelDna.Integration.CustomUI.IRibbonUI? ribbonUi, string controlId, bool pressed)
     {
 #if DEBUG
         SimulateOffline = pressed;
         ribbonUi?.InvalidateControl(controlId);
-        System.Windows.Forms.MessageBox.Show(
-            pressed
-                ? "Server is now SIMULATED OFFLINE.\nAll PostgreSQL database operations will fail immediately to test offline local stashing."
-                : "Server is now ONLINE.\nNormal PostgreSQL database connectivity restored.",
-            "Debug Server Mode",
-            System.Windows.Forms.MessageBoxButtons.OK,
-            pressed ? System.Windows.Forms.MessageBoxIcon.Warning : System.Windows.Forms.MessageBoxIcon.Information
-        );
+        AppLogger.Warn(pressed
+            ? "[Debug Server Mode] Server is now SIMULATED OFFLINE: all PostgreSQL operations fail immediately to test offline local stashing."
+            : "[Debug Server Mode] Server is now ONLINE: normal PostgreSQL connectivity restored.");
 #endif
     }
 

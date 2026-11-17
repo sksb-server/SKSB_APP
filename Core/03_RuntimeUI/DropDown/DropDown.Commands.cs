@@ -48,10 +48,6 @@ public static class Commands
         {
             dynamic singleCell = cell.Cells[1, 1];
 
-            // 0. Code-registered selector cells outside any table (e.g. Project Summary!A2)
-            if (ParameterCells.IsParameterCell(singleCell))
-                return true;
-
             // 1. Primary path: Check if cell belongs to a ListObject table governed by C# RuleRegistry
             dynamic? cellTable = null;
             try { cellTable = singleCell.ListObject; } catch { }
@@ -62,7 +58,7 @@ public static class Commands
                     return false;
 
                 var rule = RuleRegistry.GetRuleForCell(singleCell);
-                if (rule != null && rule.HasDropdown)
+                if (rule != null && rule!.HasDropdown)
                 {
                     return true;
                 }
@@ -129,9 +125,9 @@ public static class Commands
         try
         {
             var rule = RuleRegistry.GetRuleForCell(targetCell);
-            if (rule != null && rule.Sources.Length > 0)
+            if (rule != null && rule!.Sources.Length > 0)
             {
-                return "=" + string.Join(", ", rule.Sources);
+                return "=" + string.Join(", ", rule!.Sources);
             }
 
             dynamic sheet = targetCell.Worksheet;

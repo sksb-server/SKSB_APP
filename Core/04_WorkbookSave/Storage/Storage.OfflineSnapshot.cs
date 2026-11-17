@@ -4,7 +4,6 @@ using System;
 using System.IO;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using System.Threading.Tasks;
 using SKSB_App.Core.Bootstrap.Storage;
 using SKSB_App.Core.Integration.Database;
 
@@ -121,11 +120,6 @@ public static class OfflineSnapshot
     private static string DescribeCount(object? data) =>
         data is System.Collections.ICollection c ? $"{c.Count} item(s)" : (data == null ? "null" : "1 object");
 
-    public static async Task<string> SaveAsync<T>(T data, bool writeToDatabase = true)
-    {
-        return await Task.Run(() => Save(data, writeToDatabase));
-    }
-
     public static T? Load<T>()
     {
         string typeName = ResolveTypeName(typeof(T));
@@ -155,19 +149,6 @@ public static class OfflineSnapshot
         {
             DebugLog($"READ local cache '{targetFile}' FAILED: {ex.Message}");
             return default;
-        }
-    }
-
-    /// <summary>Deletes the local cache file for <typeparamref name="T"/> (e.g. a stale snapshot).</summary>
-    public static void Clear<T>()
-    {
-        string targetFile = $"{ResolveTypeName(typeof(T)).ToLowerInvariant()}_data.json";
-        if (!FolderRegistry.Data.Exists()) return;
-        string fullPath = FolderRegistry.Data.GetFilePath(targetFile);
-        if (File.Exists(fullPath))
-        {
-            File.Delete(fullPath);
-            DebugLog($"CLEAR local cache '{targetFile}'");
         }
     }
 
