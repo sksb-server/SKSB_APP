@@ -48,6 +48,9 @@ public static class Commands
         {
             dynamic singleCell = cell.Cells[1, 1];
 
+            // 0. Module-supplied dropdowns (Schedule board)
+            if (CustomDropdowns.AppliesTo(singleCell)) return true;
+
             // 1. Primary path: Check if cell belongs to a ListObject table governed by C# RuleRegistry
             dynamic? cellTable = null;
             try { cellTable = singleCell.ListObject; } catch { }

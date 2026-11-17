@@ -1,243 +1,146 @@
-﻿using System;
+﻿namespace SKSB_App.Core.ThumbprintSync;
+
+using System;
 using System.Collections.Generic;
 using System.Diagnostics;
-using System.Net;
-using System.Net.Sockets;
-using System.Runtime.InteropServices;
-using System.Text;
+using System.IO;
+using System.Linq;
+using System.Text.Json;
 using System.Threading.Tasks;
-using System.Windows.Forms;
 using ExcelDna.Integration;
-using ExcelDna.Integration.CustomUI;
-using Excel = Microsoft.Office.Interop.Excel;
+using SKSB_App.Core.Diagnostics;
+using SKSB_App.Core.Types;
 
-namespace SKSB_App.ThumbprintSync
+/// <summary>One raw punch read from the attendance terminal.</summary>
+public sealed record TerminalPunch(string EnrollNumber, DateTime Timestamp);
+
+/// <summary>
+/// Biometric terminal sync. Talks to the terminal through the external <c>ZkBridge.exe</c> helper placed next to the
+/// add-in and converts raw punches into append-only <see cref="AttendanceEntry"/> rows
+/// (<see cref="AttendanceSource.Thumbprint"/>). Contains no COM access: the caller appends the result to the
+/// workbook on the Excel macro thread.
+/// </summary>
+public static class DeviceSyncManager
 {
-    public class TerminalUser
+    public const string DefaultIp = "192.168.0.110";
+    public const int DefaultPort = 4370;
+
+    /// <summary>Punches of the same worker closer than this are one physical scan (double tap).</summary>
+    private static readonly TimeSpan DoubleScanWindow = TimeSpan.FromMinutes(1);
+
+    // =========================================================================
+    // 1. TERMINAL READ (background thread only - never touches Excel)
+    // =========================================================================
+
+    /// <summary>
+    /// Runs <c>ZkBridge.exe &lt;ip&gt; &lt;port&gt; &lt;commKey&gt; attlog [yyyy-MM-dd]</c>, which must print a JSON array of
+    /// <c>{"EnrollNumber":"12","Timestamp":"2026-11-17T08:05:12"}</c> objects on stdout.
+    /// </summary>
+    public static Task<List<TerminalPunch>> FetchPunchesAsync(DateOnly? since = null, string ip = DefaultIp, int port = DefaultPort, int commKey = 0)
     {
-        public string EnrollNumber { get; set; } = string.Empty;
-        public string Name { get; set; } = string.Empty;
-        public int Privilege { get; set; }
-        public string CardNumber { get; set; } = string.Empty;
+        return Task.Run(() =>
+        {
+            string addinDirectory = Path.GetDirectoryName(ExcelDnaUtil.XllPath) ?? AppDomain.CurrentDomain.BaseDirectory;
+            string bridgePath = Path.Combine(addinDirectory, "ZkBridge.exe");
+            if (!File.Exists(bridgePath)) bridgePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ZkBridge.exe");
+            if (!File.Exists(bridgePath))
+                throw new FileNotFoundException($"Cannot locate ZkBridge.exe next to the add-in ({addinDirectory}).");
+
+            var startInfo = new ProcessStartInfo
+            {
+                FileName = bridgePath,
+                Arguments = $"{ip} {port} {commKey} attlog" + (since.HasValue ? $" {since.Value:yyyy-MM-dd}" : string.Empty),
+                UseShellExecute = false,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                CreateNoWindow = true
+            };
+
+            using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("Could not start ZkBridge.exe.");
+            Task<string> stdout = process.StandardOutput.ReadToEndAsync();
+            Task<string> stderr = process.StandardError.ReadToEndAsync();
+            if (!process.WaitForExit(30000))
+            {
+                try { process.Kill(); } catch { }
+                throw new TimeoutException($"Terminal {ip}:{port} did not answer within 30 seconds.");
+            }
+
+            string error = stderr.GetAwaiter().GetResult();
+            if (process.ExitCode != 0 || !string.IsNullOrWhiteSpace(error))
+                throw new InvalidOperationException($"ZkBridge error (code {process.ExitCode}): {error}");
+
+            string output = stdout.GetAwaiter().GetResult();
+            if (string.IsNullOrWhiteSpace(output)) return new List<TerminalPunch>();
+
+            return JsonSerializer.Deserialize<List<TerminalPunch>>(output, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
+                   ?? new List<TerminalPunch>();
+        });
     }
 
-    [ComVisible(true)]
-    public class DeviceSyncController : ExcelRibbon
+    // =========================================================================
+    // 2. PUNCH -> ATTENDANCE ENTRY CONVERSION (pure, de-duplicating)
+    // =========================================================================
+
+    /// <summary>
+    /// Converts raw punches into new <see cref="AttendanceSource.Thumbprint"/> entries.
+    /// The terminal's enroll number is the Staff ID. Punches are dropped when the worker is unknown, when the same
+    /// instant already exists in <paramref name="existing"/> (re-sync), or when it is a double scan.
+    /// Entry type alternates per worker and day: the first punch is a CheckIn, then CheckOut, CheckIn...
+    /// </summary>
+    public static (List<AttendanceEntry> NewEntries, int Duplicates, int UnknownStaff) BuildEntries(
+        IEnumerable<TerminalPunch> punches,
+        IReadOnlyCollection<AttendanceEntry> existing,
+        Func<long, bool> isKnownStaff)
     {
-        public override string GetCustomUI(string ribbonId)
-        {
-            return @"
-            <customUI xmlns='http://schemas.microsoft.com/office/2009/07/customui'>
-              <ribbon>
-                <tabs>
-                  <tab id='tabAllocation' label='Work Allocation'>
-                    <group id='grpDevice' label='Terminal Direct Sync'>
-                      <button id='btnImportTerminal' 
-                              label='Pull Users From Reader' 
-                              size='large' 
-                              imageMso='ContactAddNew' 
-                              onAction='OnPullUsersClicked' />
-                    </group>
-                  </tab>
-                </tabs>
-              </ribbon>
-            </customUI>";
-        }
+        var result = new List<AttendanceEntry>();
+        int duplicates = 0;
+        int unknown = 0;
 
-        public void OnPullUsersClicked(IRibbonControl control)
+        // Existing thumbprint rows per (staff, date), time-ordered: they seed the in/out alternation and the de-dup check.
+        var history = existing
+            .Where(e => e.Source == AttendanceSource.Thumbprint)
+            .GroupBy(e => (e.StaffID, e.Date))
+            .ToDictionary(g => g.Key, g => g.OrderBy(e => e.Time).ToList());
+
+        var parsed = punches
+            .Select(p => (Ok: long.TryParse(p.EnrollNumber?.Trim(), out long id), Id: id, p.Timestamp))
+            .ToList();
+
+        foreach (var staffDay in parsed.Where(p => p.Ok).GroupBy(p => (p.Id, Date: DateOnly.FromDateTime(p.Timestamp))))
         {
-            Task.Run(async () =>
+            if (!isKnownStaff(staffDay.Key.Id)) { unknown += staffDay.Count(); continue; }
+
+            if (!history.TryGetValue((staffDay.Key.Id, staffDay.Key.Date), out var timeline))
+                timeline = new List<AttendanceEntry>();
+
+            foreach (var punch in staffDay.OrderBy(p => p.Timestamp))
             {
-                const string ip = "192.168.0.110";
-                const int port = 4370;
+                var time = TimeOnly.FromDateTime(punch.Timestamp);
+                time = new TimeOnly(time.Hour, time.Minute, time.Second); // drop sub-second noise
 
-                try
+                bool isRepeat = timeline.Any(e => Math.Abs((e.Time.ToTimeSpan() - time.ToTimeSpan()).TotalSeconds) < DoubleScanWindow.TotalSeconds);
+                if (isRepeat) { duplicates++; continue; }
+
+                var previous = timeline.LastOrDefault(e => e.Time < time);
+                var entry = new AttendanceEntry
                 {
-                    List<TerminalUser> users = await FetchEnrolledUsersAsync(ip, port);
-
-                    if (users == null || users.Count == 0)
-                    {
-                        MessageBox.Show($"Connected to reader {ip}, but 0 enrolled user records were parsed from memory.",
-                                        "Reader Query Result", MessageBoxButtons.OK, MessageBoxIcon.Warning);
-                        return;
-                    }
-
-                    // Dispatch to Excel main thread
-                    ExcelAsyncUtil.QueueAsMacro(() =>
-                    {
-                        try
-                        {
-                            PopulateEmployeesTable(users);
-                            MessageBox.Show($"Successfully imported {users.Count} employees directly from reader ({ip}).",
-                                            "Sync Successful", MessageBoxButtons.OK, MessageBoxIcon.Information);
-                        }
-                        catch (Exception renderEx)
-                        {
-                            MessageBox.Show($"Error writing to sheet: {renderEx.Message}\n\n{renderEx.StackTrace}",
-                                            "Excel Render Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                        }
-                    });
-                }
-                catch (Exception ex)
-                {
-                    MessageBox.Show($"Connection failed:\n\n{ex.Message}\n\n({ex.GetType().Name})",
-                                    "Terminal Communication Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
-                }
-            });
-        }
-
-        private async Task<List<TerminalUser>> private async Task<List<TerminalUser>> FetchEnrolledUsersAsync(string ip, int port, int commKey = 0)
-        {
-            return await Task.Run(() =>
-            {
-                // Locate ZkBridge.exe relative to the running XLL add-in
-                string addinDirectory = Path.GetDirectoryName(ExcelDnaUtil.XllPath);
-                string bridgeExePath = Path.Combine(addinDirectory, "ZkBridge.exe");
-
-                if (!File.Exists(bridgeExePath))
-                {
-                    // Fallback check current directory
-                    bridgeExePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ZkBridge.exe");
-                    if (!File.Exists(bridgeExePath))
-                    {
-                        throw new FileNotFoundException($"Cannot locate ZkBridge.exe at:\n{bridgeExePath}");
-                    }
-                }
-
-                var startInfo = new ProcessStartInfo
-                {
-                    FileName = bridgeExePath,
-                    Arguments = $"{ip} {port} {commKey}",
-                    UseShellExecute = false,
-                    RedirectStandardOutput = true,
-                    RedirectStandardError = true,
-                    CreateNoWindow = true
+                    Date = staffDay.Key.Date,
+                    Time = time,
+                    StaffID = staffDay.Key.Id,
+                    EntryType = previous != null && previous.EntryType == AttendanceEntryType.CheckIn
+                        ? AttendanceEntryType.CheckOut
+                        : AttendanceEntryType.CheckIn,
+                    Source = AttendanceSource.Thumbprint,
+                    IsApproved = true
                 };
-
-                using (var process = Process.Start(startInfo))
-                {
-                    string output = process.StandardOutput.ReadToEnd();
-                    string error = process.StandardError.ReadToEnd();
-                    process.WaitForExit(15000);
-
-                    if (process.ExitCode != 0 || !string.IsNullOrWhiteSpace(error))
-                    {
-                        throw new Exception($"Bridge Error (Code {process.ExitCode}): {error}");
-                    }
-
-                    if (string.IsNullOrWhiteSpace(output))
-                    {
-                        return new List<TerminalUser>();
-                    }
-
-                    var serializer = new JavaScriptSerializer();
-                    return serializer.Deserialize<List<TerminalUser>>(output);
-                }
-            });
+                timeline.Add(entry);
+                timeline.Sort((a, b) => a.Time.CompareTo(b.Time));
+                result.Add(entry);
+            }
         }
 
-        private byte[] CreateZkPacket(ushort command, ushort sessionId, ushort replyNumber, byte[] data)
-        {
-            byte[] packet = new byte[8 + data.Length];
-            BitConverter.GetBytes(command).CopyTo(packet, 0);
-            BitConverter.GetBytes((ushort)0).CopyTo(packet, 2);
-            BitConverter.GetBytes(sessionId).CopyTo(packet, 4);
-            BitConverter.GetBytes(replyNumber).CopyTo(packet, 6);
-            if (data.Length > 0) data.CopyTo(packet, 8);
-
-            int chk = 0;
-            for (int i = 0; i < packet.Length; i += 2)
-            {
-                if (i == 2) continue;
-                ushort val = (i + 1 < packet.Length) ? BitConverter.ToUInt16(packet, i) : packet[i];
-                chk += val;
-                if (chk > 0xFFFF) chk = (chk & 0xFFFF) + 1;
-            }
-            ushort checksum = (ushort)(~chk & 0xFFFF);
-            BitConverter.GetBytes(checksum).CopyTo(packet, 2);
-
-            return packet;
-        }
-
-        private byte[] MakeAuthPayload(int commKey, ushort sessionId)
-        {
-            int k = 0;
-            for (int i = 0; i < 32; i++)
-            {
-                if ((commKey & (1 << i)) > 0)
-                    k = (k << 1 | 1);
-                else
-                    k = (k << 1);
-            }
-            k += sessionId;
-
-            byte[] keyBytes = BitConverter.GetBytes(k);
-            byte[] encrypted = new byte[4];
-            encrypted[0] = (byte)(keyBytes[0] ^ 0x50);
-            encrypted[1] = (byte)(keyBytes[1] ^ 0x4F);
-            encrypted[2] = (byte)(keyBytes[2] ^ 0x53);
-            encrypted[3] = (byte)(keyBytes[3] ^ 0x4F);
-
-            return encrypted;
-        }
-
-        private void PopulateEmployeesTable(List<TerminalUser> users)
-        {
-            Excel.Application app = (Excel.Application)ExcelDnaUtil.Application;
-            Excel.Workbook wb = app.ActiveWorkbook ?? app.Workbooks.Add();
-
-            Excel.Worksheet ws;
-            try
-            {
-                ws = (Excel.Worksheet)wb.Sheets["Employees"];
-            }
-            catch
-            {
-                ws = (Excel.Worksheet)wb.Sheets.Add();
-                ws.Name = "Employees";
-            }
-
-            ws.Cells.Clear();
-
-            string[] headers = { "EnrollNumber", "Employee Name", "Privilege", "Card Number", "Source of Truth" };
-            for (int c = 0; c < headers.Length; c++)
-            {
-                ws.Cells[1, c + 1] = headers[c];
-            }
-
-            object[,] data = new object[users.Count, headers.Length];
-            for (int i = 0; i < users.Count; i++)
-            {
-                data[i, 0] = users[i].EnrollNumber;
-                data[i, 1] = users[i].Name;
-                data[i, 2] = users[i].Privilege == 14 ? "Admin" : "User";
-                data[i, 3] = users[i].CardNumber;
-                data[i, 4] = "Terminal (192.168.0.110)";
-            }
-
-            Excel.Range dataRange = ws.Range[ws.Cells[2, 1], ws.Cells[users.Count + 1, headers.Length]];
-            dataRange.Value2 = data;
-
-            Excel.Range fullTableRange = ws.Range[ws.Cells[1, 1], ws.Cells[users.Count + 1, headers.Length]];
-            try
-            {
-                Excel.ListObject table = ws.ListObjects.Add(
-                    Excel.XlListObjectSourceType.xlSrcRange,
-                    fullTableRange,
-                    Type.Missing,
-                    Excel.XlYesNoGuess.xlYes
-                );
-                table.Name = "Table_Employees";
-                table.TableStyle = "TableStyleMedium9";
-            }
-            catch
-            {
-                // Table already formatted
-            }
-
-            ws.Columns.AutoFit();
-            ((Excel.Range)ws.Columns[1]).HorizontalAlignment = Excel.XlHAlign.xlHAlignCenter;
-            ((Excel.Range)ws.Columns[3]).HorizontalAlignment = Excel.XlHAlign.xlHAlignCenter;
-        }
+        unknown += parsed.Count(p => !p.Ok);
+        AppLogger.Info($"[DeviceSyncManager] BuildEntries: new={result.Count}, duplicates={duplicates}, unknownStaff={unknown}");
+        return (result, duplicates, unknown);
     }
 }

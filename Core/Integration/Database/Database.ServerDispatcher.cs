@@ -8,7 +8,7 @@ using Dapper;
 using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.Types;
 
-public static class ServerDispatcher
+public static partial class ServerDispatcher
 {
     private static readonly PostgreSqlService Db = new();
 
@@ -22,6 +22,11 @@ public static class ServerDispatcher
             // Staff Manager
             case IEnumerable<StaffRecord> staffBatch:
                 PersistStaff(staffBatch.ToList(), isFullBatch: true);
+                break;
+
+            // Schedule Manager (one working date + reference tables)
+            case ScheduleRecord schedule:
+                PersistSchedule(schedule);
                 break;
 
             // Standalone Child Entity Collections

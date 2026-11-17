@@ -13,9 +13,7 @@
 	</PropertyGroup>
 
 	<ItemGroup>
-	  <Compile Remove="ThumbprintSync\**" />
-	  <EmbeddedResource Remove="ThumbprintSync\**" />
-	  <None Remove="ThumbprintSync\**" />
+	  <EmbeddedResource Include="Integration\Database\Schema\schedule_schema.sql" LogicalName="schedule_schema.sql" />
 	</ItemGroup>
 
 	<ItemGroup>

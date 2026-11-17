@@ -99,7 +99,7 @@ public class PortalForm : Form
         var btnScheduler = CreateModuleButton(
             "Schedule Manager",
             "Biometric logs, shifts & job site allocations",
-            () => PortalRouter.Launch(ModuleRegistry.DailyScheduler));
+            () => PortalRouter.Launch(ModuleRegistry.ScheduleManager));
 
         var btnProject = CreateModuleButton(
             "Project Manager",

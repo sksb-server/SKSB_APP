@@ -86,7 +86,7 @@ public static class FolderRegistry
 
 public static class ModuleRegistry
 {
-    public static TemplateAddInPair DailyScheduler { get; } = CreateDefault("DailyScheduler");
+    public static TemplateAddInPair ScheduleManager { get; } = CreateDefault("ScheduleManager");
     public static TemplateAddInPair StaffManager { get; } = CreateDefault("StaffManager");
     public static TemplateAddInPair ProjectManager { get; } = CreateDefault("ProjectManager");
     public static TemplateAddInPair VehicleManager { get; } = CreateDefault("VehicleManager");

@@ -464,6 +464,8 @@ public static class TableMapper
             return dt.ToOADate();
         }
 
+        if (val is TimeOnly timeOfDay) return timeOfDay.ToTimeSpan().TotalDays; // day fraction, shown through the hh:mm format
+
         if (rule != null && val is decimal or double or float or int or long)
         {
             double n = Convert.ToDouble(val, CultureInfo.InvariantCulture);
@@ -563,6 +565,19 @@ public static class TableMapper
 
         if (underlyingType == typeof(DateOnly))
             return ParseToDateOnly(rawValue, strVal);
+
+        if (underlyingType == typeof(TimeOnly))
+        {
+            if (rawValue is double oaTod)
+            {
+                double secs = Math.Round((oaTod - Math.Floor(oaTod)) * 86400.0);
+                return TimeOnly.FromTimeSpan(TimeSpan.FromSeconds(secs >= 86400 ? 0 : secs));
+            }
+            if (rawValue is DateTime dtTod) return TimeOnly.FromDateTime(dtTod);
+            return TimeOnly.TryParse(strVal, CultureInfo.InvariantCulture, DateTimeStyles.None, out var todParsed)
+                ? todParsed
+                : null;
+        }
 
         if (underlyingType == typeof(DateTime))
         {

@@ -26,19 +26,19 @@ Core/ (Core.csproj): Shared foundation library and base XLL add-in. Organized in
 Diagnostics/: Scoped session logging (AppLogger). All debug diagnostics (populate audits, PostgreSQL upload/download summaries, auto-fill sync audits) are written to %USERPROFILE%\Documents\SKSB_App\Data\SKSB_Runtime_Trace.log; no debug modal popups exist.
 Integration/: Database/ (PostgreSqlService, ServerDispatcher, ServerEnvironment) and Erp/ (SQL Payroll / ERP importers & exporters).
 Types/: Domain models (StaffRecord, VehicleRecord, ProjectRecord, ScheduleRecord) and declarative rule attributes (Attributes/).
-ThumbprintSync/: Biometric attendance device sync controllers (DeviceSyncManager.cs, VigilanceController.cs). Currently excluded from compilation in Core.csproj (<Compile Remove="ThumbprintSync\**" />) while staged to be wired into ScheduleManager.
+ThumbprintSync/: Biometric terminal sync (DeviceSyncManager.cs): reads punches through the external ZkBridge.exe helper and converts them into de-duplicated AttendanceSource.Thumbprint AttendanceEntry rows. No COM access; ScheduleManager appends the result to AttendanceEntriesTable on the macro thread.
 StaffManager/ (StaffManager.csproj): Excel-DNA Add-In (StaffManager-AddIn64.xll) for employee profiles, vehicle licenses, skill licenses, and SQL Payroll imports.
 VehicleManager/ (VehicleManager.csproj): Excel-DNA Add-In (VehicleManager-AddIn64.xll) for fleet master records, maintenance, road tax, Puspakom inspections, permits, insurance, odometer logs, and PDF/Excel fuel card imports.
 ProjectManager/ (ProjectManager.csproj): Excel-DNA Add-In (ProjectManager-AddIn64.xll) for iJob, MWO, and Private project master records and client companies.
-ScheduleManager/ (ScheduleManager.csproj): Upcoming Excel-DNA Add-In module for daily project scheduling, worker attendance, and biometric thumbprint sync (currently unwired / excluded from SKSB_App.slnx pending upcoming migration to the generic Core pipeline).
+ScheduleManager/ (ScheduleManager.csproj): Excel-DNA Add-In (ScheduleManager-AddIn64.xll) on SaveContract<ScheduleRecord>: Day/Night dispatch board with match-% ranked dropdowns (ScheduleBoardMapper, ScheduleMatchEngine), append-only attendance entries rolled up into daily attendance (AttendanceRollupService), worker preferences and teams. PostgreSQL tables are created idempotently by ServerDispatcher.EnsureScheduleSchema() from Core/Integration/Database/Schema/schedule_schema.sql.
 Portal/ (Portal.csproj): Standalone WinForms desktop hub (Portal.exe) that launches domain Excel templates with their corresponding .xll add-ins.
 Launcher/ (Launcher.csproj): Self-contained single-file WinForms bootstrapper (SKSB_App.exe) that checks version.json, downloads updates from the production server, and launches Portal.exe.
 Templates/: Master Excel templates (*.xltx).
 
 Staged / Upcoming Subsystems (DO NOT DELETE AS DEAD CODE)
 The following files, types, and methods currently have zero external callers because they are intentionally staged for the upcoming ScheduleManager and ERP Export phases. AI agents must preserve them during dead-code sweeps or refactorings:
-- ScheduleManager/** (ScheduleManager.Events.cs, ScheduleManager.RibbonController.cs, ScheduleManager.ServerSyncCommand.cs, ScheduleManager.SheetMapper.cs) and Core/Types/Types.ScheduleRecord.cs (ScheduleRecord, DailyProjectSchedule, DailyWorkerAttendance, WorkerPreference): Staged for the next development phase; do not delete or modify until explicitly tasked with wiring up ScheduleManager.
-- Core/ThumbprintSync/** (DeviceSyncManager.cs, VigilanceController.cs): Biometric reader and attendance terminal integration staged to be wired into ScheduleManager. Keep the <Compile Remove="ThumbprintSync\**" /> exclusion in Core.csproj until ScheduleManager integration begins.
+- (ScheduleManager and ThumbprintSync are now wired in; they are no longer staged.)
+- Core/Types/Types.ScheduleRecord.cs: ProjectTypeRequirement / SkillIcon are workbook-only reference tables (Lookups sheet); they are not persisted to PostgreSQL.
 - Core/Integration/Erp/Erp.Exporter.cs (ErpExporter) and supporting methods in Erp.Helper.cs (EscapeDelimitedCell, ParseDecimal) and Erp.Importer.cs (ERPTableDocument.Headers, HasColumn, ERPTableRow.GetDecimal, GetBool): Reserved for upcoming ERP / SQL Payroll export functionality.
 - Core/03_RuntimeUI/RuleEngine/RuleEngine.Calculator.cs (WageProvider: RegisterWorkerWages, ClearSchedules, ResolveRate) and Core/Types/Attributes/Attributes.ColumnRules.cs (ColumnRuleAttribute.CountTargetHeader): Staged rule-engine hooks for ScheduleManager payroll rate resolution and multi-select worker attendance counting.
 2. Build, Clean, Publish & Test Commands
@@ -59,7 +59,7 @@ dotnet build SKSB_App.slnx -c Debug
 Build Solution (Release)
 powershell
 dotnet build SKSB_App.slnx -c Release
-Build Standalone Modules (Outside SKSB_App.slnx)
+Build Standalone Modules (also part of SKSB_App.slnx)
 powershell
 dotnet build ProjectManager/ProjectManager.csproj -c Debug
 dotnet build ScheduleManager/ScheduleManager.csproj -c Debug

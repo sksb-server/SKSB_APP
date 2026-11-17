@@ -355,9 +355,33 @@ public static class Arrow
                 : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             // =========================================================================
+            // PATH C: Module-supplied dropdown (e.g. Schedule board match-% ranking)
+            // =========================================================================
+            CustomDropdownResult? custom = rule == null ? CustomDropdowns.TryBuild(singleCell) : null;
+            if (custom != null)
+            {
+                processedItems.AddRange(custom.Options);
+
+                _onItemSelected = chosenDisplay =>
+                {
+                    var targetItem = processedItems.FirstOrDefault(i => i.Display.Equals(chosenDisplay, StringComparison.OrdinalIgnoreCase));
+                    if (targetItem == null) return;
+
+                    bool origEvents = true;
+                    try { origEvents = (bool)xlApp.EnableEvents; xlApp.EnableEvents = false; } catch { }
+                    try { custom.Commit(singleCell, targetItem); }
+                    finally
+                    {
+                        try { xlApp.EnableEvents = origEvents; } catch { }
+                    }
+
+                    ParameterCells.NotifyChanged(sheet, singleCell);
+                };
+            }
+            // =========================================================================
             // PATH A: Unified C# Attribute Rule Engine (Zero COM formula evaluations)
             // =========================================================================
-            if (rule != null && rule.HasDropdown)
+            else if (rule != null && rule.HasDropdown)
             {
                 var evaluatedOptions = RuleEvaluator.GetEvaluatedDropdownOptions(wb, table, row, rule);
                 processedItems.AddRange(evaluatedOptions);
@@ -450,7 +474,12 @@ public static class Arrow
                 var sortedValid = validItems.OrderBy(i => i.Section).ThenBy(i => i.Display);
                 var sortedInvalid = invalidItems.OrderBy(i => i.Section).ThenBy(i => i.Display);
 
-                if (!string.IsNullOrWhiteSpace(inCellText) && (rule == null || !rule.IsMultiSelect))
+                if (custom != null)
+                {
+                    // Provider order (e.g. match-% rank) is authoritative.
+                    sortedValid = validItems.OrderBy(i => i.Section);
+                }
+                else if (!string.IsNullOrWhiteSpace(inCellText) && (rule == null || !rule.IsMultiSelect))
                 {
                     string q = inCellText.Trim();
                     Func<DropdownOption, int> ranker = i =>
