@@ -78,6 +78,7 @@ public record StaffRecord
     [ExcelColumn("Staff ID", isRequired: true)]
     [ColumnRule(IsRequired = true)]
     [ColumnDefault(DefaultKind.AutoIncrement)]
+    [ColumnFormat(ColumnFormatKind.Id, zero: ZeroBehavior.Blank)]
     public long StaffID { get; set; } = 0;
 
     [DataDetail]
@@ -103,6 +104,7 @@ public record StaffRecord
 public record StaffDetails
 {
     // Restored on StaffDetails for backward compatibility with Importer and Sync commands
+    [ColumnFormat(ColumnFormatKind.Id, zero: ZeroBehavior.Blank)]
     public long StaffID { get; set; } = 0;
 
     [DataList("StaffNameList")]
@@ -151,10 +153,12 @@ public record StaffDetails
     [ExcelColumn("Join Date", isRequired: true)]
     [ColumnRule(IsRequired = true)]
     [ColumnDefault(DefaultKind.Today)]
+    [ColumnFormat(ColumnFormatKind.Date)]
     public DateOnly JoinDate { get; set; } = DateOnly.FromDateTime(DateTime.Today);
 
     [ExcelColumn("Resign Date")]
     [ColumnRule(IsRequired = false)]
+    [ColumnFormat(ColumnFormatKind.Date)]
     public DateOnly? ResignDate { get; set; } = null;
 
     [ExcelColumn("Contract Status", isRequired: true)]
@@ -195,11 +199,13 @@ public record VehicleLicense
     [ExcelColumn("Vehicle License ID", isRequired: true)]
     [ColumnRule(IsRequired = true)]
     [ColumnDefault(DefaultKind.AutoIncrement)]
+    [ColumnFormat(ColumnFormatKind.Id, zero: ZeroBehavior.Blank)]
     public long VehicleLicenseID { get; set; } = 0;
 
     [ExcelColumn("Staff ID", isRequired: true)]
     [ColumnRule("AllStaffsTable[Staff ID]", IsRequired = true)]
     [ColumnSync("Staff Name", "AllStaffsTable[Staff ID]", "AllStaffsTable[Staff Name]")]
+    [ColumnFormat(ColumnFormatKind.Id, zero: ZeroBehavior.Blank)]
     public long StaffID { get; set; } = 0;
 
     [ExcelColumn("Staff Name")]
@@ -253,6 +259,7 @@ public record VehicleLicense
 
     [ExcelColumn("Cost")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
+    [ColumnFormat(ColumnFormatKind.Currency)]
     public decimal Cost { get; set; } = 0.00m;
 }
 
@@ -266,11 +273,13 @@ public record SkillLicense
     [ExcelColumn("Skill License ID", isRequired: true)]
     [ColumnRule(IsRequired = true)]
     [ColumnDefault(DefaultKind.AutoIncrement)]
+    [ColumnFormat(ColumnFormatKind.Id, zero: ZeroBehavior.Blank)]
     public long SkillLicenseID { get; set; } = 0;
 
     [ExcelColumn("Staff ID", isRequired: true)]
     [ColumnRule("AllStaffsTable[Staff ID]", IsRequired = true)]
     [ColumnSync("Staff Name", "AllStaffsTable[Staff ID]", "AllStaffsTable[Staff Name]")]
+    [ColumnFormat(ColumnFormatKind.Id, zero: ZeroBehavior.Blank)]
     public long StaffID { get; set; } = 0;
 
     [ExcelColumn("Staff Name")]
@@ -323,6 +332,7 @@ public record SkillLicense
 
     [ExcelColumn("Cost")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
+    [ColumnFormat(ColumnFormatKind.Currency)]
     public decimal Cost { get; set; } = 0.00m;
 }
 

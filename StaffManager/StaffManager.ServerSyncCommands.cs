@@ -14,11 +14,28 @@ using SKSB_App.Core.WorkbookSave.Storage;
 
 public static class ServerSyncCommands
 {
+    /// <summary>
+    /// Fills a blank <see cref="StaffDetails.StaffShortName"/> from the staff name (first + last word), so saving never
+    /// overwrites staff_master.short_name with an empty string when the sheet has no Short Name value.
+    /// </summary>
+    internal static void DeriveShortNames(IEnumerable<StaffRecord>? staffList)
+    {
+        if (staffList == null) return;
+        foreach (var staff in staffList)
+        {
+            var details = staff.StaffDetails;
+            if (details == null || !string.IsNullOrWhiteSpace(details.StaffShortName)) continue;
+            details.StaffShortName = RuleEvaluator.ApplyTextTransform(details.StaffName ?? string.Empty, TransformKind.ShortNameFirstLast);
+        }
+    }
+
     public static bool SaveStaffSilent(List<StaffRecord> staffList, out string errorMessage)
     {
         errorMessage = string.Empty;
         try
         {
+            DeriveShortNames(staffList);
+
             // 1. Persist auxiliary SkillLicenseTypesTable
             var skillTypes = SheetMapper.ExtractSkillLicenseTypes();
             if (skillTypes.Count > 0)

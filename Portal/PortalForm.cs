@@ -97,7 +97,7 @@ public partial class PortalForm : Form
 
         // Module Buttons wired to ModuleRegistry matching current architecture
         var btnScheduler = CreateModuleButton(
-            "Daily Scheduler",
+            "Schedule Manager",
             "Biometric logs, shifts & job site allocations",
             () => PortalRouter.Launch(ModuleRegistry.DailyScheduler));
 

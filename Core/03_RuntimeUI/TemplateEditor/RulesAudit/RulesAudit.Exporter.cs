@@ -135,6 +135,10 @@ public static class RulesAuditExporter
                         var csharpRule = RuleRegistry.GetRule(tableName, headerText);
                         bool hasCSharp = csharpRule != null;
 
+                        // C#-evaluated columns: surface the declarative formula instead of any legacy cell formula
+                        if (csharpRule?.DisplayFormula != null)
+                            cellFormula = $"{csharpRule.DisplayFormula} [C#]";
+
                         var cfg = Metadata.ReadConfig(archetypeCell);
                         bool isCustomDropdown = !cfg.IsEmpty;
 

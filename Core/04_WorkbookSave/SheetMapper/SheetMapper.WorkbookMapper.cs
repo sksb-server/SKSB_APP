@@ -168,6 +168,16 @@ public sealed class WorkbookMapping<TMaster, TKey>
 
     public List<IChildTableBinding<TMaster, TKey>> Children { get; set; } = new();
 
+    // ---- Multi-table master override (e.g. one master table per category sheet) ----
+    /// <summary>
+    /// When set, replaces single-table master extraction: the module reads every master table itself
+    /// (and may add its own errors). Args: workbook, errors. The standard child / validation pipeline still runs.
+    /// </summary>
+    public Func<object, List<string>, List<TMaster>>? CustomMasterExtractor { get; set; }
+
+    /// <summary>When set, replaces the single-table master write. Args: workbook, ordered masters.</summary>
+    public Action<object, List<TMaster>>? CustomMasterPopulator { get; set; }
+
     // ---- Extraction hooks ----
     public Action<TMaster>? NormalizeMasterRecord { get; set; }
 
@@ -188,6 +198,9 @@ public sealed class WorkbookMapping<TMaster, TKey>
 
     /// <summary>Runs after master and child tables are written. Args: workbook, ordered masters.</summary>
     public Action<dynamic, List<TMaster>>? OnPopulateAuxiliaryTables { get; set; }
+
+    /// <summary>Runs [ColumnCalculate] / [ColumnRollup] over the masters (after children are attached on extract, before populate).</summary>
+    public Action<object, List<TMaster>>? ApplyMasterCalculations { get; set; }
 
     /// <summary>Forces a full recalculation after populate so formula columns are current before healing.</summary>
     public bool RecalculateAfterPopulate { get; set; }
@@ -221,14 +234,23 @@ public static class WorkbookMapper
             if (wb == null) return (null, new List<string> { "No active workbook found." }, new List<string>());
             object wbObj = wb;
 
-            dynamic? masterWs = SheetMapperHelper.ResolveSheetSafely(wbObj, map.MasterSheetAliases, map.MasterSheetName);
-            if (masterWs == null)
+            var customErrors = new List<string>();
+            List<TMaster> masters;
+            if (map.CustomMasterExtractor != null)
             {
-                return (null, new List<string> { $"Worksheet '{map.MasterSheetName}' was not found in workbook." }, new List<string>());
+                masters = map.CustomMasterExtractor(wbObj, customErrors);
             }
+            else
+            {
+                dynamic? masterWs = SheetMapperHelper.ResolveSheetSafely(wbObj, map.MasterSheetAliases, map.MasterSheetName);
+                if (masterWs == null)
+                {
+                    return (null, new List<string> { $"Worksheet '{map.MasterSheetName}' was not found in workbook." }, new List<string>());
+                }
 
-            // 1. Extract master records (runs EvaluateAndHealTable automatically inside TableMapper)
-            List<TMaster> masters = TableMapper.ExtractFromTable<TMaster>((object)masterWs, map.MasterTableName);
+                // 1. Extract master records (runs EvaluateAndHealTable automatically inside TableMapper)
+                masters = TableMapper.ExtractFromTable<TMaster>((object)masterWs, map.MasterTableName);
+            }
 
             // 2. Normalise master records
             if (map.NormalizeMasterRecord != null)
@@ -246,12 +268,15 @@ public static class WorkbookMapper
                 masterMap.TryAdd(key, m); // first occurrence wins; duplicates are reported in step 5
             }
 
-            var hookErrors = new List<string>();
+            var hookErrors = new List<string>(customErrors);
             var hookWarnings = new List<string>();
             foreach (var child in map.Children)
             {
                 child.ExtractInto(wbObj, masterMap, isValidKey, map.MasterSheetName, map.MasterKeyLabel, hookErrors);
             }
+
+            // 3b. Child collections are attached: evaluate declarative rollups / calculations on each master
+            map.ApplyMasterCalculations?.Invoke(wbObj, masters);
 
             map.PreValidationHook?.Invoke(wbObj, masters, hookErrors, hookWarnings);
 
@@ -495,6 +520,17 @@ public static class WorkbookMapper
         if (records == null) return;
 
         // 2. Module-defined ordering (pure in-memory, done before any COM work)
+        if (map.ApplyMasterCalculations != null)
+        {
+            try
+            {
+                dynamic calcApp = ExcelDnaUtil.Application;
+                dynamic? activeWb = calcApp.ActiveWorkbook;
+                if (activeWb != null) map.ApplyMasterCalculations((object)activeWb, records);
+            }
+            catch (Exception exCalc) { AppLogger.Warn($"[WorkbookMapper] ApplyMasterCalculations warning: {exCalc.Message}"); }
+        }
+
         List<TMaster> ordered = map.OrderMasterRecords?.Invoke(records) ?? records;
 
         // 1. Standard COM freeze for the whole pass
@@ -514,8 +550,14 @@ public static class WorkbookMapper
             object wbObj = wb;
 
             // 3 + 4. Master table
-            dynamic? masterWs = SheetMapperHelper.ResolveSheetSafely(wbObj, map.MasterSheetAliases, map.MasterSheetName);
-            if (masterWs != null)
+            dynamic? masterWs = map.CustomMasterPopulator != null
+                ? null
+                : SheetMapperHelper.ResolveSheetSafely(wbObj, map.MasterSheetAliases, map.MasterSheetName);
+            if (map.CustomMasterPopulator != null)
+            {
+                map.CustomMasterPopulator(wbObj, ordered);
+            }
+            else if (masterWs != null)
             {
                 SheetProtections.ExecuteWithBypass((object)masterWs, new Action(() =>
                 {
@@ -549,7 +591,8 @@ public static class WorkbookMapper
                         dynamic tbl = sheet.ListObjects[tableName];
                         if (tbl != null)
                         {
-                            RuleEvaluator.EvaluateAndHealTable(sheet, tbl);
+                            try { RuleEvaluator.EvaluateAndHealTable(sheet, tbl); }
+                            catch (Exception exHeal) { AppLogger.Warn($"[WorkbookMapper] Heal failed for '{tableName}': {exHeal.Message}"); }
 
                             // Calculation is frozen to manual: refresh dependants so the next table
                             // in the chain heals against current formula results.

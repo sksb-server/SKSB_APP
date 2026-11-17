@@ -13,6 +13,22 @@ using System.Threading.Tasks;
 
 internal static class ServerSyncCommands
 {
+    /// <summary>Reads a text column that may not exist yet on an un-migrated database (DapperRow is an IDictionary).</summary>
+    private static string ColumnText(object row, string column) =>
+        row is IDictionary<string, object?> d && d.TryGetValue(column, out var value) ? value?.ToString() ?? string.Empty : string.Empty;
+
+    /// <summary>Reads a nullable DB date; NULL and sentinel dates (Year <= 1900) become null instead of DateOnly.MinValue.</summary>
+    private static DateOnly? ValidDate(object? raw)
+    {
+        if (raw == null) return null;
+        try
+        {
+            var d = DateOnly.FromDateTime(Convert.ToDateTime(raw));
+            return d.Year <= 1900 ? null : d;
+        }
+        catch { return null; }
+    }
+
     internal static bool SaveVehiclesSilent(List<VehicleRecord> vehicleList, out string errorMessage)
     {
         errorMessage = string.Empty;
@@ -102,16 +118,18 @@ internal static class ServerSyncCommands
                         VehicleDetail = new VehicleDetail
                         {
                             VIN = (string)(v.vin ?? string.Empty),
+                            DrivenBy = ColumnText(v, "driven_by"),
+                            UsedAt = ColumnText(v, "used_at"),
                             Type = Enum.TryParse<VehicleType>((string)v.vehicle_type, true, out var vt) ? vt : VehicleType.None,
                             Brand = (string)(v.brand ?? string.Empty),
                             Model = (string)(v.model ?? string.Empty),
-                            RoadTaxExpiry = v.road_tax_expiry != null ? DateOnly.FromDateTime((DateTime)v.road_tax_expiry) : default,
-                            InspectionExpiry = v.inspection_expiry != null ? DateOnly.FromDateTime((DateTime)v.inspection_expiry) : default,
-                            CurrentOdometer = v.current_odometer != null ? Math.Round(Convert.ToDecimal(v.current_odometer), 1) : 0,
-                            BoughtDate = v.bought_date != null ? DateOnly.FromDateTime((DateTime)v.bought_date) : null,
-                            SoldDate = v.sold_date != null ? DateOnly.FromDateTime((DateTime)v.sold_date) : null,
-                            BoughtPrice = v.bought_price != null ? Convert.ToDecimal(v.bought_price) : 0.00m,
-                            SoldPrice = v.sold_price != null ? Convert.ToDecimal(v.sold_price) : 0.00m
+                            RoadTaxExpiry = ValidDate(v.road_tax_expiry),
+                            InspectionExpiry = ValidDate(v.inspection_expiry),
+                            CurrentOdometer = v.current_odometer != null ? Math.Round(Convert.ToDecimal(v.current_odometer), 1) : (decimal?)null,
+                            BoughtDate = ValidDate(v.bought_date),
+                            SoldDate = ValidDate(v.sold_date),
+                            BoughtPrice = v.bought_price != null ? Convert.ToDecimal(v.bought_price) : (decimal?)null,
+                            SoldPrice = v.sold_price != null ? Convert.ToDecimal(v.sold_price) : (decimal?)null
                         },
                         Maintenances = new List<Maintenance>(),
                         RoadTaxes = new List<RoadTax>(),
@@ -152,23 +170,24 @@ internal static class ServerSyncCommands
                                 DateCompleted = m.date_completed != null ? DateOnly.FromDateTime(Convert.ToDateTime(m.date_completed)) : null,
                                 OdometerIn = m.odometer_in != null ? Math.Round(Convert.ToDecimal(m.odometer_in), 1) : 0,
                                 OdometerOut = m.odometer_out != null ? Math.Round(Convert.ToDecimal(m.odometer_out), 1) : 0,
-                                RepairCost = m.repair_cost != null ? Convert.ToDecimal(m.repair_cost) : 0.00m,
+                                RepairCost = m.repair_cost != null ? Convert.ToDecimal(m.repair_cost) : (decimal?)null,
                                 WorkshopName = m.workshop_name?.ToString() ?? string.Empty,
+                                WorkshopAddress = ColumnText(m, "workshop_address"),
                                 MaintenanceStatus = mStatus,
                                 Remarks = m.remarks?.ToString() ?? string.Empty,
 
                                 // ✅ Load all 11 breakdown costs:
-                                TyreCost = m.tyre_cost != null ? Convert.ToDecimal(m.tyre_cost) : 0.00m,
-                                BrakeCost = m.brake_cost != null ? Convert.ToDecimal(m.brake_cost) : 0.00m,
-                                ClutchCost = m.clutch_cost != null ? Convert.ToDecimal(m.clutch_cost) : 0.00m,
-                                ServiceCost = m.service_cost != null ? Convert.ToDecimal(m.service_cost) : 0.00m,
-                                FuelPumpCost = m.fuel_pump_cost != null ? Convert.ToDecimal(m.fuel_pump_cost) : 0.00m,
-                                AircondCost = m.aircond_cost != null ? Convert.ToDecimal(m.aircond_cost) : 0.00m,
-                                WiringCost = m.wiring_cost != null ? Convert.ToDecimal(m.wiring_cost) : 0.00m,
-                                BatteryCost = m.battery_cost != null ? Convert.ToDecimal(m.battery_cost) : 0.00m,
-                                TowingCost = m.towing_cost != null ? Convert.ToDecimal(m.towing_cost) : 0.00m,
-                                CushionCost = m.cushion_cost != null ? Convert.ToDecimal(m.cushion_cost) : 0.00m,
-                                PartsCost = m.parts_cost != null ? Convert.ToDecimal(m.parts_cost) : 0.00m
+                                TyreCost = m.tyre_cost != null ? Convert.ToDecimal(m.tyre_cost) : (decimal?)null,
+                                BrakeCost = m.brake_cost != null ? Convert.ToDecimal(m.brake_cost) : (decimal?)null,
+                                ClutchCost = m.clutch_cost != null ? Convert.ToDecimal(m.clutch_cost) : (decimal?)null,
+                                ServiceCost = m.service_cost != null ? Convert.ToDecimal(m.service_cost) : (decimal?)null,
+                                FuelPumpCost = m.fuel_pump_cost != null ? Convert.ToDecimal(m.fuel_pump_cost) : (decimal?)null,
+                                AircondCost = m.aircond_cost != null ? Convert.ToDecimal(m.aircond_cost) : (decimal?)null,
+                                WiringCost = m.wiring_cost != null ? Convert.ToDecimal(m.wiring_cost) : (decimal?)null,
+                                BatteryCost = m.battery_cost != null ? Convert.ToDecimal(m.battery_cost) : (decimal?)null,
+                                TowingCost = m.towing_cost != null ? Convert.ToDecimal(m.towing_cost) : (decimal?)null,
+                                CushionCost = m.cushion_cost != null ? Convert.ToDecimal(m.cushion_cost) : (decimal?)null,
+                                PartsCost = m.parts_cost != null ? Convert.ToDecimal(m.parts_cost) : (decimal?)null
                             });
                         }
                     }
@@ -195,7 +214,7 @@ internal static class ServerSyncCommands
                                 VehiclePlate = p,
                                 RenewDate = r.renew_date != null ? DateOnly.FromDateTime(Convert.ToDateTime(r.renew_date)) : DateOnly.FromDateTime(DateTime.Today),
                                 ExpiryDate = r.expiry_date != null ? DateOnly.FromDateTime(Convert.ToDateTime(r.expiry_date)) : DateOnly.FromDateTime(DateTime.Today.AddYears(1)),
-                                Amount = r.amount != null ? Convert.ToDecimal(r.amount) : 0.00m,
+                                Amount = r.amount != null ? Convert.ToDecimal(r.amount) : (decimal?)null,
                                 Status = rStatus,
                                 Remarks = r.remarks?.ToString() ?? string.Empty
                             });
@@ -222,7 +241,7 @@ internal static class ServerSyncCommands
                                 ScheduleDateIn = i.schedule_date_in != null ? DateOnly.FromDateTime(Convert.ToDateTime(i.schedule_date_in)) : DateOnly.FromDateTime(DateTime.Today),
                                 DateOut = i.date_out != null ? DateOnly.FromDateTime(Convert.ToDateTime(i.date_out)) : DateOnly.FromDateTime(DateTime.Today),
                                 ExpiryDate = i.expiry_date != null ? DateOnly.FromDateTime(Convert.ToDateTime(i.expiry_date)) : DateOnly.FromDateTime(DateTime.Today.AddMonths(6)),
-                                Amount = i.amount != null ? Convert.ToDecimal(i.amount) : 0.00m,
+                                Amount = i.amount != null ? Convert.ToDecimal(i.amount) : (decimal?)null,
                                 Status = iStatus,
                                 Address = i.address?.ToString() ?? string.Empty,
                                 Remarks = i.remarks?.ToString() ?? string.Empty
@@ -251,7 +270,7 @@ internal static class ServerSyncCommands
                                 PermitType = pType,
                                 RenewDate = pRec.renew_date != null ? DateOnly.FromDateTime(Convert.ToDateTime(pRec.renew_date)) : DateOnly.FromDateTime(DateTime.Today),
                                 ExpiryDate = pRec.expiry_date != null ? DateOnly.FromDateTime(Convert.ToDateTime(pRec.expiry_date)) : DateOnly.FromDateTime(DateTime.Today.AddYears(1)),
-                                Amount = pRec.amount != null ? Convert.ToDecimal(pRec.amount) : 0.00m,
+                                Amount = pRec.amount != null ? Convert.ToDecimal(pRec.amount) : (decimal?)null,
                                 Status = pStatus,
                                 Remarks = pRec.remarks?.ToString() ?? string.Empty
                             });
@@ -280,7 +299,7 @@ internal static class ServerSyncCommands
                                 InsuranceType = insType,
                                 RenewDate = ins.renew_date != null ? DateOnly.FromDateTime(Convert.ToDateTime(ins.renew_date)) : DateOnly.FromDateTime(DateTime.Today),
                                 ExpiryDate = ins.expiry_date != null ? DateOnly.FromDateTime(Convert.ToDateTime(ins.expiry_date)) : DateOnly.FromDateTime(DateTime.Today.AddYears(1)),
-                                Amount = ins.amount != null ? Convert.ToDecimal(ins.amount) : 0.00m,
+                                Amount = ins.amount != null ? Convert.ToDecimal(ins.amount) : (decimal?)null,
                                 Status = insStatus,
                                 Remarks = ins.remarks?.ToString() ?? string.Empty,
                                 InsuranceNumber = ins.insurance_number?.ToString() ?? string.Empty // <-- Added
@@ -318,7 +337,7 @@ internal static class ServerSyncCommands
                                 VehiclePlate = p,
                                 StaffID = sId,
                                 Project = o.project?.ToString() ?? string.Empty,
-                                OdometerBefore = o.odometer_before != null ? Math.Round(Convert.ToDecimal(o.odometer_before), 1) : 0,
+                                OdometerBefore = o.odometer_before != null ? Math.Round(Convert.ToDecimal(o.odometer_before), 1) : (decimal?)null,
                                 CurrentOdometer = o.current_odometer != null ? Math.Round(Convert.ToDecimal(o.current_odometer), 1) : 0,
                                 FuelCardNumber = o.fuel_card_number?.ToString() ?? string.Empty,
                                 FuelCompany = o.fuel_company?.ToString() ?? string.Empty,
@@ -362,7 +381,7 @@ internal static class ServerSyncCommands
                                 MaintenanceID = c.maintenance_id != null ? Convert.ToInt64(c.maintenance_id) : 0,
                                 WorkshopName = c.workshop_name?.ToString() ?? string.Empty,
                                 Status = cStatus,
-                                ClaimAmount = c.claim_amount != null ? Convert.ToDecimal(c.claim_amount) : 0.00m,
+                                ClaimAmount = c.claim_amount != null ? Convert.ToDecimal(c.claim_amount) : (decimal?)null,
                                 Remarks = c.remarks?.ToString() ?? string.Empty
                             });
                         }

@@ -2,6 +2,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Text.Json.Serialization;
 using SKSB_App.Core.Types.Attributes;
 
 // =========================================================================
@@ -87,6 +88,9 @@ public record DailyProjectSchedule
 
 [ExcelTable("DailyAttendanceTable")]
 [ExcelTable("TimeAttendanceTable")]
+// No hourly-rate cell exists on the attendance sheet yet: the default applies until WageProvider
+// receives per-worker schedules (Staff Manager wages sheet) or a rate cell is added at this address.
+[SheetParameter("WorkerHourlyRate", "XFD1", defaultValue: 15.00)]
 public record DailyWorkerAttendance
 {
     public DateOnly DailyScheduleDate { get; set; } = DateOnly.FromDateTime(DateTime.Today);
@@ -94,6 +98,7 @@ public record DailyWorkerAttendance
     [ExcelColumn("Staff ID", isRequired: true)]
     [ColumnRule("StaffIDList", IsRequired = true)]
     [ColumnSync("Staff Name", "StaffIDList", "StaffNameList")]
+    [ColumnFormat(ColumnFormatKind.Id, zero: ZeroBehavior.Blank)]
     public long StaffID { get; set; } = 0;
 
     [ExcelColumn("Staff Name")]
@@ -113,17 +118,39 @@ public record DailyWorkerAttendance
     [ColumnRule(IsRequired = false)]
     public TimeOnly ClockOutTime { get; set; } = TimeOnly.MaxValue;
 
-    [ExcelColumn("Base Hours")]
-    [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
-    public decimal BaseHours { get; set; } = 0.0m;
+    [ExcelColumn("Regular Shift")]
+    [ColumnRule(IsRequired = false, AllowNonNegativeZero = true, RoundDownStep = 0.5)]
+    [ColumnFormat(ColumnFormatKind.Shifts)]
+    public decimal RegularShift { get; set; } = 0.0m;
 
     [ExcelColumn("OT Hours")]
-    [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
+    [ColumnRule(IsRequired = false, AllowNonNegativeZero = true, RoundDownStep = 0.5)]
+    [ColumnFormat(ColumnFormatKind.Hours)]
     public decimal OTHours { get; set; } = 0.0m;
 
     [ExcelColumn("Additional OT Hours")]
-    [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
+    [ColumnRule(IsRequired = false, AllowNonNegativeZero = true, RoundDownStep = 0.5)]
+    [ColumnFormat(ColumnFormatKind.Hours)]
     public decimal AdditionalOTHours { get; set; } = 0.0m;
+
+    // ---- C#-calculated payroll columns (replace the former Excel formulas; never persisted) ----
+    [JsonIgnore]
+    [ColumnCalculate("ROUND([Regular Shift] * (WAGE_RATE([Staff Name], [DailyScheduleDate], @WorkerHourlyRate) * 8), 2)")]
+    [ExcelColumn("Base Salary")]
+    [ColumnFormat(ColumnFormatKind.Currency)]
+    public decimal? BaseSalary { get; set; }
+
+    [JsonIgnore]
+    [ColumnCalculate("ROUND(([OT Hours] + [Additional OT Hours]) * WAGE_RATE([Staff Name], [DailyScheduleDate], @WorkerHourlyRate) * 1.5, 2)")]
+    [ExcelColumn("OT Salary")]
+    [ColumnFormat(ColumnFormatKind.Currency)]
+    public decimal? OTSalary { get; set; }
+
+    [JsonIgnore]
+    [ColumnCalculate("[Base Salary] + [OT Salary]")]
+    [ExcelColumn("Total Earned")]
+    [ColumnFormat(ColumnFormatKind.Currency)]
+    public decimal? TotalEarned { get; set; }
 
     [ExcelColumn("Biometric Status")]
     [ColumnRule("BiometricStatusList", IsRequired = false)]

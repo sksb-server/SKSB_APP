@@ -60,6 +60,21 @@ public class Events : ManagerEventsBase<List<VehicleRecord>>
     protected override SaveContract<List<VehicleRecord>> Contract => VehicleSyncDescriptor;
 
     // =========================================================================
+    // 1b. ADD-IN LIFECYCLE (date filter observers on top of the shared base)
+    // =========================================================================
+    public override void AutoOpen()
+    {
+        base.AutoOpen();
+        SheetMapper.RegisterRollupHooks();
+    }
+
+    public override void AutoClose()
+    {
+        SheetMapper.UnregisterRollupHooks();
+        base.AutoClose();
+    }
+
+    // =========================================================================
     // 2. LOOKUP SYNCHRONISATION (runs on the Excel macro thread via the base class)
     // =========================================================================
     protected override void SyncCustomLookups(bool isInteractive)

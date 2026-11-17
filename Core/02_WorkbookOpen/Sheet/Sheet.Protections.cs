@@ -3,6 +3,7 @@
 using System;
 using System.Collections.Generic;
 using ExcelDna.Integration;
+using SKSB_App.Core.RuntimeUI.RuleEngine;
 
 /// <summary>
 /// Table self-healing WITHOUT native sheet protection (worksheet.Protect is forbidden: it breaks
@@ -40,11 +41,16 @@ public static class SheetProtections
             int startCol = (int)table.HeaderRowRange.Column;
             int colCount = (int)table.ListColumns.Count;
             int rows = (int)bodyRange.Rows.Count;
+            string tableName = table.Name?.ToString() ?? string.Empty;
 
             for (int c = 1; c <= colCount; c++)
             {
                 try
                 {
+                    // C#-calculated columns never get a legacy Excel formula restored.
+                    string headerText = worksheet.Cells[headerRow, startCol + c - 1].Value2?.ToString()?.Trim() ?? string.Empty;
+                    if (RuleRegistry.GetRule(tableName, headerText)?.HasCSharpFormula == true) continue;
+
                     dynamic archetype = worksheet.Cells[headerRow + 1, startCol + c - 1];
                     string formula = archetype.Formula?.ToString() ?? string.Empty;
                     if (!formula.StartsWith("=")) continue;

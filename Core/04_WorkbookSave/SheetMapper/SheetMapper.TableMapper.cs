@@ -1,4 +1,4 @@
-﻿namespace SKSB_App.Core.WorkbookSave.SheetMapper;
+namespace SKSB_App.Core.WorkbookSave.SheetMapper;
 
 using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.RuntimeUI.RuleEngine;
@@ -134,10 +134,11 @@ public static class TableMapper
             foreach (var binding in propBindings)
             {
                 object? rawVal = dataGrid[r, binding.ColumnIndex];
-                if (rawVal == null || SheetMapperHelper.IsComError(rawVal)) continue;
+                bool isBlank = rawVal == null || SheetMapperHelper.IsComError(rawVal);
 
-                object? converted = ConvertValue(rawVal, binding.Property.PropertyType,
-                    binding.Property.Name.Equals("Time", StringComparison.OrdinalIgnoreCase));
+                // Blank / "—" => null; an explicit 0 / "RM 0.00" converts to 0 and is preserved.
+                object? converted = isBlank ? null : ConvertValue(rawVal, binding.Property.PropertyType,
+                    IsTimeProperty(binding.Property));
                 if (converted != null)
                 {
                     object targetObj = binding.TargetInstance(item);
@@ -146,6 +147,12 @@ public static class TableMapper
                         binding.Property.SetValue(targetObj, converted);
                         hasValidData = true;
                     }
+                }
+                else if (Nullable.GetUnderlyingType(binding.Property.PropertyType) != null)
+                {
+                    // Nullable column: clear any non-null default initializer so "—" round-trips as null.
+                    object targetObj = binding.TargetInstance(item);
+                    if (targetObj != null) binding.Property.SetValue(targetObj, null);
                 }
             }
 
@@ -213,9 +220,32 @@ public static class TableMapper
                     {
                         dynamic cell = worksheet.Cells[hRow + 1, sCol + c - 1]; // <-- Cleans Row 4 (the archetype row)
                         string f = cell.Formula?.ToString() ?? string.Empty;
-                        if (!f.StartsWith("="))
+                        string hdr = worksheet.Cells[hRow, sCol + c - 1].Value2?.ToString()?.Trim() ?? string.Empty;
+                        var cRule = RuleRegistry.GetRule(tName, hdr);
+                        if (!f.StartsWith("=") || cRule?.IsStrictlyCalculated == true)
                         {
                             try { cell.Value2 = null; } catch { }
+                            RuleRegistry.ApplyCalculatedColumnLock(cell, cRule);
+                        }
+
+                        // Templates no longer carry "@" / number formats: seed the empty archetype row so the first row a user
+                        // types keeps leading zeros (phone / card / receipt text) and the declared numeric formats.
+                        if (cRule != null && !f.StartsWith("="))
+                        {
+                            try
+                            {
+                                string? propName = cRule.Property?.Name;
+                                bool isIc = string.Equals(propName, "NRIC", StringComparison.OrdinalIgnoreCase) ||
+                                            hdr.Equals("IC Number", StringComparison.OrdinalIgnoreCase);
+                                bool isTime = cRule.Property != null && IsTimeProperty(cRule.Property);
+                                bool isOdo = cRule.EffectiveFormatKind == ColumnFormatKind.OdometerDynamic;
+                                if (isTime) { /* hh:mm is applied on populate */ }
+                                else if (isIc || (cRule.PropertyType == typeof(string) && !isOdo && !RuleRegistry.ShouldApplyFormat(cRule)))
+                                    cell.NumberFormat = "@";
+                                else if (!isOdo && RuleRegistry.ShouldApplyFormat(cRule))
+                                    cell.NumberFormat = cRule.ExcelNumberFormat;
+                            }
+                            catch { }
                         }
                     }
                 }
@@ -259,7 +289,9 @@ public static class TableMapper
             {
                 dynamic archCell = worksheet.Cells[headerRow + 1, binding.ColumnIndex];
                 string archFormula = archCell.Formula?.ToString() ?? string.Empty;
-                if (archFormula.StartsWith("="))
+                string colHeader = worksheet.Cells[headerRow, binding.ColumnIndex].Value2?.ToString()?.Trim() ?? string.Empty;
+                var rule = RuleRegistry.GetRule(tName, colHeader);
+                if (archFormula.StartsWith("=") && rule?.HasCSharpFormula != true)
                 {
                     continue;
                 }
@@ -277,12 +309,21 @@ public static class TableMapper
                 catch { }
 
                 // Inside TableMapper.PopulateTableSafe, right after reading archFmt:
-                bool isTimeColumn = binding.Property.Name.Equals("Time", StringComparison.OrdinalIgnoreCase);
-                bool isTextFormattedCell = !isTimeColumn &&
-                                           (string.Equals(archFmt, "@", StringComparison.OrdinalIgnoreCase) ||
+                bool isTimeColumn = IsTimeProperty(binding.Property);
+                bool isOdometerColumn = binding.Property.Name is "CurrentOdometer" or "OdometerBefore" or "OdometerIn" or "OdometerOut" or "OdometerDifference"
+                                         || rule?.EffectiveFormatKind == ColumnFormatKind.OdometerDynamic;
+                // IC numbers are always written as zero-padded 12-digit text (0 => blank), never with a numeric format.
+                bool isIcColumn = binding.Property.Name.Equals("NRIC", StringComparison.OrdinalIgnoreCase) ||
+                                  colHeader.Equals("IC Number", StringComparison.OrdinalIgnoreCase);
+                // Explicit non-text [ColumnFormat] (e.g. Id) on a non-string property overrides a stale "@" archetype.
+                bool overridesTextFormat = !isIcColumn && !isOdometerColumn && RuleRegistry.ShouldApplyFormat(rule) &&
+                                           (binding.Property.PropertyType != typeof(string) ||
+                                            rule?.EffectiveFormatKind == ColumnFormatKind.Id);
+                bool isTextFormattedCell = !isTimeColumn && !overridesTextFormat &&
+                                           (isIcColumn ||
+                                            string.Equals(archFmt, "@", StringComparison.OrdinalIgnoreCase) ||
                                             binding.Property.PropertyType == typeof(string));
 
-                bool isOdometerColumn = binding.Property.Name is "CurrentOdometer" or "OdometerBefore" or "OdometerIn" or "OdometerOut";
 
                 object[,] colData = new object[effectiveRows, 1];
                 for (int r = 0; r < recordCount; r++)
@@ -298,14 +339,14 @@ public static class TableMapper
                         else
                             colData[r, 0] = string.Empty;
                     }
-                    else if (isTextFormattedCell && val is long lVal)
+                    else if (isTextFormattedCell && isIcColumn && val is long lVal)
                     {
-                        // If the cell is formatted as Text ("@") in the template, write long as string (and hide 0)
+                        // 12-digit IC numbers only: write as zero-padded text (and hide 0)
                         colData[r, 0] = lVal > 0 ? lVal.ToString("D12") : string.Empty;
                     }
                     else
                     {
-                        colData[r, 0] = FormatForExcel(val);
+                        colData[r, 0] = FormatForExcel(val, rule);
                     }
                 }
 
@@ -338,7 +379,7 @@ public static class TableMapper
                         {
                             colRange.NumberFormat = archFmt;
                         }
-                        if (archFmtLocal != null && !isTimeColumn)
+                        if (archFmtLocal != null && !isTimeColumn && rule?.EffectiveFormatKind != ColumnFormatKind.Id)
                         {
                             colRange.NumberFormatLocal = archFmtLocal;
                         }
@@ -346,20 +387,20 @@ public static class TableMapper
                     catch { }
                 }
 
+                // 2b. Declarative [ColumnFormat] (units, decimals, dash for zero) wins over the archetype format.
+                //     Text template columns keep "@"; per-row odometer units are applied after the write.
+                if (!isTextFormattedCell && !isOdometerColumn && RuleRegistry.ShouldApplyFormat(rule))
+                {
+                    try { colRange.NumberFormat = rule!.ExcelNumberFormat; } catch { }
+                }
+
                 // 3. Write data
                 colRange.Value2 = colData;
+                if (rule?.IsStrictlyCalculated == true)
+                    RuleRegistry.ApplyCalculatedColumnLock(colRange, rule);
 
                 // 4. Unit display overrides (applied after the archetype format so they win)
-                string propName = binding.Property.Name;
-                if (propName == "PriceAtFueling")
-                {
-                    try { colRange.NumberFormat = "\"RM \"#,##0.00\"/L\""; } catch { }
-                }
-                else if (propName == "FuelAmount")
-                {
-                    try { colRange.NumberFormat = "#,##0.00 \"L\""; } catch { }
-                }
-                else if (isOdometerColumn)
+                if (isOdometerColumn)
                 {
                     ApplyOdometerUnitFormats(worksheet, records, headerRow, binding.ColumnIndex);
                 }
@@ -388,6 +429,13 @@ public static class TableMapper
         }
     }
 
+    /// <summary>String properties holding a time of day, stored in Excel as a day fraction formatted "hh:mm".</summary>
+    private static bool IsTimeProperty(PropertyInfo prop) =>
+        prop.PropertyType == typeof(string) &&
+        (prop.Name.Equals("Time", StringComparison.OrdinalIgnoreCase) ||
+         prop.Name.Equals("TimeStart", StringComparison.OrdinalIgnoreCase) ||
+         prop.Name.Equals("TimeEnd", StringComparison.OrdinalIgnoreCase));
+
     private static bool IsHourMeterRecord(object? record) => record switch
     {
         SKSB_App.Core.Types.VehicleRecord v => SKSB_App.Core.Types.VehicleRecord.IsHourMeterType(v.VehicleDetail.Type),
@@ -402,8 +450,8 @@ public static class TableMapper
     /// </summary>
     private static void ApplyOdometerUnitFormats<T>(dynamic worksheet, IList<T> records, int headerRow, int column)
     {
-        const string hoursFmt = "#,##0.# \"hrs\"";
-        const string kmFmt = "#,##0 \"km\"";
+        const string hoursFmt = RuleRegistry.OdometerHoursFormat;
+        const string kmFmt = RuleRegistry.OdometerKmFormat;
 
         int runStart = 0;
         while (runStart < records.Count)
@@ -437,16 +485,46 @@ public static class TableMapper
         return scalarGrid;
     }
 
-    public static object? FormatForExcel(object? val)
+    /// <summary>
+    /// Converts a model value to its Excel cell value. With a <paramref name="rule"/>, zero / empty values follow the
+    /// column's <see cref="ZeroBehavior"/>: Dash keeps a true numeric 0 (the column format shows the em-dash, so
+    /// calculations and sorting still work; empty dates write the em-dash text itself), Blank writes an empty cell.
+    /// Sentinel dates (Year &lt;= 1900, i.e. OADate 0 = 00/01/1900) are never written.
+    /// </summary>
+    public static object? FormatForExcel(object? val, PropertyRuleDescriptor? rule = null)
     {
+        const string dash = "—";
+
+        // null => the em-dash TEXT (shown through the 4th ";@" section; colour scales / icon sets ignore text).
+        // A genuine 0 stays the number 0.0 and displays as 0 / RM 0.00 / 0 km through the 3rd section.
+        bool dashForNull = rule != null && rule.EffectiveZeroBehavior == ZeroBehavior.Dash &&
+                           rule.EffectiveFormatKind is not (ColumnFormatKind.Text or ColumnFormatKind.General or ColumnFormatKind.None);
+
         // null -> truly empty cell. An empty string would be a text value, and "" >= TODAY()
         // evaluates TRUE in Excel, giving blank date cells a green icon.
-        if (val == null) return null;
-        if (val is DateOnly d) return d.ToDateTime(TimeOnly.MinValue).ToOADate();
-        if (val is DateTime dt) return dt.ToOADate();
+        if (val == null) return dashForNull ? dash : null;
+
+        if (val is DateOnly d)
+        {
+            if (d.Year <= 1900) return dashForNull ? dash : null;
+            return d.ToDateTime(TimeOnly.MinValue).ToOADate();
+        }
+        if (val is DateTime dt)
+        {
+            if (dt.Year <= 1900) return dashForNull ? dash : null;
+            return dt.ToOADate();
+        }
+
+        if (rule != null && val is decimal or double or float or int or long)
+        {
+            double n = Convert.ToDouble(val, CultureInfo.InvariantCulture);
+            if (Math.Abs(n) < 0.00001)
+                return rule.EffectiveZeroBehavior == ZeroBehavior.Blank ? null : 0.0;
+        }
+
         if (val is decimal dec)
         {
-            if (dec == 0.00m) return string.Empty;
+            if (dec == 0.00m) return rule != null ? 0.0 : string.Empty;
             return (double)dec;
         }
         if (val is Enum e)
@@ -457,7 +535,16 @@ public static class TableMapper
         }
         if (val is IEnumerable<string> strList && val is not string)
         {
-            return string.Join(", ", strList);
+            // Multi-select cells round-trip as "Item1, Item2"; an empty list is a truly empty cell.
+            string joined = string.Join(", ", strList.Where(s => !string.IsNullOrWhiteSpace(s)).Select(s => s.Trim()));
+            return joined.Length == 0 ? null : joined;
+        }
+        if (val is IList enumList && val.GetType().IsGenericType && val.GetType().GetGenericArguments()[0].IsEnum)
+        {
+            string joinedEnums = string.Join(", ", enumList.Cast<object>()
+                .Select(e => e.ToString() ?? string.Empty)
+                .Where(n => n.Length > 0 && !n.Equals("None", StringComparison.OrdinalIgnoreCase)));
+            return joinedEnums.Length == 0 ? null : joinedEnums;
         }
         return val;
     }
@@ -485,14 +572,35 @@ public static class TableMapper
 
         Type underlyingType = Nullable.GetUnderlyingType(targetType) ?? targetType;
         string strVal = rawValue.ToString()?.Trim() ?? string.Empty;
-        if (string.IsNullOrWhiteSpace(strVal) || strVal == " " || strVal == "-") return null;
+        if (string.IsNullOrWhiteSpace(strVal) || strVal == " " || strVal == "-" || strVal == "—") return null;
 
         if (underlyingType == typeof(List<string>))
         {
             return strVal.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)
                          .Select(s => s.Trim())
                          .Where(s => !string.IsNullOrEmpty(s))
+                         .Distinct(StringComparer.OrdinalIgnoreCase)
                          .ToList();
+        }
+
+        if (underlyingType.IsGenericType && underlyingType.GetGenericTypeDefinition() == typeof(List<>) &&
+            underlyingType.GetGenericArguments()[0].IsEnum)
+        {
+            // List<TEnum> round-trips as "Pipe_Repair, Road_Reinstatement" (spaces tolerated, unknown / None dropped).
+            Type enumType = underlyingType.GetGenericArguments()[0];
+            var list = (IList)Activator.CreateInstance(underlyingType)!;
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var token in strVal.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+            {
+                string clean = token.Replace(" ", "_").Replace("-", "_");
+                if (Enum.TryParse(enumType, clean, true, out var parsed) &&
+                    !string.Equals(parsed!.ToString(), "None", StringComparison.OrdinalIgnoreCase) &&
+                    seen.Add(parsed.ToString()!))
+                {
+                    list.Add(parsed);
+                }
+            }
+            return list;
         }
 
         if (underlyingType == typeof(string))
@@ -522,12 +630,16 @@ public static class TableMapper
         }
 
         if (underlyingType == typeof(decimal))
-            return decimal.TryParse(strVal, NumberStyles.Any, CultureInfo.InvariantCulture, out decimal dec) ? dec : 0.00m;
+        {
+            if (decimal.TryParse(strVal, NumberStyles.Any, CultureInfo.InvariantCulture, out decimal dec)) return dec;
+            return decimal.TryParse(StripUnits(strVal), NumberStyles.Any, CultureInfo.InvariantCulture, out dec) ? dec : 0.00m;
+        }
 
         if (underlyingType == typeof(int))
         {
             if (rawValue is double d) return (int)Math.Round(d);
-            return int.TryParse(strVal, NumberStyles.Any, CultureInfo.InvariantCulture, out int i) ? i : 0;
+            if (int.TryParse(strVal, NumberStyles.Any, CultureInfo.InvariantCulture, out int i)) return i;
+            return int.TryParse(StripUnits(strVal), NumberStyles.Any, CultureInfo.InvariantCulture, out i) ? i : 0;
         }
 
         if (underlyingType == typeof(long))
@@ -538,7 +650,10 @@ public static class TableMapper
         }
 
         if (underlyingType == typeof(double))
-            return double.TryParse(strVal, NumberStyles.Any, CultureInfo.InvariantCulture, out double dbl) ? dbl : 0.0;
+        {
+            if (double.TryParse(strVal, NumberStyles.Any, CultureInfo.InvariantCulture, out double dbl)) return dbl;
+            return double.TryParse(StripUnits(strVal), NumberStyles.Any, CultureInfo.InvariantCulture, out dbl) ? dbl : 0.0;
+        }
 
         if (underlyingType == typeof(bool))
         {
@@ -553,12 +668,16 @@ public static class TableMapper
         RuleRegistry.NormalizeIdentifier(
             (header ?? string.Empty).Replace("reciept", "receipt", StringComparison.OrdinalIgnoreCase));
 
+    /// <summary>Removes unit text ("RM", "km", "hrs", "/L", "shifts", "yrs", "days"...) and thousands separators from a typed number.</summary>
+    private static string StripUnits(string text) => Regex.Replace(text, @"[^\d\.\-]", string.Empty);
+
+    /// <summary>Parses a date cell. Sentinel dates (Year &lt;= 1900, OADate 0 = 00/01/1900) are treated as empty.</summary>
     private static DateOnly? ParseToDateOnly(object rawValue, string strVal)
     {
         if (RuleDataCache.TryParseDate(rawValue, out DateOnly parsed))
-            return parsed;
+            return parsed.Year <= 1900 ? null : parsed;
         if (DateOnly.TryParseExact(strVal, RecognizedDateFormats, CultureInfo.InvariantCulture, DateTimeStyles.None, out DateOnly exactDate))
-            return exactDate;
+            return exactDate.Year <= 1900 ? null : exactDate;
         return null;
     }
 
@@ -570,7 +689,8 @@ public static class TableMapper
             object? val = grid[row, c];
             if (val == null || SheetMapperHelper.IsComError(val)) continue;
             string s = val.ToString()?.Trim() ?? string.Empty;
-            if (s == " " || s == "-" || s == "0" || s == "0.00" || s.Equals("None", StringComparison.OrdinalIgnoreCase))
+            if (s == " " || s == "-" || s == "—" || s == "0" || s == "0.00" || s.Equals("None", StringComparison.OrdinalIgnoreCase) ||
+                s.Equals("False", StringComparison.OrdinalIgnoreCase))
                 continue;
             if (!string.IsNullOrEmpty(s)) hasValue = true;
         }
@@ -595,7 +715,7 @@ public static class TableMapper
                 if (!prop.CanWrite || prop.GetIndexParameters().Length > 0) continue;
                 if (typeof(IEnumerable).IsAssignableFrom(prop.PropertyType) &&
                     prop.PropertyType != typeof(string) &&
-                    prop.PropertyType != typeof(List<string>))
+                    !RuleRegistry.IsMultiValueListType(prop.PropertyType))
                 {
                     continue;
                 }
@@ -603,7 +723,7 @@ public static class TableMapper
                 if (prop.GetCustomAttribute<DataDetailAttribute>() != null ||
                     (prop.PropertyType.IsClass &&
                      prop.PropertyType != typeof(string) &&
-                     prop.PropertyType != typeof(List<string>) &&
+                     !RuleRegistry.IsMultiValueListType(prop.PropertyType) &&
                      !prop.PropertyType.IsArray))
                 {
                     ScanType(prop.PropertyType, root =>

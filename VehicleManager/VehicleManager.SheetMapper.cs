@@ -79,6 +79,8 @@ internal static partial class SheetMapper
 
         OnPopulateAuxiliaryTables = (wb, masters) => PopulateAuxiliaryTables((object)wb),
 
+        ApplyMasterCalculations = ApplyVehicleCalculations,
+
         RecalculateAfterPopulate = true,
 
         // Claims heal after Maintenances / Workshops (Maintenance ID -> Workshop sync) and Insurances.
@@ -95,6 +97,9 @@ internal static partial class SheetMapper
             "InsurancesTable",
             "InsuranceClaimsTable",
             "OdometersTable",
+            // Re-heal parents so cross-table rollups see fully synced child tables.
+            "WorkshopsTable",
+            "InsuranceCompaniesTable",
             "AllVehiclesTable"
         },
 

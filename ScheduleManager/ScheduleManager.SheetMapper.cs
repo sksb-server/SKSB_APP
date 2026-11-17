@@ -56,7 +56,7 @@ public static class SheetMapper
                 {
                     ProjectID = projId,
                     Shift = Enum.TryParse(shiftStr, true, out Shifts s) ? s : Shifts.Morning,
-                    Staffs = staffList,
+                    Workers = staffList,
                     Vehicles = vehicleList,
                     Remarks = remarks
                 });
@@ -96,7 +96,7 @@ public static class SheetMapper
                     validationErrors.Add($"• Row {r + 2} [Daily Attendance]: Staff ID {staffId} has a manual override without an override reason.");
                 }
 
-                record.StaffAttendance.Add(new DailyStaffAttendance
+                record.WorkerAttendance.Add(new DailyWorkerAttendance
                 {
                     DailyScheduleDate = scheduleDate,
                     StaffID = staffId,
@@ -151,7 +151,7 @@ public static class SheetMapper
                     var p = record.Projects[i];
                     schedOut[i, 0] = p.ProjectID;
                     schedOut[i, 1] = p.Shift.ToString();
-                    schedOut[i, 2] = string.Join(", ", p.Staffs);
+                    schedOut[i, 2] = string.Join(", ", p.Workers);
                     schedOut[i, 3] = string.Join(", ", p.Vehicles);
                     schedOut[i, 4] = p.Remarks;
                 }
@@ -163,12 +163,12 @@ public static class SheetMapper
             XlCall.Excel(XlCall.xlcWorkbookSelect, new object[] { attSheet });
             WorkbookSession.ClearActiveSheetDataRows(1, 500, 0, 10);
 
-            if (record.StaffAttendance.Count > 0)
+            if (record.WorkerAttendance.Count > 0)
             {
-                object[,] attOut = new object[record.StaffAttendance.Count, 11];
-                for (int i = 0; i < record.StaffAttendance.Count; i++)
+                object[,] attOut = new object[record.WorkerAttendance.Count, 11];
+                for (int i = 0; i < record.WorkerAttendance.Count; i++)
                 {
-                    var a = record.StaffAttendance[i];
+                    var a = record.WorkerAttendance[i];
                     attOut[i, 0] = a.StaffID;
                     // attOut[i, 1] -> Name (Formula Lookup)
                     // attOut[i, 2] -> Primary Skill (Formula Lookup)
@@ -181,7 +181,7 @@ public static class SheetMapper
                     attOut[i, 9] = a.AttendanceStatus.ToString();
                     attOut[i, 10] = a.IsAllocated;
                 }
-                new ExcelReference(1, record.StaffAttendance.Count, 0, 10).SetValue(attOut);
+                new ExcelReference(1, record.WorkerAttendance.Count, 0, 10).SetValue(attOut);
             }
         }
         finally

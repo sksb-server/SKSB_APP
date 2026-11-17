@@ -624,7 +624,7 @@ internal static partial class SheetMapper
                 Key = entry.Key,
                 Type = t,
                 Hour = VehicleRecord.IsHourMeterType(t),
-                MasterOdo = entry.Value.VehicleDetail.CurrentOdometer
+                MasterOdo = entry.Value.VehicleDetail.CurrentOdometer ?? 0m
             };
         }
         var candidateList = candidates.Values.Where(c => c.Anchors.Count > 0 || c.MasterOdo > 0m).ToList();

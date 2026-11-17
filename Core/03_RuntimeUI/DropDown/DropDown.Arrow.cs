@@ -24,6 +24,10 @@ public static class Arrow
     private static Action<string>? _onItemSelected;
     private static bool _isEventsHooked = false;
 
+    // Multi-select session state: the popup stays open while items are toggled, and checked items are drawn with a tick.
+    private static bool _isMultiSelectSession = false;
+    private static HashSet<string> _checkedTokens = new(StringComparer.OrdinalIgnoreCase);
+
     private class DropdownItem
     {
         public string Display { get; set; } = string.Empty;
@@ -196,7 +200,17 @@ public static class Arrow
         };
         _listBox.KeyDown += (s, e) =>
         {
-            if (e.KeyCode == Keys.Enter) CommitSelection();
+            if (e.KeyCode == Keys.Enter)
+            {
+                // Multi-select: items are toggled on click / Space, Enter simply closes the popup.
+                if (_isMultiSelectSession) DismissAndReturnFocus();
+                else CommitSelection();
+            }
+            else if (e.KeyCode == Keys.Space && _isMultiSelectSession)
+            {
+                CommitSelection();
+                e.Handled = true;
+            }
             else if (e.KeyCode == Keys.Escape) DismissAndReturnFocus();
         };
         _popupHost.Controls.Add(_listBox);
@@ -234,9 +248,12 @@ public static class Arrow
         }
 
         bool isSelected = (e.State & DrawItemState.Selected) == DrawItemState.Selected;
+        bool isChecked = _isMultiSelectSession && item.IsValid && _checkedTokens.Contains(item.Display);
         Color backColor = !item.IsValid
             ? (isSelected ? Color.FromArgb(242, 242, 242) : Color.White)
-            : (isSelected ? Color.FromArgb(217, 235, 255) : Color.White);
+            : isChecked
+                ? (isSelected ? Color.FromArgb(196, 228, 200) : Color.FromArgb(226, 243, 229))
+                : (isSelected ? Color.FromArgb(217, 235, 255) : Color.White);
         Color foreColor = !item.IsValid ? Color.FromArgb(170, 170, 175) : Color.Black;
 
         using var bgBrush = new SolidBrush(backColor);
@@ -245,7 +262,10 @@ public static class Arrow
         using var fgBrush = new SolidBrush(foreColor);
         var textBounds = new Rectangle(e.Bounds.X + 6, e.Bounds.Y + 2, e.Bounds.Width - 8, e.Bounds.Height - 4);
         var sf = new StringFormat { LineAlignment = StringAlignment.Center };
-        e.Graphics.DrawString(item.Display, e.Font!, fgBrush, textBounds, sf);
+        string label = _isMultiSelectSession && item.IsValid
+            ? (isChecked ? "\u2713  " : "     ") + item.Display
+            : item.Display;
+        e.Graphics.DrawString(label, e.Font!, fgBrush, textBounds, sf);
     }
 
     public static void ShowArrowForCell(dynamic cell)
@@ -314,6 +334,7 @@ public static class Arrow
     public static void DismissAndReturnFocus()
     {
         ReleaseCapture();
+        _isMultiSelectSession = false;
         HidePopup();
         try
         {
@@ -358,13 +379,47 @@ public static class Arrow
             dynamic? table = null;
             try { table = singleCell.ListObject; } catch { }
 
-            var rule = RuleRegistry.GetRuleForCell(singleCell);
+            PropertyRuleDescriptor? rule = RuleRegistry.GetRuleForCell(singleCell);
             var processedItems = new List<DropdownItem>();
+            var parameterItems = ParameterCells.GetItems(singleCell, wb);
+
+            _isMultiSelectSession = parameterItems == null && rule != null && rule.HasDropdown && rule.IsMultiSelect;
+            _checkedTokens = _isMultiSelectSession
+                ? new HashSet<string>(RuleEvaluator.SplitMultiSelectTokens(inCellText), StringComparer.OrdinalIgnoreCase)
+                : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             // =========================================================================
             // PATH A: Unified C# Attribute Rule Engine (Zero COM formula evaluations)
             // =========================================================================
-            if (rule != null && rule.HasDropdown)
+            if (parameterItems != null)
+            {
+                // PATH C: code-registered selector cell outside any table (e.g. Project Summary!A2)
+                foreach (var itm in parameterItems)
+                {
+                    processedItems.Add(new DropdownItem { Display = itm, Raw = itm, Section = 0, IsValid = true });
+                }
+
+                _onItemSelected = chosenDisplay =>
+                {
+                    var targetItem = processedItems.FirstOrDefault(i => i.Display.Equals(chosenDisplay, StringComparison.OrdinalIgnoreCase));
+                    if (targetItem == null) return;
+
+                    bool origEvents = true;
+                    try { origEvents = (bool)xlApp.EnableEvents; xlApp.EnableEvents = false; } catch { }
+                    try
+                    {
+                        singleCell.Value2 = targetItem.Display;
+                    }
+                    finally
+                    {
+                        try { xlApp.EnableEvents = origEvents; } catch { }
+                    }
+
+                    // Events were suppressed for the write, so notify module observers explicitly.
+                    ParameterCells.NotifyChanged(sheet, singleCell);
+                };
+            }
+            else if (rule != null && rule.HasDropdown)
             {
                 var evaluatedOptions = RuleEvaluator.GetEvaluatedDropdownOptions(wb, table, row, rule);
                 foreach (var opt in evaluatedOptions)
@@ -399,6 +454,20 @@ public static class Arrow
                     {
                         RuleEvaluator.EvaluateAndHealRow(sheet, table, row, col);
                     }
+
+                    if (rule.IsMultiSelect)
+                    {
+                        // Keep the popup in step with the cell so the next toggle starts from the new text.
+                        try
+                        {
+                            inCellText = singleCell.Value2?.ToString()?.Trim() ?? string.Empty;
+                            _checkedTokens = new HashSet<string>(RuleEvaluator.SplitMultiSelectTokens(inCellText), StringComparer.OrdinalIgnoreCase);
+                        }
+                        catch { }
+                    }
+
+                    // Events were suppressed for the write: let module observers (rollups etc.) know.
+                    ParameterCells.NotifyChanged(sheet, singleCell);
                 };
             }
             // =========================================================================
@@ -504,13 +573,9 @@ public static class Arrow
         PropertyRuleDescriptor rule,
         string existingCellText)
     {
-        if (rule.IsMultiSelect && !string.IsNullOrWhiteSpace(existingCellText))
+        if (rule.IsMultiSelect)
         {
-            var tokens = existingCellText
-                .Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)
-                .Select(t => t.Trim())
-                .Where(t => !string.IsNullOrEmpty(t))
-                .ToList();
+            var tokens = RuleEvaluator.SplitMultiSelectTokens(existingCellText);
 
             int existingIdx = tokens.FindIndex(t => t.Equals(targetItem.Display, StringComparison.OrdinalIgnoreCase));
             if (existingIdx >= 0)
@@ -518,7 +583,9 @@ public static class Arrow
             else
                 tokens.Add(targetItem.Display);
 
-            singleCell.Value2 = string.Join(", ", tokens);
+            // An emptied selection clears the cell instead of leaving an empty-string text value.
+            if (tokens.Count == 0) singleCell.ClearContents();
+            else singleCell.Value2 = string.Join(", ", tokens);
             return;
         }
 
@@ -596,6 +663,14 @@ public static class Arrow
         {
             _onItemSelected(item.Display);
         }
+
+        // Multi-select keeps the popup open so several items can be toggled in one session.
+        if (_isMultiSelectSession)
+        {
+            _listBox.Invalidate();
+            return;
+        }
+
         DismissAndReturnFocus();
     }
 

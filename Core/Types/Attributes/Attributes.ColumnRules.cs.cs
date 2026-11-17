@@ -1,157 +1,57 @@
-﻿namespace SKSB_App.Core.Types.Attributes;
 
-using System;
+// =========================================================================
+// COLUMN DISPLAY FORMAT (unit suffixes, decimals, zero / empty display)
+// =========================================================================
 
-/// <summary>
-/// Binds a C# record/class to one or more Excel ListObject table names.
-/// </summary>
-[AttributeUsage(AttributeTargets.Class, AllowMultiple = true, Inherited = true)]
-public sealed class ExcelTableAttribute : Attribute
-{
-    public string TableName { get; }
-
-    public ExcelTableAttribute(string tableName)
-    {
-        TableName = tableName;
-    }
-}
-
-public enum DefaultKind
+public enum ColumnFormatKind
 {
     None,
-    Literal,            // Uses LiteralValue (e.g. "Active", "0")
-    Today,              // DateOnly.FromDateTime(DateTime.Today)
-    DateOffsetDays,     // ReferenceHeader date + Offset days (Fallback: Today + Offset)
-    DateOffsetMonths,   // ReferenceHeader date + Offset months (Fallback: Today + Offset)
-    AutoIncrement       // Max(existing column integer values) + 1
+    General,
+    Text,               // "@"
+    Integer,            // #,##0
+    Id,                 // 0 (blank when <= 0)
+    Decimal,            // #,##0.00
+    Currency,           // "RM "#,##0.00
+    PricePerLiter,      // "RM "#,##0.00"/L"
+    Liters,             // #,##0.00 "L"
+    Kilometers,         // #,##0.0 "km"
+    Hours,              // #,##0.0 "hrs"
+    Shifts,             // #,##0.# "shifts"
+    Years,              // #,##0 "yrs"
+    Days,               // #,##0 "days"
+    OdometerDynamic,    // Per row: hours (machinery) or km (road vehicles)
+    Date,               // dd/mm/yyyy
+    Time                // hh:mm
 }
 
-public enum StateConditionKind
+public enum ZeroBehavior
 {
-    None,
-    DateExpired,        // True if ANY ReferenceHeaders date < Today
-    ColumnNotEmpty,     // True if ANY ReferenceHeaders cell is not blank (e.g. Sold Date != "")
-    ColumnEquals,       // True if ReferenceHeaders cell equals ExpectedValue
-    DateGreaterThan
-}
-
-public enum TransformKind
-{
-    None,
-    Trim,
-    UpperCase,
-    ShortNameFirstLast, // First word + Last word
-    ShortNameThreeWords // 3-word name formatting rule
+    Dash,               // Displays an em-dash when 0 / empty (3rd section of the Excel NumberFormat; dates write the dash itself)
+    Blank,              // Truly blank cell when 0 / empty (IDs, optional text)
+    LiteralZero         // Displays a literal 0
 }
 
 /// <summary>
-/// Primary column rule governing dropdown sources, required status, and text transformation.
+/// Declares the Excel display format, unit suffix, decimal places and zero / empty behaviour of a column.
+/// Columns without this attribute get a sensible default inferred from property type and header name.
 /// </summary>
 [AttributeUsage(AttributeTargets.Property, AllowMultiple = false, Inherited = true)]
-public sealed class ColumnRuleAttribute : Attribute
+public sealed class ColumnFormatAttribute : Attribute
 {
-    /// <summary>
-    /// One or more Defined Names (e.g. "VehicleTypeList") or "TableName[ColumnHeader]" sources.
-    /// Multiple sources are stacked in sections (Section 0 at top, Section 1 below, etc.).
-    /// </summary>
-    public string[] Sources { get; }
-    public bool IsRequired { get; set; } = true;
-    public bool IsWarningOnly { get; set; } = false;
-    public bool IsMultiSelect { get; set; } = false;
-    public bool AllowNonNegativeZero { get; set; } = true;
-    public TransformKind Transform { get; set; } = TransformKind.None;
+    public ColumnFormatKind Kind { get; }
+    public string? CustomUnit { get; set; }
+    public int DecimalPlaces { get; set; } = -1;
+    public ZeroBehavior Zero { get; set; } = ZeroBehavior.Dash;
 
-    public ColumnRuleAttribute(params string[] sources)
-    {
-        Sources = sources ?? Array.Empty<string>();
-    }
-}
-
-/// <summary>
-/// Defines automatic adjacent/target column lookup when this column is edited or selected.
-/// AllowMultiple = true supports fallback chains (e.g. check Vehicles first, then Staff)
-/// and multi-column fills (e.g. fill both Workshop Address and Workshop Contact).
-/// </summary>
-[AttributeUsage(AttributeTargets.Property, AllowMultiple = true, Inherited = true)]
-public sealed class ColumnSyncAttribute : Attribute
-{
-    public string TargetHeader { get; }
-    public string LookupSource { get; }
-    public string ResultSource { get; }
-
-    public ColumnSyncAttribute(string targetHeader, string lookupSource, string resultSource)
-    {
-        TargetHeader = targetHeader;
-        LookupSource = lookupSource;
-        ResultSource = resultSource;
-    }
-}
-
-/// <summary>
-/// Defines how an empty cell in an active row is automatically defaulted.
-/// </summary>
-[AttributeUsage(AttributeTargets.Property, AllowMultiple = false, Inherited = true)]
-public sealed class ColumnDefaultAttribute : Attribute
-{
-    public DefaultKind Kind { get; }
-    public string? LiteralValue { get; set; }
-    public string? ReferenceHeader { get; set; }
-    public int Offset { get; set; }
-
-    public ColumnDefaultAttribute(
-        DefaultKind kind,
-        string? literalValue = null,
-        string? referenceHeader = null,
-        int offset = 0)
+    public ColumnFormatAttribute(
+        ColumnFormatKind kind,
+        int decimalPlaces = -1,
+        ZeroBehavior zero = ZeroBehavior.Dash,
+        string? customUnit = null)
     {
         Kind = kind;
-        LiteralValue = literalValue;
-        ReferenceHeader = referenceHeader;
-        Offset = offset;
-    }
-}
-
-/// <summary>
-/// Self-healing state guard that forces or forbids specific dropdown values based on other columns in the same row.
-/// Evaluated in order of Priority (lowest number first).
-/// </summary>
-[AttributeUsage(AttributeTargets.Property, AllowMultiple = true, Inherited = true)]
-public sealed class ColumnStateGuardAttribute : Attribute
-{
-    public int Priority { get; }
-    public StateConditionKind Condition { get; }
-    public string[] ReferenceHeaders { get; }
-    public string ForcedValueWhenTrue { get; }
-    public bool DisallowForcedValueWhenFalse { get; set; } = true;
-    public string FallbackValueWhenFalse { get; set; } = "Active";
-    public string? ExpectedValue { get; set; }
-    public string? SkipIfCurrentEquals { get; set; }
-
-    public ColumnStateGuardAttribute(
-        int priority,
-        StateConditionKind condition,
-        string forcedValueWhenTrue,
-        string fallbackValueWhenFalse = "Active",
-        params string[] referenceHeaders)
-    {
-        Priority = priority;
-        Condition = condition;
-        ForcedValueWhenTrue = forcedValueWhenTrue;
-        FallbackValueWhenFalse = fallbackValueWhenFalse;
-        ReferenceHeaders = referenceHeaders ?? Array.Empty<string>();
-    }
-}
-
-/// <summary>
-/// Enforces that a date column must be strictly greater (later) than a referenced date column.
-/// </summary>
-[AttributeUsage(AttributeTargets.Property, AllowMultiple = false, Inherited = true)]
-public sealed class ColumnDateGreaterThanAttribute : Attribute
-{
-    public string ReferenceHeader { get; }
-
-    public ColumnDateGreaterThanAttribute(string referenceHeader)
-    {
-        ReferenceHeader = referenceHeader;
+        DecimalPlaces = decimalPlaces;
+        Zero = zero;
+        CustomUnit = customUnit;
     }
 }

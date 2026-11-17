@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using ExcelDna.Integration;
+using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.Types.Attributes;
 using SKSB_App.Core.WorkbookOpen.Sheet;
 using SKSB_App.Core.WorkbookSave.SheetMapper;
@@ -41,7 +42,7 @@ public static class RuleEvaluator
         string typeText = (rowValues[typeCol] ?? string.Empty).Trim().Replace(' ', '_').Replace('-', '_');
         bool isHours = Enum.TryParse<SKSB_App.Core.Types.VehicleType>(typeText, true, out var vt)
                        && SKSB_App.Core.Types.VehicleRecord.IsHourMeterType(vt);
-        string fmt = isHours ? "#,##0.# \"hrs\"" : "#,##0 \"km\"";
+        string fmt = isHours ? RuleRegistry.OdometerHoursFormat : RuleRegistry.OdometerKmFormat;
 
         for (int c = 1; c <= colCount; c++)
         {
@@ -117,6 +118,9 @@ public static class RuleEvaluator
                 for (int c = 1; c <= colCount; c++)
                 {
                     int absCol = startCol + c - 1;
+                    var rule = colRules[c];
+                    if (rule?.IsStrictlyCalculated == true) continue;
+
                     string f = worksheet.Cells[excelRow, absCol].Formula?.ToString() ?? string.Empty;
                     if (f.StartsWith("=")) continue;
 
@@ -126,7 +130,6 @@ public static class RuleEvaluator
                         clean.Equals("None", StringComparison.OrdinalIgnoreCase))
                         continue;
 
-                    var rule = colRules[c];
                     if (rule?.DefaultRule?.Kind == DefaultKind.Literal &&
                         string.Equals(clean, rule.DefaultRule.LiteralValue, StringComparison.OrdinalIgnoreCase))
                         continue;
@@ -148,14 +151,41 @@ public static class RuleEvaluator
                         {
                             var editedRule = colRules[relEdited];
                             string currentText = rowValues[relEdited];
+
+                            if (editedRule?.RollupRules.Count > 0)
+                            {
+                                SheetOperations.ShowStatusConfirmation($"Formula evaluated cell [{editedRule.HeaderName}]: {editedRule.DisplayFormula}");
+                            }
+
+                            if (editedRule != null && editedRule.RoundDownStep > 0 &&
+                                decimal.TryParse(currentText, NumberStyles.Any, CultureInfo.InvariantCulture, out decimal typed) && typed > 0m)
+                            {
+                                decimal floored = RuleCalculator.FloorToStep(typed, (decimal)editedRule.RoundDownStep);
+                                if (floored != typed)
+                                {
+                                    WriteCellSafe(worksheet.Cells[excelRow, editedAbsoluteCol.Value], (double)floored, editedRule);
+                                    rawObjects[relEdited] = (double)floored;
+                                    rowValues[relEdited] = CleanCellText((double)floored);
+                                    currentText = rowValues[relEdited];
+                                }
+                            }
+                            if (editedRule != null && string.IsNullOrWhiteSpace(currentText) &&
+                                editedRule.IsMultiSelect && !string.IsNullOrWhiteSpace(editedRule.CountTargetHeader))
+                            {
+                                WriteMultiSelectCount(worksheet, excelRow, startCol, colHeaders, rowValues, editedRule, string.Empty);
+                            }
                             if (editedRule != null && !string.IsNullOrWhiteSpace(currentText))
                             {
-                                string transformed = ApplyTextTransform(currentText, editedRule.Transform);
+                                string transformed = ApplyRuleTransform(currentText, editedRule);
                                 if (!string.Equals(transformed, currentText, StringComparison.Ordinal))
                                 {
                                     WriteCellSafe(worksheet.Cells[excelRow, editedAbsoluteCol.Value], transformed, editedRule);
                                     rowValues[relEdited] = transformed;
                                     currentText = transformed;
+                                }
+                                if (editedRule.IsMultiSelect && !string.IsNullOrWhiteSpace(editedRule.CountTargetHeader))
+                                {
+                                    WriteMultiSelectCount(worksheet, excelRow, startCol, colHeaders, rowValues, editedRule, currentText);
                                 }
                                 if (editedRule.SyncRules.Count > 0)
                                 {
@@ -214,6 +244,51 @@ public static class RuleEvaluator
                             rawObjects[c] = defaultVal;
                             rowValues[c] = FormatDisplayValue(defaultVal, rule);
                             notices.Add($"Row {excelRow} [{colHeaders[c]}]: Defaulted to '{rowValues[c]}'.");
+                        }
+                    }
+
+                    // STEP 3b: Evaluate [ColumnCalculate] (2 passes so dependent columns settle)
+                    if (colRules.Any(r => r?.CalculateRule != null))
+                    {
+                        var sheetParams = RuleCalculator.ReadSheetParameters((object?)wb, (object?)worksheet, FirstSheetParameters(colRules));
+                        Func<string, decimal> resolveParam = n => sheetParams.TryGetValue(n, out var pv) ? pv : 0m;
+
+                        for (int pass = 0; pass < 2; pass++)
+                        {
+                            for (int c = 1; c <= colCount; c++)
+                            {
+                                var rule = colRules[c];
+                                if (rule?.CalculateRule == null) continue;
+
+                                int absCol = startCol + c - 1;
+                                bool isDefaultOnly = rule.CalculateRule.Mode == CalculationMode.DefaultOnly;
+                                bool directlyEdited = editedAbsoluteCol == absCol;
+
+                                if (isDefaultOnly &&
+                                    !(string.IsNullOrWhiteSpace(rowValues[c]) || rowValues[c] == "0" || rowValues[c] == "0.00"))
+                                    continue;
+
+                                // null => "no value" (em-dash); 0 => a genuine zero
+                                decimal? computed = RuleCalculator.EvaluateColumnRule(rule, colHeaders, rawObjects, resolveParam);
+                                if (isDefaultOnly && (!computed.HasValue || computed.Value == 0m)) continue;
+
+                                bool differs = RuleCalculator.ToNullableDecimal(rawObjects[c]) != computed;
+                                if (!differs && !(directlyEdited && !isDefaultOnly)) continue;
+
+                                if (differs)
+                                {
+                                    object written = computed.HasValue ? (double)computed.Value : NullDash;
+                                    WriteCellSafe(worksheet.Cells[excelRow, absCol], written, rule);
+                                    rawObjects[c] = written;
+                                    rowValues[c] = CleanCellText(written);
+                                }
+
+                                if (directlyEdited && !isDefaultOnly && pass == 0)
+                                {
+                                    SheetOperations.ShowStatusConfirmation(
+                                        $"Formula evaluated cell [{rule.HeaderName}]: {rule.DisplayFormula} = {(computed.HasValue ? computed.Value.ToString(CultureInfo.InvariantCulture) : NullDash)}");
+                                }
+                            }
                         }
                     }
 
@@ -321,18 +396,22 @@ public static class RuleEvaluator
                     for (int c = 1; c <= colCount; c++)
                     {
                         string f = fMat[1, c]?.ToString() ?? string.Empty;
-                        isFormulaCol[c] = f.StartsWith("=");
+                        isFormulaCol[c] = f.StartsWith("=") && colRules[c]?.HasCSharpFormula != true;
                     }
                 }
                 else if (rawFormulas is string singleF)
                 {
-                    isFormulaCol[1] = singleF.StartsWith("=");
+                    isFormulaCol[1] = singleF.StartsWith("=") && colRules[1]?.HasCSharpFormula != true;
                 }
             }
             catch { }
 
             // 3. Bulk-read entire DataBodyRange into memory (1 COM call)
             object[,] dataGrid = TableMapper.GetRange2DValues(body, rowCount, colCount);
+
+            // 3b. Pre-cache sheet parameters once per table (0 COM calls inside the row loop)
+            var sheetParams = RuleCalculator.ReadSheetParameters((object?)wb, (object?)worksheet, FirstSheetParameters(colRules));
+            Func<string, decimal> resolveParam = n => sheetParams.TryGetValue(n, out var pv) ? pv : 0m;
 
             // 4. Pre-build O(1) lookup dictionaries for all SyncRules on this table
             var lookupDictCache = new Dictionary<string, Dictionary<string, string>>(StringComparer.OrdinalIgnoreCase);
@@ -380,6 +459,27 @@ public static class RuleEvaluator
             // Track dirty cells to write back only what changed
             var dirtyWrites = new List<(int ExcelRow, int AbsCol, object Value, PropertyRuleDescriptor? Rule)>();
 
+            // 4b. Cross-table [ColumnRollup] (e.g. Workshops <- Maintenances): one bulk read per source table, all in RAM
+            if (colRules.Any(r => r != null && r.RollupRules.Any(x => x.IsCrossTable)))
+            {
+                var rowValuesGrid = new string[rowCount + 1, colCount + 1];
+                var rawGrid = new object?[rowCount + 1, colCount + 1];
+                for (int rr = 1; rr <= rowCount; rr++)
+                    for (int cc = 1; cc <= colCount; cc++)
+                    {
+                        rawGrid[rr, cc] = dataGrid[rr, cc];
+                        rowValuesGrid[rr, cc] = CleanCellText(dataGrid[rr, cc]);
+                    }
+
+                RuleCalculator.EvaluateTableCrossRollups((object)wb, (object)worksheet, colRules, colHeaders, rowCount, colCount,
+                    rowValuesGrid, rawGrid,
+                    (r, c, val, rule) =>
+                    {
+                        dirtyWrites.Add((startRow + r - 1, startCol + c - 1, val, rule));
+                        dataGrid[r, c] = val;
+                    });
+            }
+
             // 5. Pure In-Memory Row Healing Loop
             for (int r = 1; r <= rowCount; r++)
             {
@@ -400,6 +500,7 @@ public static class RuleEvaluator
                         continue;
 
                     var rule = colRules[c];
+                    if (rule?.IsStrictlyCalculated == true) continue;
                     if (rule?.DefaultRule?.Kind == DefaultKind.Literal &&
                         string.Equals(clean, rule.DefaultRule.LiteralValue, StringComparison.OrdinalIgnoreCase))
                         continue;
@@ -417,12 +518,49 @@ public static class RuleEvaluator
                     if (isFormulaCol[c] || rule == null || rule.Transform == TransformKind.None || string.IsNullOrWhiteSpace(val))
                         continue;
 
-                    string transformed = ApplyTextTransform(val, rule.Transform);
+                    string transformed = ApplyRuleTransform(val, rule);
                     if (!string.Equals(val, transformed, StringComparison.Ordinal))
                     {
                         dirtyWrites.Add((excelRow, startCol + c - 1, transformed, rule));
                         rowValues[c] = transformed;
                         rawObjects[c] = transformed;
+                    }
+                }
+
+                // STEP 0a: enforce [ColumnRule(RoundDownStep = ...)] in memory
+                for (int c = 1; c <= colCount; c++)
+                {
+                    var rule = colRules[c];
+                    if (isFormulaCol[c] || rule == null || rule.RoundDownStep <= 0) continue;
+                    if (!decimal.TryParse(rowValues[c], NumberStyles.Any, CultureInfo.InvariantCulture, out decimal typed) || typed <= 0m)
+                        continue;
+
+                    decimal floored = RuleCalculator.FloorToStep(typed, (decimal)rule.RoundDownStep);
+                    if (floored != typed)
+                    {
+                        dirtyWrites.Add((excelRow, startCol + c - 1, (double)floored, rule));
+                        rawObjects[c] = (double)floored;
+                        rowValues[c] = CleanCellText((double)floored);
+                    }
+                }
+
+                // STEP 0b: multi-select count targets (e.g. Workers -> Worker Presence); only when tokens exist,
+                // so a manually typed count is kept for rows that have no token list.
+                for (int c = 1; c <= colCount; c++)
+                {
+                    var rule = colRules[c];
+                    if (isFormulaCol[c] || rule == null || !rule.IsMultiSelect || string.IsNullOrWhiteSpace(rule.CountTargetHeader)) continue;
+                    if (string.IsNullOrWhiteSpace(rowValues[c])) continue;
+
+                    int targetRel = FindColumnByHeader(colHeaders, rule.CountTargetHeader!);
+                    if (targetRel < 1 || isFormulaCol[targetRel]) continue;
+
+                    int count = CountMultiSelectTokens(rowValues[c]);
+                    if (!string.Equals(rowValues[targetRel], count.ToString(CultureInfo.InvariantCulture), StringComparison.Ordinal))
+                    {
+                        dirtyWrites.Add((excelRow, startCol + targetRel - 1, (double)count, colRules[targetRel]));
+                        rowValues[targetRel] = count.ToString(CultureInfo.InvariantCulture);
+                        rawObjects[targetRel] = (double)count;
                     }
                 }
 
@@ -484,6 +622,30 @@ public static class RuleEvaluator
                     }
                 }
 
+                // STEP B2: Evaluate [ColumnCalculate] in memory (2 passes so dependent columns settle)
+                for (int pass = 0; pass < 2; pass++)
+                {
+                    for (int c = 1; c <= colCount; c++)
+                    {
+                        var rule = colRules[c];
+                        if (rule?.CalculateRule == null) continue;
+
+                        bool isDefaultOnly = rule.CalculateRule.Mode == CalculationMode.DefaultOnly;
+                        if (isDefaultOnly &&
+                            !(string.IsNullOrWhiteSpace(rowValues[c]) || rowValues[c] == "0" || rowValues[c] == "0.00"))
+                            continue;
+
+                        decimal? computed = RuleCalculator.EvaluateColumnRule(rule, colHeaders, rawObjects, resolveParam);
+                        if (isDefaultOnly && (!computed.HasValue || computed.Value == 0m)) continue;
+                        if (RuleCalculator.ToNullableDecimal(rawObjects[c]) == computed) continue;
+
+                        object written = computed.HasValue ? (double)computed.Value : NullDash;
+                        dirtyWrites.Add((excelRow, startCol + c - 1, written, rule));
+                        rawObjects[c] = written;
+                        rowValues[c] = CleanCellText(written);
+                    }
+                }
+
                 // STEP C: Enforce [ColumnStateGuard] in memory
                 for (int c = 1; c <= colCount; c++)
                 {
@@ -492,6 +654,7 @@ public static class RuleEvaluator
 
                     string currentVal = rowValues[c];
                     string? enforcedValue = EvaluateStateGuardsForCell(colHeaders, rawObjects, rowValues, rule, currentVal, out string? guardReason);
+                    if (r == 1) AppLogger.Info($"[GuardDiag] {rule.TableName}.{colHeaders[c]} row1 current=[{currentVal}] enforced=[{enforcedValue}] guards={rule.StateGuards.Count}");
 
                     if (!string.IsNullOrWhiteSpace(enforcedValue) && !RuleDataCache.ValuesMatch(currentVal, enforcedValue))
                     {
@@ -529,6 +692,7 @@ public static class RuleEvaluator
         catch (Exception ex)
         {
             System.Diagnostics.Debug.WriteLine($"[RuleEvaluator.EvaluateAndHealTable Error] {ex.Message}");
+            AppLogger.Error($"[RuleEvaluator.EvaluateAndHealTable] Failed healing '{table?.Name}'", ex);
         }
         finally
         {
@@ -596,6 +760,34 @@ public static class RuleEvaluator
             if (computed != null)
             {
                 string disp = FormatDisplayValue(computed, rule);
+                options.Add(new DropdownOption { Raw = disp, Display = disp, Section = 0, IsValid = true });
+            }
+        }
+
+        // 3. Soft-calculated column ([ColumnCalculate] DefaultOnly): offer the computed value as a 1-click option
+        else if (rule.CalculateRule != null && rule.CalculateRule.Mode == CalculationMode.DefaultOnly && table != null)
+        {
+            int startCol = (int)table.HeaderRowRange.Column;
+            int colCount = (int)table.ListColumns.Count;
+            int headerRow = (int)table.HeaderRowRange.Row;
+            dynamic ws = table.Parent;
+
+            var colHeaders = new string[colCount + 1];
+            var rawObjects = new object?[colCount + 1];
+            for (int c = 1; c <= colCount; c++)
+            {
+                int absCol = startCol + c - 1;
+                colHeaders[c] = ws.Cells[headerRow, absCol].Value2?.ToString()?.Trim() ?? string.Empty;
+                rawObjects[c] = ws.Cells[excelRow, absCol].Value2;
+            }
+
+            var sheetParams = RuleCalculator.ReadSheetParameters((object?)wb, (object?)ws, rule.SheetParameters);
+            decimal? computed = RuleCalculator.EvaluateColumnRule(
+                rule, colHeaders, rawObjects, n => sheetParams.TryGetValue(n, out var pv) ? pv : 0m);
+
+            if (computed.HasValue)
+            {
+                string disp = computed.Value.ToString("0.############", CultureInfo.InvariantCulture);
                 options.Add(new DropdownOption { Raw = disp, Display = disp, Section = 0, IsValid = true });
             }
         }
@@ -895,6 +1087,11 @@ public static class RuleEvaluator
                         return true;
                     break;
 
+                case StateConditionKind.DateReached:
+                    if (RuleDataCache.TryParseDate(raw, out DateOnly dr) && dr.Year > 1900 && dr <= today)
+                        return true;
+                    break;
+
                 case StateConditionKind.ColumnNotEmpty:
                     if (!string.IsNullOrWhiteSpace(str) && str != "—" && str != "0")
                         return true;
@@ -951,6 +1148,51 @@ public static class RuleEvaluator
         };
     }
 
+    /// <summary>
+    /// Applies the rule's transform. Multi-select values ("A, B") are transformed token by token and
+    /// re-joined with ", " so the separator can never be mangled (e.g. by UpperCase or ShortName rules).
+    /// </summary>
+    public static string ApplyRuleTransform(string input, PropertyRuleDescriptor rule)
+    {
+        if (!rule.IsMultiSelect) return ApplyTextTransform(input, rule.Transform);
+
+        var tokens = SplitMultiSelectTokens(input)
+            .Select(t => ApplyTextTransform(t, rule.Transform))
+            .Where(t => t.Length > 0);
+        return string.Join(", ", tokens);
+    }
+
+    /// <summary>Splits a comma separated multi-select cell into distinct, trimmed, non-empty tokens.</summary>
+    public static List<string> SplitMultiSelectTokens(string? text) =>
+        (text ?? string.Empty)
+            .Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)
+            .Select(t => t.Trim())
+            .Where(t => t.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+    public static int CountMultiSelectTokens(string? text) => SplitMultiSelectTokens(text).Count;
+
+    /// <summary>The [SheetParameter] declarations shared by the table's columns (identical on every rule of one table).</summary>
+    private static IReadOnlyList<SheetParameterAttribute> FirstSheetParameters(PropertyRuleDescriptor?[] colRules) =>
+        colRules.FirstOrDefault(r => r != null && r.SheetParameters.Count > 0)?.SheetParameters
+        ?? Array.Empty<SheetParameterAttribute>();
+
+    private static void WriteMultiSelectCount(
+        dynamic worksheet, int excelRow, int startCol, string[] colHeaders, string[] rowValues,
+        PropertyRuleDescriptor rule, string multiText)
+    {
+        int targetRel = FindColumnByHeader(colHeaders, rule.CountTargetHeader!);
+        if (targetRel < 1) return;
+
+        int count = CountMultiSelectTokens(multiText);
+        string countText = count.ToString(CultureInfo.InvariantCulture);
+        if (string.Equals(rowValues[targetRel], countText, StringComparison.Ordinal)) return;
+
+        try { worksheet.Cells[excelRow, startCol + targetRel - 1].Value2 = (double)count; } catch { }
+        rowValues[targetRel] = countText;
+    }
+
     private static string FormatShortName(string fullName, int maxWords)
     {
         var parts = fullName.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
@@ -959,10 +1201,31 @@ public static class RuleEvaluator
         return $"{parts[0]} {parts[1]} {parts[^1]}";
     }
 
-    private static void WriteCellSafe(dynamic cell, object value, PropertyRuleDescriptor? rule)
+    /// <summary>The text written for a null value in a dash-capable column (colour scales / icon sets ignore text).</summary>
+    internal const string NullDash = "—";
+
+    private static bool IsDashColumn(PropertyRuleDescriptor? rule) =>
+        rule != null && rule.EffectiveZeroBehavior == ZeroBehavior.Dash &&
+        rule.EffectiveFormatKind is not (ColumnFormatKind.Text or ColumnFormatKind.General or ColumnFormatKind.None);
+
+    private static void WriteCellSafe(dynamic cell, object? value, PropertyRuleDescriptor? rule)
     {
         try
         {
+            // null (or the dash text) => em-dash on dash columns, an empty cell elsewhere
+            if (value == null || (value is string dashText && dashText == NullDash))
+            {
+                cell.Value2 = IsDashColumn(rule) ? NullDash : null;
+                return;
+            }
+
+            if (value is double || value is decimal)
+            {
+                double num = Convert.ToDouble(value, CultureInfo.InvariantCulture);
+                // A genuine 0 stays numeric 0 (shown as 0 / RM 0.00 / 0 km); only Blank columns clear it.
+                cell.Value2 = Math.Abs(num) < 0.00001 && rule?.EffectiveZeroBehavior == ZeroBehavior.Blank ? (object?)null : num;
+                return;
+            }
             if (value is DateOnly dOnly)
             {
                 cell.Value2 = dOnly.ToDateTime(TimeOnly.MinValue).ToOADate();

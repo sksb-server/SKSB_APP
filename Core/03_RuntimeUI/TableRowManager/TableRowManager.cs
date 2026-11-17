@@ -497,6 +497,8 @@ public static partial class TableRowManager
 
                 string headerText = worksheet.Cells[headerRow, absCol].Value2?.ToString()?.Trim() ?? string.Empty;
                 var rule = RuleRegistry.GetRule(table.Name?.ToString() ?? string.Empty, headerText);
+                if (rule?.IsStrictlyCalculated == true) continue;
+                if (RuleRegistry.IsZeroOrEmptyValue(cell.Value2, rule)) continue;
 
                 if (rule?.DefaultRule?.Kind == DefaultKind.Literal &&
                     string.Equals(cellVal, rule.DefaultRule.LiteralValue, StringComparison.OrdinalIgnoreCase))
@@ -579,9 +581,17 @@ public static partial class TableRowManager
             }
 
             string archFormula = archetypeCell.Formula?.ToString() ?? string.Empty;
-            if (!archFormula.StartsWith("="))
+            if (!archFormula.StartsWith("=") || rule?.IsStrictlyCalculated == true)
             {
                 newCell.Value2 = null;
+                RuleRegistry.ApplyCalculatedColumnLock(newCell, rule);
+            }
+
+            // Declarative [ColumnFormat]: units + dash for zero on the new row (text template cells stay text)
+            if (RuleRegistry.ShouldApplyFormat(rule) && rule!.EffectiveFormatKind != ColumnFormatKind.OdometerDynamic &&
+                !string.Equals(archetypeCell.NumberFormat?.ToString(), "@", StringComparison.Ordinal))
+            {
+                try { newCell.NumberFormat = rule.ExcelNumberFormat; } catch { }
             }
         }
 

@@ -260,6 +260,42 @@ public class EventsAutoOpen : IExcelAddIn
         Arrow.HideAll();
     }
 
+    /// <summary>
+    /// Returns the first strictly-calculated column rule whose data cells intersect <paramref name="target"/>.
+    /// Only the columns actually covered by the target are inspected (no per-column Intersect calls).
+    /// </summary>
+    private static PropertyRuleDescriptor? FindLockedRule(dynamic xlApp, dynamic sh, dynamic target)
+    {
+        try
+        {
+            foreach (dynamic tbl in sh.ListObjects)
+            {
+                dynamic? body = tbl.DataBodyRange;
+                if (body == null) continue;
+
+                dynamic? hit = xlApp.Intersect(target, body);
+                if (hit == null) continue;
+
+                string tableName = tbl.Name?.ToString() ?? string.Empty;
+                int headerRow = (int)tbl.HeaderRowRange.Row;
+
+                foreach (dynamic area in hit.Areas)
+                {
+                    int firstCol = (int)area.Column;
+                    int colCount = (int)area.Columns.Count;
+                    for (int col = firstCol; col < firstCol + colCount; col++)
+                    {
+                        string header = sh.Cells[headerRow, col].Value2?.ToString()?.Trim() ?? string.Empty;
+                        var rule = RuleRegistry.GetRule(tableName, header);
+                        if (rule != null && rule.IsStrictlyCalculated) return rule;
+                    }
+                }
+            }
+        }
+        catch { }
+        return null;
+    }
+
     private static void OnSheetChange(dynamic sh, dynamic target)
     {
         try
@@ -296,6 +332,23 @@ public class EventsAutoOpen : IExcelAddIn
                 SheetOperations.ShowStatusConfirmation("Table headers are protected to allow sorting and cannot be modified.");
                 return;
             }
+
+            // 1a. Guard C#-calculated columns from paste / Delete / multi-cell clears
+            //     (typing is already blocked by the '=FALSE' validation from ApplyCalculatedColumnLock).
+            PropertyRuleDescriptor? lockedRule = FindLockedRule(xlApp, sh, target);
+            if (lockedRule != null)
+            {
+                bool origEvents = true;
+                try { origEvents = (bool)xlApp.EnableEvents; xlApp.EnableEvents = false; } catch { }
+                try { xlApp.Undo(); } catch { }
+                try { xlApp.EnableEvents = origEvents; } catch { }
+                SheetOperations.ShowStatusConfirmation(
+                    $"Column '{lockedRule.HeaderName}' is locked (Formula evaluated cell: {lockedRule.DisplayFormula}).");
+                return;
+            }
+
+            // 1b. Let module observers react (e.g. Project Summary project switching / rollup refresh)
+            ParameterCells.NotifyChanged(sh, target);
 
             // 2. Handle Multi-Cell Deletes (e.g., selecting an entire row and hitting Delete)
             if (target.Cells.Count > 1)

@@ -45,6 +45,7 @@ public static class SheetMapper
             {
                 s.StaffDetails.StaffID = s.StaffID;
             }
+            ServerSyncCommands.DeriveShortNames(staffs); // blank Short Name -> first + last word of Staff Name
 
             // 2. Extract Child License Collections & Check Foreign Key Integrity
             var childErrors = ExtractChildRecords((object)wb, staffs);

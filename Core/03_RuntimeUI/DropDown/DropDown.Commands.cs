@@ -48,6 +48,10 @@ public static class Commands
         {
             dynamic singleCell = cell.Cells[1, 1];
 
+            // 0. Code-registered selector cells outside any table (e.g. Project Summary!A2)
+            if (ParameterCells.IsParameterCell(singleCell))
+                return true;
+
             // 1. Primary path: Check if cell belongs to a ListObject table governed by C# RuleRegistry
             dynamic? cellTable = null;
             try { cellTable = singleCell.ListObject; } catch { }
@@ -211,7 +215,9 @@ public static class Commands
                     $"  Sources: {(rule.Sources.Length > 0 ? string.Join(", ", rule.Sources) : "(None / Default Only)")}\n" +
                     $"  Default: {rule.DefaultRule?.Kind.ToString() ?? "None"}\n" +
                     $"  Syncs: {rule.SyncRules.Count}\n" +
-                    $"  State Guards: {rule.StateGuards.Count}",
+                    $"  State Guards: {rule.StateGuards.Count}\n" +
+                    $"  Formula: {rule.DisplayFormula ?? "(None)"}" +
+                    (rule.RoundDownStep > 0 ? $"\n  Round Down Step: {rule.RoundDownStep}" : string.Empty),
                     "C# Attribute Rule Active",
                     MessageBoxButtons.OK,
                     MessageBoxIcon.Information);

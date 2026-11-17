@@ -87,9 +87,8 @@ public static class RulesExtractor
         {
             int colIndex = startCol + c;
             string headerText = headerGrid[1, c + 1]?.ToString()?.Trim() ?? $"Col_{colIndex}";
-            bool isFormula = archFormulas[c + 1].StartsWith("=");
-
             var csharpRule = RuleRegistry.GetRule(tableName, headerText);
+            bool isFormula = archFormulas[c + 1].StartsWith("=") || (csharpRule?.IsStrictlyCalculated ?? false);
             // Only query legacy COM metadata if no C# attribute rule governs this column
             var legacyConfig = (csharpRule != null || isFormula)
                 ? new Config()
@@ -418,6 +417,9 @@ public static class RulesExtractor
 
                 if (cRule == null) continue;
 
+                // "—" / "-" is the engine's display placeholder for null on numeric columns.
+                if (cRule.IsNumericColumn && (strVal is "—" or "–" or "-" or "−" or "‒" or "―" or "--" or "—-")) continue;
+
                 if (cRule.IsNumericColumn)
                 {
                     if (!double.TryParse(strVal, NumberStyles.Any, CultureInfo.InvariantCulture, out double dNum))
@@ -459,7 +461,8 @@ public static class RulesExtractor
                 {
                     if (cRule.IsMultiSelect)
                     {
-                        var tokens = strVal.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries).Select(t => t.Trim());
+                        // Every comma separated token is checked on its own against the allowed set.
+                        var tokens = RuleEvaluator.SplitMultiSelectTokens(strVal);
                         foreach (var token in tokens)
                         {
                             if (!IsTokenInNormalizedSet(allowedSet, token))

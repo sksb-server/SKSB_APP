@@ -164,10 +164,6 @@ public record VehicleDetail
     [ColumnRule("VehicleTypeList", IsRequired = true)]
     public VehicleType Type { get; set; } = VehicleType.Lorry;
 
-    [ExcelColumn("Vehicle Owner")]
-    [ColumnRule("CompanyNameList", IsRequired = false, IsWarningOnly = true)]
-    public string VehicleOwner { get; set; } = string.Empty;
-
     [ExcelColumn("Brand")]
     [ColumnRule(IsRequired = false)]
     public string Brand { get; set; } = string.Empty;
@@ -182,43 +178,119 @@ public record VehicleDetail
 
     [ExcelColumn("Bought Date")]
     [ColumnRule(IsRequired = false)]
+    [ColumnFormat(ColumnFormatKind.Date)]
     public DateOnly? BoughtDate { get; set; }
 
     [ExcelColumn("Bought Price")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
-    public decimal BoughtPrice { get; set; } = 0.00m;
+    [ColumnFormat(ColumnFormatKind.Currency)]
+    public decimal? BoughtPrice { get; set; }
 
     [ExcelColumn("Sold Date")]
     [ColumnRule(IsRequired = false)]
+    [ColumnFormat(ColumnFormatKind.Date)]
     public DateOnly? SoldDate { get; set; }
 
     [ExcelColumn("Sold Price")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
-    public decimal SoldPrice { get; set; } = 0.00m;
+    [ColumnFormat(ColumnFormatKind.Currency)]
+    public decimal? SoldPrice { get; set; }
 
+    [ColumnRollup(nameof(VehicleRecord.Insurances), RollupKind.Max, nameof(VehicleInsurance.ExpiryDate))]
     [ExcelColumn("Insurance Expiry")]
     [ColumnRule(IsRequired = false)]
+    [ColumnFormat(ColumnFormatKind.Date)]
     public DateOnly? InsuranceExpiry { get; set; }
 
+    [ColumnRollup(nameof(VehicleRecord.Permits), RollupKind.Min, nameof(VehiclePermit.ExpiryDate))]
     [ExcelColumn("Permit Expiry")]
     [ColumnRule(IsRequired = false)]
+    [ColumnFormat(ColumnFormatKind.Date)]
     public DateOnly? PermitExpiry { get; set; }
 
+    [ColumnRollup(nameof(VehicleRecord.RoadTaxes), RollupKind.Max, nameof(RoadTax.ExpiryDate))]
     [ExcelColumn("Road Tax Expiry")]
     [ColumnRule(IsRequired = false)]
+    [ColumnFormat(ColumnFormatKind.Date)]
     public DateOnly? RoadTaxExpiry { get; set; }
 
+    [ColumnRollup(nameof(VehicleRecord.Inspections), RollupKind.Max, nameof(Inspection.ExpiryDate))]
     [ExcelColumn("Inspection Expiry")]
     [ColumnRule(IsRequired = false)]
+    [ColumnFormat(ColumnFormatKind.Date)]
     public DateOnly? InspectionExpiry { get; set; }
 
+    [ColumnRollup(nameof(VehicleRecord.OdometerLogs), RollupKind.Max, nameof(OdometerLog.CurrentOdometer))]
     [ExcelColumn("Current Odometer")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
-    public decimal CurrentOdometer { get; set; } = 0m;
+    [ColumnFormat(ColumnFormatKind.OdometerDynamic)]
+    public decimal? CurrentOdometer { get; set; }
 
-    [ExcelColumn("Remarks")]
+    [ExcelColumn("Driven By")]
     [ColumnRule(IsRequired = false)]
-    public string Remarks { get; set; } = string.Empty;
+    public string DrivenBy { get; set; } = string.Empty;
+
+    [ExcelColumn("Used At")]
+    [ColumnRule(IsRequired = false)]
+    public string UsedAt { get; set; } = string.Empty;
+
+    // ---- UI-only calculated / rollup columns of 'AllVehiclesTable' (never persisted) ----
+    // Cost rollups honour the date filter on 'All Vehicles' (B2 anchor date + C2 scope).
+
+    [JsonIgnore]
+    [ExcelColumn("Years Old")]
+    [ColumnCalculate("IF([Bought Date] > 0, YEARS_BETWEEN([Bought Date], IF([Sold Date] > 0, [Sold Date], TODAY())), null)", DecimalPlaces = 0)]
+    [ColumnFormat(ColumnFormatKind.Years)]
+    public int? YearsOld { get; set; }
+
+    [JsonIgnore]
+    [ExcelColumn("Return")]
+    [ColumnCalculate("IF([Sold Price] > 0, [Sold Price] - [Bought Price], null)")]
+    [ColumnFormat(ColumnFormatKind.Currency)]
+    public decimal? ReturnAmount { get; set; }
+
+    [JsonIgnore]
+    [ColumnRollup(nameof(VehicleRecord.OdometerLogs), RollupKind.Sum, nameof(OdometerLog.Amount), DateProperty = nameof(OdometerLog.Date))]
+    [ExcelColumn("Fuel Cost")]
+    [ColumnFormat(ColumnFormatKind.Currency)]
+    public decimal? FuelCost { get; set; }
+
+    [JsonIgnore]
+    [ColumnRollup(nameof(VehicleRecord.Maintenances), RollupKind.Sum, nameof(Maintenance.RepairCost), DateProperty = nameof(Maintenance.DateIn))]
+    [ExcelColumn("Maintenance Cost")]
+    [ColumnFormat(ColumnFormatKind.Currency)]
+    public decimal? MaintenanceCost { get; set; }
+
+    [JsonIgnore]
+    [ColumnRollup(nameof(VehicleRecord.Insurances), RollupKind.Sum, nameof(VehicleInsurance.Amount), DateProperty = nameof(VehicleInsurance.RenewDate))]
+    [ExcelColumn("Insurance Cost")]
+    [ColumnFormat(ColumnFormatKind.Currency)]
+    public decimal? InsuranceCost { get; set; }
+
+    [JsonIgnore]
+    [ColumnRollup(nameof(VehicleRecord.Permits), RollupKind.Sum, nameof(VehiclePermit.Amount), DateProperty = nameof(VehiclePermit.RenewDate))]
+    [ExcelColumn("Permit Cost")]
+    [ColumnFormat(ColumnFormatKind.Currency)]
+    public decimal? PermitCost { get; set; }
+
+    [JsonIgnore]
+    [ColumnRollup(nameof(VehicleRecord.RoadTaxes), RollupKind.Sum, nameof(RoadTax.Amount), DateProperty = nameof(RoadTax.RenewDate))]
+    [ColumnRollup(nameof(VehicleRecord.Inspections), RollupKind.Sum, nameof(Inspection.Amount), DateProperty = nameof(Inspection.ScheduleDateIn))]
+    [ExcelColumn("Road Tax and Inspection Cost")]
+    [ColumnFormat(ColumnFormatKind.Currency)]
+    public decimal? RoadTaxAndInspectionCost { get; set; }
+
+    [JsonIgnore]
+    [ColumnRollup(nameof(VehicleRecord.InsuranceClaims), RollupKind.Sum, nameof(InsuranceClaim.ClaimAmount), DateProperty = nameof(InsuranceClaim.ClaimDate))]
+    [ExcelColumn("Insurance Claim")]
+    [ColumnFormat(ColumnFormatKind.Currency)]
+    public decimal? InsuranceClaimAmount { get; set; }
+
+    [JsonIgnore]
+    [ColumnCalculate("[Fuel Cost] + [Maintenance Cost] + [Insurance Cost] + [Permit Cost] + [Road Tax and Inspection Cost] - IF([Insurance Claim] > 0, [Insurance Claim], 0)")]
+    [ExcelColumn("Total Cost")]
+    [ColumnFormat(ColumnFormatKind.Currency)]
+    public decimal? TotalCost { get; set; }
 }
 
 // =========================================================================
@@ -231,6 +303,7 @@ public record Maintenance
     [ExcelColumn("Maintenance ID", isRequired: true)]
     [ColumnRule(IsRequired = true)]
     [ColumnDefault(DefaultKind.AutoIncrement)]
+    [ColumnFormat(ColumnFormatKind.Id, zero: ZeroBehavior.Blank)]
     public long MaintenanceID { get; set; }
 
     [ExcelColumn("Vehicle Plate", isRequired: true)]
@@ -252,23 +325,28 @@ public record Maintenance
     [ExcelColumn("Date In", isRequired: true)]
     [ColumnRule(IsRequired = true)]
     [ColumnDefault(DefaultKind.Today)]
+    [ColumnFormat(ColumnFormatKind.Date)]
     public DateOnly DateIn { get; set; } = DateOnly.FromDateTime(DateTime.Today);
 
     [ExcelColumn("Estimated Return")]
     [ColumnRule(IsRequired = false, IsWarningOnly = true)]
     [ColumnDefault(DefaultKind.DateOffsetDays, referenceHeader: "Date In", offset: 3)]
+    [ColumnFormat(ColumnFormatKind.Date)]
     public DateOnly EstimatedReturn { get; set; } = DateOnly.FromDateTime(DateTime.Today.AddDays(3));
 
     [ExcelColumn("Date Completed")]
     [ColumnRule(IsRequired = false)]
+    [ColumnFormat(ColumnFormatKind.Date)]
     public DateOnly? DateCompleted { get; set; }
 
     [ExcelColumn("Odometer In")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
+    [ColumnFormat(ColumnFormatKind.OdometerDynamic)]
     public decimal OdometerIn { get; set; } = 0m;
 
     [ExcelColumn("Odometer Out")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
+    [ColumnFormat(ColumnFormatKind.OdometerDynamic)]
     public decimal OdometerOut { get; set; } = 0m;
 
     [ExcelColumn("Workshop Name")]
@@ -276,7 +354,7 @@ public record Maintenance
     [ColumnSync("Workshop Address", "WorkshopsTable[Workshop Name]", "WorkshopsTable[Workshop Address]")]
     public string WorkshopName { get; set; } = string.Empty;
 
-    [JsonIgnore] // 1. Prevents duplicate saves to DB / JSON snapshots
+    // Persisted to vehicle_maintenance.workshop_address (two-way synced from Workshops).
     [ExcelColumn("Workshop Address")]
     [ColumnRule("WorkshopsTable[Workshop Address]", IsWarningOnly = true, IsRequired = false)]
     [ColumnSync("Workshop Name", "WorkshopsTable[Workshop Address]", "WorkshopsTable[Workshop Name]")]
@@ -291,51 +369,64 @@ public record Maintenance
 
     [ExcelColumn("Repair Total Cost")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
-    public decimal RepairCost { get; set; } = 0.00m;
+    [ColumnCalculate("[Tyre] + [Brake] + [Clutch] + [Service] + [Fuel Pump] + [Aircond] + [Wiring] + [Battery] + [Towing] + [Cushion] + [Parts]")]
+    [ColumnFormat(ColumnFormatKind.Currency)]
+    public decimal? RepairCost { get; set; }
 
     [ExcelColumn("Tyre")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
-    public decimal TyreCost { get; set; } = 0.00m;
+    [ColumnFormat(ColumnFormatKind.Currency)]
+    public decimal? TyreCost { get; set; }
 
     [ExcelColumn("Brake")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
-    public decimal BrakeCost { get; set; } = 0.00m;
+    [ColumnFormat(ColumnFormatKind.Currency)]
+    public decimal? BrakeCost { get; set; }
 
     [ExcelColumn("Clutch")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
-    public decimal ClutchCost { get; set; } = 0.00m;
+    [ColumnFormat(ColumnFormatKind.Currency)]
+    public decimal? ClutchCost { get; set; }
 
     [ExcelColumn("Service")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
-    public decimal ServiceCost { get; set; } = 0.00m;
+    [ColumnFormat(ColumnFormatKind.Currency)]
+    public decimal? ServiceCost { get; set; }
 
     [ExcelColumn("Fuel Pump")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
-    public decimal FuelPumpCost { get; set; } = 0.00m;
+    [ColumnFormat(ColumnFormatKind.Currency)]
+    public decimal? FuelPumpCost { get; set; }
 
     [ExcelColumn("Aircond")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
-    public decimal AircondCost { get; set; } = 0.00m;
+    [ColumnFormat(ColumnFormatKind.Currency)]
+    public decimal? AircondCost { get; set; }
 
     [ExcelColumn("Wiring")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
-    public decimal WiringCost { get; set; } = 0.00m;
+    [ColumnFormat(ColumnFormatKind.Currency)]
+    public decimal? WiringCost { get; set; }
 
     [ExcelColumn("Battery")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
-    public decimal BatteryCost { get; set; } = 0.00m;
+    [ColumnFormat(ColumnFormatKind.Currency)]
+    public decimal? BatteryCost { get; set; }
 
     [ExcelColumn("Towing")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
-    public decimal TowingCost { get; set; } = 0.00m;
+    [ColumnFormat(ColumnFormatKind.Currency)]
+    public decimal? TowingCost { get; set; }
 
     [ExcelColumn("Cushion")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
-    public decimal CushionCost { get; set; } = 0.00m;
+    [ColumnFormat(ColumnFormatKind.Currency)]
+    public decimal? CushionCost { get; set; }
 
     [ExcelColumn("Parts")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
-    public decimal PartsCost { get; set; } = 0.00m;
+    [ColumnFormat(ColumnFormatKind.Currency)]
+    public decimal? PartsCost { get; set; }
 
     [ExcelColumn("Remarks")]
     [ColumnRule(IsRequired = false)]
@@ -352,6 +443,7 @@ public record Workshop
     [ExcelColumn("Workshop ID", isRequired: true)]
     [ColumnRule(IsRequired = true)]
     [ColumnDefault(DefaultKind.AutoIncrement)]
+    [ColumnFormat(ColumnFormatKind.Id, zero: ZeroBehavior.Blank)]
     public long WorkshopID { get; set; }
 
     [DataList("WorkshopNameList")]
@@ -375,6 +467,24 @@ public record Workshop
     [ExcelColumn("Workshop Secondary Contact")]
     [ColumnRule(IsRequired = false)]
     public string SecondaryContact { get; set; } = string.Empty;
+
+    // ---- UI-only cross-table rollups from 'MaintenancesTable' (never persisted) ----
+    [JsonIgnore]
+    [ColumnRollup("MaintenancesTable", RollupKind.Count, "Maintenance ID", ForeignKeyHeader = "Workshop Name", LocalKeyHeader = "Workshop Name", DateProperty = "Date In")]
+    [ExcelColumn("Number of Vehicle Fixed")]
+    [ColumnFormat(ColumnFormatKind.Integer)]
+    public int? NumberOfVehiclesFixed { get; set; }
+
+    [JsonIgnore]
+    [ColumnRollup("MaintenancesTable", RollupKind.DistinctJoin, "Vehicle Plate", ForeignKeyHeader = "Workshop Name", LocalKeyHeader = "Workshop Name", DateProperty = "Date In")]
+    [ExcelColumn("Fixed Vehicle Plates")]
+    public string FixedVehiclePlates { get; set; } = string.Empty;
+
+    [JsonIgnore]
+    [ColumnRollup("MaintenancesTable", RollupKind.Sum, "Repair Total Cost", ForeignKeyHeader = "Workshop Name", LocalKeyHeader = "Workshop Name", DateProperty = "Date In")]
+    [ExcelColumn("Total Cost")]
+    [ColumnFormat(ColumnFormatKind.Currency)]
+    public decimal? TotalCost { get; set; }
 }
 
 // =========================================================================
@@ -435,17 +545,20 @@ public record VehicleInsurance
     [ExcelColumn("Renewal Date", isRequired: true)]
     [ColumnRule(IsRequired = true)]
     [ColumnDefault(DefaultKind.Today)]
+    [ColumnFormat(ColumnFormatKind.Date)]
     public DateOnly RenewDate { get; set; } = DateOnly.FromDateTime(DateTime.Today);
 
     [ExcelColumn("Expiry Date", isRequired: true)]
     [ColumnRule(IsRequired = true)]
     [ColumnDefault(DefaultKind.DateOffsetDays, referenceHeader: "Renewal Date", offset: 365)]
     [ColumnDateGreaterThan("Renewal Date")]
+    [ColumnFormat(ColumnFormatKind.Date)]
     public DateOnly ExpiryDate { get; set; } = DateOnly.FromDateTime(DateTime.Today.AddDays(365));
 
     [ExcelColumn("Cost")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
-    public decimal Amount { get; set; } = 0.00m;
+    [ColumnFormat(ColumnFormatKind.Currency)]
+    public decimal? Amount { get; set; }
 
     [ExcelColumn("Status", isRequired: true)]
     [ColumnRule("InsuranceStatusList", IsRequired = true)]
@@ -481,6 +594,18 @@ public record InsuranceCompanyRecord
     [ExcelColumn("Agent Contact Number")]
     [ColumnRule(IsRequired = false)]
     public string AgentContactNumber { get; set; } = string.Empty;
+
+    // ---- UI-only cross-table rollups from 'InsurancesTable' (never persisted) ----
+    [JsonIgnore]
+    [ColumnRollup("InsurancesTable", RollupKind.Count, "Vehicle Plate", ForeignKeyHeader = "Insurance Agent", LocalKeyHeader = "Insurance Agent")]
+    [ExcelColumn("Number of Vehicles Under Agent")]
+    [ColumnFormat(ColumnFormatKind.Integer)]
+    public int? NumberOfVehiclesUnderAgent { get; set; }
+
+    [JsonIgnore]
+    [ColumnRollup("InsurancesTable", RollupKind.DistinctJoin, "Vehicle Plate", ForeignKeyHeader = "Insurance Agent", LocalKeyHeader = "Insurance Agent")]
+    [ExcelColumn("Vehicle Plates Under Agent")]
+    public string VehiclePlatesUnderAgent { get; set; } = string.Empty;
 }
 
 [ExcelTable("InsuranceClaimsTable")]
@@ -489,16 +614,19 @@ public record InsuranceClaim
     [ExcelColumn("Insurance Claim ID", isRequired: true)]
     [ColumnRule(IsRequired = true)]
     [ColumnDefault(DefaultKind.AutoIncrement)]
+    [ColumnFormat(ColumnFormatKind.Id, zero: ZeroBehavior.Blank)]
     public long ClaimID { get; set; }
 
     [ExcelColumn("Claim Date", isRequired: true)]
     [ColumnRule(IsRequired = true)]
     [ColumnDefault(DefaultKind.Today)]
+    [ColumnFormat(ColumnFormatKind.Date)]
     public DateOnly ClaimDate { get; set; } = DateOnly.FromDateTime(DateTime.Today);
 
     [ExcelColumn("Settlement Date")]
     [ColumnRule(IsRequired = false)]
     [ColumnDateGreaterThan("Claim Date")]
+    [ColumnFormat(ColumnFormatKind.Date)]
     public DateOnly? SettlementDate { get; set; }
 
     [ExcelColumn("Vehicle Plate", isRequired: true)]
@@ -547,7 +675,8 @@ public record InsuranceClaim
 
     [ExcelColumn("Claim Amount")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
-    public decimal ClaimAmount { get; set; } = 0.00m;
+    [ColumnFormat(ColumnFormatKind.Currency)]
+    public decimal? ClaimAmount { get; set; }
 
     [ExcelColumn("Remarks")]
     [ColumnRule(IsRequired = false)]
@@ -564,6 +693,7 @@ public record VehiclePermit
     [ExcelColumn("Permit ID", isRequired: true)]
     [ColumnRule(IsRequired = true)]
     [ColumnDefault(DefaultKind.AutoIncrement)]
+    [ColumnFormat(ColumnFormatKind.Id, zero: ZeroBehavior.Blank)]
     public long PermitID { get; set; }
 
     [ExcelColumn("Vehicle Plate", isRequired: true)]
@@ -585,17 +715,20 @@ public record VehiclePermit
     [ExcelColumn("Renewal Date", isRequired: true)]
     [ColumnRule(IsRequired = true)]
     [ColumnDefault(DefaultKind.Today)]
+    [ColumnFormat(ColumnFormatKind.Date)]
     public DateOnly RenewDate { get; set; } = DateOnly.FromDateTime(DateTime.Today);
 
     [ExcelColumn("Expiry Date", isRequired: true)]
     [ColumnRule(IsRequired = true)]
     [ColumnDefault(DefaultKind.DateOffsetDays, referenceHeader: "Renewal Date", offset: 365)]
     [ColumnDateGreaterThan("Renewal Date")]
+    [ColumnFormat(ColumnFormatKind.Date)]
     public DateOnly ExpiryDate { get; set; } = DateOnly.FromDateTime(DateTime.Today.AddDays(365));
 
     [ExcelColumn("Cost")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
-    public decimal Amount { get; set; } = 0.00m;
+    [ColumnFormat(ColumnFormatKind.Currency)]
+    public decimal? Amount { get; set; }
 
     [ExcelColumn("Status", isRequired: true)]
     [ColumnRule("VehiclePermitStatusList", IsRequired = true)]
@@ -614,6 +747,7 @@ public record RoadTax
     [ExcelColumn("Road Tax ID", isRequired: true)]
     [ColumnRule(IsRequired = true)]
     [ColumnDefault(DefaultKind.AutoIncrement)]
+    [ColumnFormat(ColumnFormatKind.Id, zero: ZeroBehavior.Blank)]
     public long RoadTaxID { get; set; }
 
     [ExcelColumn("Vehicle Plate", isRequired: true)]
@@ -630,17 +764,20 @@ public record RoadTax
     [ExcelColumn("Renewal Date", isRequired: true)]
     [ColumnRule(IsRequired = true)]
     [ColumnDefault(DefaultKind.Today)]
+    [ColumnFormat(ColumnFormatKind.Date)]
     public DateOnly RenewDate { get; set; } = DateOnly.FromDateTime(DateTime.Today);
 
     [ExcelColumn("Expiry Date", isRequired: true)]
     [ColumnRule(IsRequired = true)]
     [ColumnDefault(DefaultKind.DateOffsetDays, referenceHeader: "Renewal Date", offset: 365)]
     [ColumnDateGreaterThan("Renewal Date")]
+    [ColumnFormat(ColumnFormatKind.Date)]
     public DateOnly ExpiryDate { get; set; } = DateOnly.FromDateTime(DateTime.Today.AddDays(365));
 
     [ExcelColumn("Cost")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
-    public decimal Amount { get; set; } = 0.00m;
+    [ColumnFormat(ColumnFormatKind.Currency)]
+    public decimal? Amount { get; set; }
 
     [ExcelColumn("Status", isRequired: true)]
     [ColumnRule("RoadTaxStatusList", IsRequired = true)]
@@ -659,6 +796,7 @@ public record Inspection
     [ExcelColumn("Inspection ID", isRequired: true)]
     [ColumnRule(IsRequired = true)]
     [ColumnDefault(DefaultKind.AutoIncrement)]
+    [ColumnFormat(ColumnFormatKind.Id, zero: ZeroBehavior.Blank)]
     public long InspectionID { get; set; }
 
     [ExcelColumn("Vehicle Plate", isRequired: true)]
@@ -675,27 +813,32 @@ public record Inspection
     [ExcelColumn("Schedule Date In")]
     [ColumnRule(IsRequired = false)]
     [ColumnDefault(DefaultKind.Today)]
+    [ColumnFormat(ColumnFormatKind.Date)]
     public DateOnly ScheduleDateIn { get; set; } = DateOnly.FromDateTime(DateTime.Today);
 
     [ExcelColumn("Date Out", isRequired: true)]
     [ColumnRule(IsRequired = true)]
     [ColumnDefault(DefaultKind.Today)]
+    [ColumnFormat(ColumnFormatKind.Date)]
     public DateOnly DateOut { get; set; } = DateOnly.FromDateTime(DateTime.Today);
 
     [ExcelColumn("Expiry Date", isRequired: true)]
     [ColumnRule(IsRequired = true)]
     [ColumnDefault(DefaultKind.DateOffsetMonths, referenceHeader: "Date Out", offset: 6)]
     [ColumnDateGreaterThan("Date Out")]
+    [ColumnFormat(ColumnFormatKind.Date)]
     public DateOnly ExpiryDate { get; set; } = DateOnly.FromDateTime(DateTime.Today.AddMonths(6));
 
     [ExcelColumn("Cost")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
-    public decimal Amount { get; set; } = 0.00m;
+    [ColumnFormat(ColumnFormatKind.Currency)]
+    public decimal? Amount { get; set; }
 
     [ExcelColumn("Status")]
     [ColumnRule("InspectionStatusList")]
     [ColumnDefault(DefaultKind.Literal, literalValue: "Scheduled")]
-    [ColumnStateGuard(1, StateConditionKind.DateExpired, "Expired", "Completed", "Expiry Date")]
+    [ColumnStateGuard(1, StateConditionKind.DateExpired, "Expired", "Completed", "Expiry Date", SkipIfCurrentEquals = "Failed", DisallowForcedValueWhenFalse = true)]
+    [ColumnStateGuard(2, StateConditionKind.DateReached, "Completed", "Scheduled", "Date Out", SkipIfCurrentEquals = "Failed", DisallowForcedValueWhenFalse = true)]
     public InspectionStatus Status { get; set; } = InspectionStatus.Scheduled;
 
     [ExcelColumn("Address")]
@@ -717,11 +860,13 @@ public record OdometerLog
     [ExcelColumn("Fuel Transaction ID", isRequired: true)]
     [ColumnRule(IsRequired = true)]
     [ColumnDefault(DefaultKind.AutoIncrement)]
+    [ColumnFormat(ColumnFormatKind.Id, zero: ZeroBehavior.Blank)]
     public long OdometerID { get; set; }
 
     [ExcelColumn("Date", isRequired: true)]
     [ColumnRule(IsRequired = true)]
     [ColumnDefault(DefaultKind.Today)]
+    [ColumnFormat(ColumnFormatKind.Date)]
     public DateOnly Date { get; set; } = DateOnly.FromDateTime(DateTime.Today);
 
     [ExcelColumn("Vehicle Plate", isRequired: true)]
@@ -739,6 +884,7 @@ public record OdometerLog
     [ExcelColumn("Staff ID")]
     [ColumnRule("StaffIDList", IsRequired = false, IsWarningOnly = true)]
     [ColumnSync("Staff Name", "StaffIDList", "StaffShortNameList")]
+    [ColumnFormat(ColumnFormatKind.Id, zero: ZeroBehavior.Blank)]
     public long StaffID { get; set; } = 0;
 
     // 2. Unmapped Helper Column (Two-Way Auto-Evaluated in Excel)
@@ -752,18 +898,33 @@ public record OdometerLog
     [ColumnRule("ProjectIDList", IsRequired = false, IsWarningOnly = true)]
     public string Project { get; set; } = string.Empty;
 
+    [ColumnRollup("OdometersTable", RollupKind.PriorMax, "Current Odometer", ForeignKeyHeader = "Vehicle Plate", LocalKeyHeader = "Vehicle Plate", DateProperty = "Date", Mode = CalculationMode.DefaultOnly)]
     [ExcelColumn("Odometer Before")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
-    public decimal OdometerBefore { get; set; } = 0m;
+    [ColumnFormat(ColumnFormatKind.OdometerDynamic)]
+    public decimal? OdometerBefore { get; set; }
 
     [ExcelColumn("Current Odometer")]
     [ColumnRule(IsRequired = true, AllowNonNegativeZero = true)]
+    [ColumnFormat(ColumnFormatKind.OdometerDynamic)]
     public decimal CurrentOdometer { get; set; } = 0m;
+
+    [JsonIgnore]
+    [ExcelColumn("Odometer Difference")]
+    [ColumnCalculate("IF([Current Odometer] > [Odometer Before], [Current Odometer] - [Odometer Before], 0)", DecimalPlaces = 1)]
+    [ColumnFormat(ColumnFormatKind.OdometerDynamic)]
+    public decimal? OdometerDifference { get; set; }
 
     [ExcelColumn("Fuel Card Number")]
     [ColumnRule("FuelCardsTable[Fuel Card Number]", IsRequired = false, IsWarningOnly = true)]
     [ColumnSync("Fuel Company", "FuelCardsTable[Fuel Card Number]", "FuelCardsTable[Fuel Company Name]")]
+    [ColumnSync("Card Owner", "FuelCardsTable[Fuel Card Number]", "FuelCardsTable[Card Owner Name]")]
     public string FuelCardNumber { get; set; } = string.Empty;
+
+    [JsonIgnore]
+    [ExcelColumn("Card Owner")]
+    [ColumnRule(IsRequired = false, IsWarningOnly = true)]
+    public string CardOwner { get; set; } = string.Empty;
 
     [ExcelColumn("Fuel Company")]
     [ColumnRule("FuelCompanyNamesTable[Fuel Company Name]", IsRequired = false, IsWarningOnly = true)]
@@ -783,18 +944,22 @@ public record OdometerLog
 
     [ExcelColumn("Price at Fueling")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
+    [ColumnFormat(ColumnFormatKind.PricePerLiter)]
     public decimal PriceAtFueling { get; set; } = 0.00m;
 
     [ExcelColumn("Fuel Amount")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
+    [ColumnFormat(ColumnFormatKind.Liters)]
     public decimal FuelAmount { get; set; } = 0.00m;
 
     [ExcelColumn("Transaction Amount")]
     [ColumnRule(IsRequired = false, AllowNonNegativeZero = true)]
+    [ColumnFormat(ColumnFormatKind.Currency)]
     public decimal Amount { get; set; } = 0.00m;
 
     [ExcelColumn("Time")]
     [ColumnRule(IsRequired = false)]
+    [ColumnFormat(ColumnFormatKind.Time)]
     public string Time { get; set; } = string.Empty;
 
     [ExcelColumn("Remarks")]

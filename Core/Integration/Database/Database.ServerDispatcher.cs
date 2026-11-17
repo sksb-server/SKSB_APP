@@ -67,6 +67,9 @@ public static class ServerDispatcher
     // =========================================================================
     // 2. VEHICLE MANAGER PERSISTENCE
     // =========================================================================
+    /// <summary>Expiry dates of 1900 or earlier (0001-01-01 sentinels) are saved as NULL.</summary>
+    private static DateOnly? ValidExpiry(DateOnly? d) => d.HasValue && d.Value.Year > 1900 ? d : null;
+
     public static void PersistVehicles(IList<VehicleRecord> vehicles, bool isFullBatch)
     {
         var validVehicles = vehicles.Where(v => !string.IsNullOrWhiteSpace(v.VehiclePlate)).ToList();
@@ -77,9 +80,9 @@ public static class ServerDispatcher
         var masterRecords = validVehicles.Select(v =>
         {
             var latestRoadTax = v.RoadTaxes.OrderByDescending(r => r.ExpiryDate).FirstOrDefault();
-            var roadTaxExpiry = v.VehicleDetail.RoadTaxExpiry ?? latestRoadTax?.ExpiryDate;
+            DateOnly? roadTaxExpiry = ValidExpiry(v.VehicleDetail.RoadTaxExpiry ?? latestRoadTax?.ExpiryDate);
             var latestInspection = v.Inspections.OrderByDescending(i => i.ExpiryDate).FirstOrDefault();
-            var inspectionExpiry = v.VehicleDetail.InspectionExpiry ?? latestInspection?.ExpiryDate;
+            DateOnly? inspectionExpiry = ValidExpiry(v.VehicleDetail.InspectionExpiry ?? latestInspection?.ExpiryDate);
             return new
             {
                 VehiclePlate = v.VehiclePlate.Trim().ToUpperInvariant(),
@@ -87,8 +90,10 @@ public static class ServerDispatcher
                 VehicleType = v.VehicleDetail.Type.ToString(),
                 Brand = v.VehicleDetail.Brand ?? string.Empty,
                 Model = v.VehicleDetail.Model ?? string.Empty,
-                RoadTaxExpiry = roadTaxExpiry?.ToDateTime(TimeOnly.MinValue),
-                InspectionExpiry = inspectionExpiry?.ToDateTime(TimeOnly.MinValue),
+                RoadTaxExpiry = roadTaxExpiry.HasValue ? (DateTime?)roadTaxExpiry.Value.ToDateTime(TimeOnly.MinValue) : null,
+                InspectionExpiry = inspectionExpiry.HasValue ? (DateTime?)inspectionExpiry.Value.ToDateTime(TimeOnly.MinValue) : null,
+                DrivenBy = v.VehicleDetail.DrivenBy ?? string.Empty,
+                UsedAt = v.VehicleDetail.UsedAt ?? string.Empty,
                 CurrentOdometer = v.VehicleDetail.CurrentOdometer,
                 BoughtDate = v.VehicleDetail.BoughtDate.HasValue
                     ? (DateTime?)v.VehicleDetail.BoughtDate.Value.ToDateTime(TimeOnly.MinValue)
@@ -117,6 +122,7 @@ public static class ServerDispatcher
                 OdometerOut = m.OdometerOut,
                 RepairCost = m.RepairCost,
                 WorkshopName = m.WorkshopName,
+                WorkshopAddress = m.WorkshopAddress ?? string.Empty,
                 Status = m.MaintenanceStatus.ToString(),
                 Remarks = m.Remarks,
                 TyreCost = m.TyreCost,
@@ -251,13 +257,13 @@ INSERT INTO vehicle_master (
     vehicle_plate, vin, vehicle_type, brand, model,
     road_tax_expiry, inspection_expiry, current_odometer,
     bought_date, bought_price, sold_date, sold_price,
-    status
+    driven_by, used_at, status
 )
 VALUES (
     @VehiclePlate, @Vin, @VehicleType, @Brand, @Model,
     @RoadTaxExpiry, @InspectionExpiry, @CurrentOdometer,
     @BoughtDate, @BoughtPrice, @SoldDate, @SoldPrice,
-    @Status
+    @DrivenBy, @UsedAt, @Status
 )
 ON CONFLICT (vehicle_plate) DO UPDATE SET
     vin               = COALESCE(NULLIF(EXCLUDED.vin, ''), vehicle_master.vin),
@@ -271,20 +277,22 @@ ON CONFLICT (vehicle_plate) DO UPDATE SET
     bought_price      = EXCLUDED.bought_price,
     sold_date         = EXCLUDED.sold_date,
     sold_price        = EXCLUDED.sold_price,
+    driven_by         = EXCLUDED.driven_by,
+    used_at           = EXCLUDED.used_at,
     status            = EXCLUDED.status,
     updated_at        = CURRENT_TIMESTAMP;";
 
         const string sqlMaintenanceUpsert = @"
         INSERT INTO vehicle_maintenance (
             maintenance_id, vehicle_plate, service_type, date_in, estimated_return,
-            date_completed, odometer_in, odometer_out, repair_cost, workshop_name,
+            date_completed, odometer_in, odometer_out, repair_cost, workshop_name, workshop_address,
             status, remarks,
             tyre_cost, brake_cost, clutch_cost, service_cost, fuel_pump_cost,
             aircond_cost, wiring_cost, battery_cost, towing_cost, cushion_cost, parts_cost
         )
         VALUES (
             @MaintenanceId, @VehiclePlate, @ServiceType, @DateIn, @EstimatedReturn,
-            @DateCompleted, @OdometerIn, @OdometerOut, @RepairCost, @WorkshopName,
+            @DateCompleted, @OdometerIn, @OdometerOut, @RepairCost, @WorkshopName, @WorkshopAddress,
             @Status, @Remarks,
             @TyreCost, @BrakeCost, @ClutchCost, @ServiceCost, @FuelPumpCost,
             @AircondCost, @WiringCost, @BatteryCost, @TowingCost, @CushionCost, @PartsCost
@@ -299,6 +307,7 @@ ON CONFLICT (vehicle_plate) DO UPDATE SET
             odometer_out     = EXCLUDED.odometer_out,
             repair_cost      = EXCLUDED.repair_cost,
             workshop_name    = EXCLUDED.workshop_name,
+            workshop_address = EXCLUDED.workshop_address,
             status           = EXCLUDED.status,
             remarks          = EXCLUDED.remarks,
             tyre_cost        = EXCLUDED.tyre_cost,
@@ -486,6 +495,14 @@ END $$;", transaction: trans);
                 conn.Execute("DELETE FROM vehicle_maintenance WHERE vehicle_plate != ALL(@ActivePlates);", new { ActivePlates = activePlates }, trans);
                 conn.Execute("DELETE FROM vehicle_master WHERE vehicle_plate != ALL(@ActivePlates);", new { ActivePlates = activePlates }, trans);
             }
+
+            // Idempotent migrations: no 10-year placeholder expiry defaults, plus the Driven By / Used At columns.
+            conn.Execute(@"
+ALTER TABLE vehicle_master ALTER COLUMN road_tax_expiry DROP DEFAULT;
+ALTER TABLE vehicle_master ALTER COLUMN inspection_expiry DROP DEFAULT;
+ALTER TABLE vehicle_master ADD COLUMN IF NOT EXISTS driven_by VARCHAR(128) DEFAULT '';
+ALTER TABLE vehicle_master ADD COLUMN IF NOT EXISTS used_at   VARCHAR(256) DEFAULT '';
+ALTER TABLE vehicle_maintenance ADD COLUMN IF NOT EXISTS workshop_address TEXT DEFAULT '';", transaction: trans);
 
             conn.Execute(sqlMasterUpsert, masterRecords, trans);
 
@@ -746,37 +763,135 @@ END $$;", transaction: trans);
     // =========================================================================
     public static void PersistProjects(IList<ProjectRecord> projects, bool isFullBatch)
     {
-        var items = projects.Where(p => !string.IsNullOrWhiteSpace(p.ProjectID)).ToList();
+        var items = projects.Where(p => !string.IsNullOrWhiteSpace(p.ProjectCode)).ToList();
         if (!items.Any()) return;
 
-        var activeIds = items.Select(p => p.ProjectID.Trim().ToUpperInvariant()).ToArray();
-        var records = items.Select(p => new
+        static DateTime? ToDt(DateOnly? d) => d.HasValue ? d.Value.ToDateTime(TimeOnly.MinValue) : null;
+
+        var activeIds = items.Select(p => p.ProjectCode.Trim().ToUpperInvariant()).ToArray();
+        var masterRecords = items.Select(p => new
         {
-            ProjectId = p.ProjectID.Trim().ToUpperInvariant(),
-            ProjectName = p.ProjectDetails.ProjectName ?? string.Empty,
-            ProjectType = p.ProjectDetails.ProjectType.ToString(),
+            ProjectId = p.ProjectCode.Trim().ToUpperInvariant(),
+            Category = p.Category.ToString(),
+            ReferenceNo = p.ProjectDetails.ReferenceNo ?? string.Empty,
+            ProjectType = string.Join(", ", (p.ProjectDetails.ProjectType ?? new List<ProjectType>()).Select(t => t.ToString())),
+            Priority = p.ProjectDetails.Priority.ToString(),
+            Status = p.ProjectDetails.Status.ToString(),
+            CompanyId = p.ProjectDetails.CompanyID > 0 ? p.ProjectDetails.CompanyID : (long?)null,
             CompanyName = p.ProjectDetails.CompanyName ?? string.Empty,
+            StaffId = p.ProjectDetails.StaffID,
+            Pic = p.ProjectDetails.PIC ?? string.Empty,
+            District = p.ProjectDetails.District.ToString(),
+            Address = p.ProjectDetails.Address ?? string.Empty,
             StartDate = p.ProjectDetails.StartDate.ToDateTime(TimeOnly.MinValue),
-            TargetEndDate = p.ProjectDetails.TargetEndDate.ToDateTime(TimeOnly.MinValue)
+            TargetEndDate = p.ProjectDetails.TargetEndDate.ToDateTime(TimeOnly.MinValue),
+            ActualEndDate = ToDt(p.ProjectDetails.ActualEndDate),
+            EstimatedCost = p.ProjectDetails.EstimatedCost,
+            PromisedReturn = p.ProjectDetails.PromisedReturn,
+            ActualReturn = p.ProjectDetails.ActualReturn,
+            Remarks = p.ProjectDetails.Remarks ?? string.Empty,
+            DaysWorked = p.ProjectDetails.DaysWorked,
+            TotalRegularShifts = p.ProjectDetails.TotalRegularShifts,
+            TotalHours = p.ProjectDetails.TotalHours,
+            OvertimeShifts = p.ProjectDetails.OvertimeShifts,
+            TotalOvertimeHours = p.ProjectDetails.TotalOvertimeHours,
+            TotalOdometer = p.ProjectDetails.TotalOdometer,
+            FuelCost = p.ProjectDetails.FuelCost,
+            LabourCost = p.ProjectDetails.LabourCost,
+            ClaimCost = p.ProjectDetails.ClaimCost,
+            ActualProjectCost = p.ProjectDetails.ActualProjectCost,
+            ProfitMargin = p.ProjectDetails.ProfitMargin
         }).ToList();
 
         Db.ExecuteInTransaction((conn, trans) =>
         {
+            // Idempotent migrations: safe on a fresh database and on the legacy project_master layout.
+            conn.Execute(@"
+CREATE TABLE IF NOT EXISTS project_master (
+    project_id      VARCHAR(64) PRIMARY KEY,
+    project_type    VARCHAR(64) DEFAULT 'None',
+    company_name    VARCHAR(256) DEFAULT '',
+    start_date      DATE NOT NULL DEFAULT CURRENT_DATE,
+    target_end_date DATE NOT NULL DEFAULT (CURRENT_DATE + INTERVAL '365 days'),
+    updated_at      TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_project_master_project_id ON project_master (project_id);
+ALTER TABLE project_master ADD COLUMN IF NOT EXISTS category            VARCHAR(16)   DEFAULT 'iJob';
+ALTER TABLE project_master ADD COLUMN IF NOT EXISTS reference_no        VARCHAR(128)  DEFAULT '';
+ALTER TABLE project_master ADD COLUMN IF NOT EXISTS priority            VARCHAR(32)   DEFAULT 'Standard';
+ALTER TABLE project_master ADD COLUMN IF NOT EXISTS status              VARCHAR(32)   DEFAULT 'Active';
+ALTER TABLE project_master ADD COLUMN IF NOT EXISTS company_id          BIGINT;
+ALTER TABLE project_master ADD COLUMN IF NOT EXISTS staff_id            BIGINT;
+ALTER TABLE project_master ADD COLUMN IF NOT EXISTS pic                 VARCHAR(128)  DEFAULT '';
+ALTER TABLE project_master ADD COLUMN IF NOT EXISTS district            VARCHAR(128)  DEFAULT 'None';
+ALTER TABLE project_master ALTER COLUMN project_type TYPE VARCHAR(512);
+ALTER TABLE project_master ADD COLUMN IF NOT EXISTS address             TEXT          DEFAULT '';
+ALTER TABLE project_master ADD COLUMN IF NOT EXISTS actual_end_date     DATE;
+ALTER TABLE project_master ADD COLUMN IF NOT EXISTS estimated_cost      NUMERIC(14,2) DEFAULT 0;
+ALTER TABLE project_master ADD COLUMN IF NOT EXISTS promised_return     NUMERIC(14,2) DEFAULT 0;
+ALTER TABLE project_master ADD COLUMN IF NOT EXISTS actual_return       NUMERIC(14,2) DEFAULT 0;
+ALTER TABLE project_master ADD COLUMN IF NOT EXISTS remarks             TEXT          DEFAULT '';
+ALTER TABLE project_master ADD COLUMN IF NOT EXISTS days_worked         INT           DEFAULT 0;
+ALTER TABLE project_master ADD COLUMN IF NOT EXISTS total_regular_shifts NUMERIC(14,1) DEFAULT 0;
+ALTER TABLE project_master ADD COLUMN IF NOT EXISTS total_hours         NUMERIC(14,2) DEFAULT 0;
+ALTER TABLE project_master ADD COLUMN IF NOT EXISTS overtime_shifts     INT           DEFAULT 0;
+ALTER TABLE project_master ADD COLUMN IF NOT EXISTS total_overtime_hours NUMERIC(14,2) DEFAULT 0;
+ALTER TABLE project_master ADD COLUMN IF NOT EXISTS total_odometer      NUMERIC(14,1) DEFAULT 0;
+ALTER TABLE project_master ADD COLUMN IF NOT EXISTS fuel_cost           NUMERIC(14,2) DEFAULT 0;
+ALTER TABLE project_master ADD COLUMN IF NOT EXISTS labour_cost         NUMERIC(14,2) DEFAULT 0;
+ALTER TABLE project_master ADD COLUMN IF NOT EXISTS claim_cost          NUMERIC(14,2) DEFAULT 0;
+ALTER TABLE project_master ADD COLUMN IF NOT EXISTS actual_project_cost NUMERIC(14,2) DEFAULT 0;
+ALTER TABLE project_master ADD COLUMN IF NOT EXISTS profit_margin       NUMERIC(14,2) DEFAULT 0;", transaction: trans);
+
             if (isFullBatch)
             {
+                // Reconcile the master table with the workbook.
                 conn.Execute("DELETE FROM project_master WHERE project_id != ALL(@ActiveIds);", new { ActiveIds = activeIds }, trans);
             }
 
             conn.Execute(@"
-                INSERT INTO project_master (project_id, project_name, project_type, company_name, start_date, target_end_date)
-                VALUES (@ProjectId, @ProjectName, @ProjectType, @CompanyName, @StartDate, @TargetEndDate)
-                ON CONFLICT (project_id) DO UPDATE SET
-                    project_name    = EXCLUDED.project_name,
-                    project_type    = EXCLUDED.project_type,
-                    company_name    = EXCLUDED.company_name,
-                    start_date      = EXCLUDED.start_date,
-                    target_end_date = EXCLUDED.target_end_date,
-                    updated_at      = CURRENT_TIMESTAMP;", records, trans);
+INSERT INTO project_master (
+    project_id, category, reference_no, project_type, priority, status, company_id, company_name, staff_id, pic,
+    district, address, start_date, target_end_date, actual_end_date, estimated_cost, promised_return, actual_return,
+    remarks, days_worked, total_regular_shifts, total_hours, overtime_shifts, total_overtime_hours, total_odometer, fuel_cost, labour_cost, claim_cost,
+    actual_project_cost, profit_margin, updated_at
+) VALUES (
+    @ProjectId, @Category, @ReferenceNo, @ProjectType, @Priority, @Status, @CompanyId, @CompanyName, @StaffId, @Pic,
+    @District, @Address, @StartDate, @TargetEndDate, @ActualEndDate, @EstimatedCost, @PromisedReturn, @ActualReturn,
+    @Remarks, @DaysWorked, @TotalRegularShifts, @TotalHours, @OvertimeShifts, @TotalOvertimeHours, @TotalOdometer, @FuelCost, @LabourCost, @ClaimCost,
+    @ActualProjectCost, @ProfitMargin, CURRENT_TIMESTAMP
+)
+ON CONFLICT (project_id) DO UPDATE SET
+    category            = EXCLUDED.category,
+    reference_no        = EXCLUDED.reference_no,
+    project_type        = EXCLUDED.project_type,
+    priority            = EXCLUDED.priority,
+    status              = EXCLUDED.status,
+    company_id          = EXCLUDED.company_id,
+    company_name        = EXCLUDED.company_name,
+    staff_id            = EXCLUDED.staff_id,
+    pic                 = EXCLUDED.pic,
+    district            = EXCLUDED.district,
+    address             = EXCLUDED.address,
+    start_date          = EXCLUDED.start_date,
+    target_end_date     = EXCLUDED.target_end_date,
+    actual_end_date     = EXCLUDED.actual_end_date,
+    estimated_cost      = EXCLUDED.estimated_cost,
+    promised_return     = EXCLUDED.promised_return,
+    actual_return       = EXCLUDED.actual_return,
+    remarks             = EXCLUDED.remarks,
+    days_worked         = EXCLUDED.days_worked,
+    total_regular_shifts = EXCLUDED.total_regular_shifts,
+    total_hours         = EXCLUDED.total_hours,
+    overtime_shifts     = EXCLUDED.overtime_shifts,
+    total_overtime_hours = EXCLUDED.total_overtime_hours,
+    total_odometer      = EXCLUDED.total_odometer,
+    fuel_cost           = EXCLUDED.fuel_cost,
+    labour_cost         = EXCLUDED.labour_cost,
+    claim_cost          = EXCLUDED.claim_cost,
+    actual_project_cost = EXCLUDED.actual_project_cost,
+    profit_margin       = EXCLUDED.profit_margin,
+    updated_at          = CURRENT_TIMESTAMP;", masterRecords, trans);
         });
     }
 
@@ -795,6 +910,16 @@ END $$;", transaction: trans);
 
         Db.ExecuteInTransaction((conn, trans) =>
         {
+            conn.Execute(@"
+CREATE TABLE IF NOT EXISTS company_master (
+    company_id         BIGINT PRIMARY KEY,
+    legal_company_name VARCHAR(256) NOT NULL DEFAULT '',
+    short_company_name VARCHAR(128) NOT NULL DEFAULT '',
+    created_at         TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
+    updated_at         TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
+);
+ALTER TABLE company_master ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;", transaction: trans);
+
             if (isFullBatch)
             {
                 conn.Execute("DELETE FROM company_master WHERE company_id != ALL(@ActiveIds);", new { ActiveIds = activeIds }, trans);
