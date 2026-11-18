@@ -10,6 +10,7 @@ using System.Text.Json.Serialization;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows.Forms;
+using Microsoft.Win32;
 using SKSB_App.Core.Bootstrap.Storage;
 
 public class LauncherPackageManifest
@@ -82,6 +83,7 @@ static class Program
         try
         {
             EnsureDirectoryHierarchy();
+            EnsureExcelTrustedLocation();
 
             // 1b. Make sure the .NET 8 Desktop Runtime (needed by Portal and the Excel add-ins) is installed
             if (!EnsureDotNetRuntime()) return;
@@ -241,6 +243,42 @@ static class Program
         FolderRegistry.Templates.EnsureExists();
         FolderRegistry.AddIns.EnsureExists();
         FolderRegistry.Data.EnsureExists();
+    }
+
+    /// <summary>
+    /// Registers RootPath (with subfolders) as an Excel Trusted Location for the current user so
+    /// templates/add-ins under it open without security prompts. Never throws or blocks startup.
+    /// </summary>
+    private static void EnsureExcelTrustedLocation()
+    {
+        // 16.0 covers Office 2016/2019/2021/365; 15.0 (Office 2013) only if that Excel is present.
+        foreach (string ver in new[] { "16.0", "15.0" })
+        {
+            try
+            {
+                if (ver != "16.0")
+                {
+                    using var excelKey = Registry.CurrentUser.OpenSubKey($@"Software\Microsoft\Office\{ver}\Excel");
+                    if (excelKey == null) continue;
+                }
+
+                using var key = Registry.CurrentUser.CreateSubKey(
+                    $@"Software\Microsoft\Office\{ver}\Excel\Security\Trusted Locations\SKSB_App");
+                if (key == null)
+                {
+                    LogLauncher($"[TrustedLocation] Could not create registry key for Office {ver}.");
+                    continue;
+                }
+
+                key.SetValue("Path", RootPath, RegistryValueKind.String);
+                key.SetValue("AllowSubfolders", 1, RegistryValueKind.DWord);
+                key.SetValue("Description", "SKSB_App", RegistryValueKind.String);
+            }
+            catch (Exception ex)
+            {
+                LogLauncher($"[TrustedLocation] Failed for Office {ver}: {ex.Message}");
+            }
+        }
     }
 
     private static async Task RunFullInstallationAsync(InstallationProgressForm progress)

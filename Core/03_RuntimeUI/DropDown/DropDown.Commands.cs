@@ -5,6 +5,7 @@ using System.Drawing;
 using System.Text.RegularExpressions;
 using System.Windows.Forms;
 using ExcelDna.Integration;
+using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.RuntimeUI.RuleEngine;
 
 public static class Commands
@@ -16,9 +17,6 @@ public static class Commands
         dynamic xlApp = ExcelDnaUtil.Application;
         dynamic selection = xlApp.Selection;
         if (selection == null) return;
-
-        EnsureNamedStyleExists(xlApp, DropDownStyleName);
-        selection.Style = DropDownStyleName;
 
         try
         {
@@ -40,6 +38,20 @@ public static class Commands
         }
     }
 
+    private static string _lastBoardMissAddress = string.Empty;
+
+    private static bool IsScheduleBoardSheet(dynamic singleCell)
+    {
+        try
+        {
+            string name = singleCell.Worksheet.Name?.ToString() ?? string.Empty;
+            return name.Equals("Daily Schedule", StringComparison.OrdinalIgnoreCase) ||
+                   name.Equals("Daily_Schedule", StringComparison.OrdinalIgnoreCase) ||
+                   name.Equals("Schedule", StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
+    }
+
     public static bool IsDropdownCell(dynamic cell)
     {
         if (cell == null) return false;
@@ -49,7 +61,18 @@ public static class Commands
             dynamic singleCell = cell.Cells[1, 1];
 
             // 0. Module-supplied dropdowns (Schedule board)
+            bool onBoard = IsScheduleBoardSheet(singleCell);
             if (CustomDropdowns.AppliesTo(singleCell)) return true;
+            if (onBoard)
+            {
+                // Logged once per address so moving around the board does not flood the trace.
+                string addr = singleCell.Address?.ToString() ?? string.Empty;
+                if (addr != _lastBoardMissAddress)
+                {
+                    _lastBoardMissAddress = addr;
+                    AppLogger.Warn($"[Dropdown] Daily Schedule cell {addr}: no custom provider applies ({CustomDropdowns.ProviderCount} provider(s) registered in this process).");
+                }
+            }
 
             // 1. Primary path: Check if cell belongs to a ListObject table governed by C# RuleRegistry
             dynamic? cellTable = null;
@@ -77,8 +100,9 @@ public static class Commands
             var cfg = Metadata.ReadConfig(singleCell);
             return !cfg.IsEmpty;
         }
-        catch
+        catch (Exception ex)
         {
+            AppLogger.Warn($"[Dropdown] IsDropdownCell failed: {ex.GetType().Name}: {ex.Message}");
             return false;
         }
     }
@@ -173,27 +197,7 @@ public static class Commands
 
     public static void EnsureNamedStyleExists(dynamic xlApp, string styleName)
     {
-        try
-        {
-            dynamic styles = xlApp.ActiveWorkbook.Styles;
-            foreach (dynamic s in styles)
-            {
-                if (string.Equals(s.Name?.ToString(), styleName, StringComparison.OrdinalIgnoreCase))
-                    return;
-            }
-
-            dynamic newStyle = styles.Add(styleName);
-            newStyle.IncludeNumber = false;
-            newStyle.IncludeFont = true;
-            newStyle.IncludeAlignment = true;
-            newStyle.IncludeBorder = true;
-            newStyle.IncludePatterns = true;
-
-            newStyle.Font.Name = "Segoe UI";
-            newStyle.Font.Size = 10;
-            newStyle.Interior.Color = ColorTranslator.ToOle(Color.FromArgb(240, 244, 250));
-        }
-        catch { }
+        // Intentionally a no-op: dropdown cells no longer receive a custom named style.
     }
 
     private static Config? _copiedConfig;
@@ -256,11 +260,8 @@ public static class Commands
             dynamic selection = xlApp.Selection;
             if (selection == null) return;
 
-            EnsureNamedStyleExists(xlApp, DropDownStyleName);
-
             foreach (dynamic cell in selection.Cells)
             {
-                cell.Style = DropDownStyleName;
                 Metadata.WriteConfig(cell, _copiedConfig);
                 try { cell.Validation.Delete(); } catch { }
             }

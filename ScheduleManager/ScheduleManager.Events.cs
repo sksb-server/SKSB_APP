@@ -8,7 +8,9 @@ using SKSB_App.Core.RuntimeUI.DropDown;
 using SKSB_App.Core.Types;
 using SKSB_App.Core.WorkbookOpen.Entry;
 using SKSB_App.Core.WorkbookSave.Entry;
+using SKSB_App.Core.WorkbookSave.Storage;
 using SKSB_App.Core.WorkbookSave.SheetMapper;
+using SKSB_App.Core.WorkbookSave.Validation;
 
 public class Events : ManagerEventsBase<ScheduleRecord>
 {
@@ -38,15 +40,28 @@ public class Events : ManagerEventsBase<ScheduleRecord>
         // Reference tables (teams, preferences) and the board must load even before any day has been scheduled.
         PopulateStartupWhenEmpty = true,
         SaveToServer = schedule => (ServerSyncCommands.SaveScheduleSilent(schedule, out string err), err),
+        SaveToOffline = schedule => OfflineSnapshot.SaveOfflineSnapshot(schedule),
         PopulateWorksheet = schedule => SheetMapper.PopulateWorksheet(schedule),
         FetchFromServer = () => ServerSyncCommands.FetchSchedule(CurrentDate()),
         ValidateOfflinePayload = schedule => schedule != null && schedule.DailyScheduleDate.Year > 2000,
+        ConfirmBeforeSave = ConfirmPastSave,
         FormatConflictSummary = (local, server) =>
             $"  Local Offline : {local.DailyScheduleDate:yyyy-MM-dd} - {local.Projects.Count} slot(s), {local.WorkerAttendance.Count} attendance row(s), {local.AttendanceEntries.Count} punch(es)\n" +
             $"  Server Copy   : {server.DailyScheduleDate:yyyy-MM-dd} - {server.Projects.Count} slot(s), {server.WorkerAttendance.Count} attendance row(s), {server.AttendanceEntries.Count} punch(es)"
     };
 
     protected override SaveContract<ScheduleRecord> Contract => ScheduleSyncDescriptor;
+
+    /// <summary>
+    /// Past-record failsafe: only prompts when the user actually changed the board / entries / attendance on a date before
+    /// today, so merely viewing history (or closing Excel after viewing it) never nags.
+    /// </summary>
+    private static bool ConfirmPastSave(ScheduleRecord schedule)
+    {
+        if (!SheetMapper.HasUnsavedRecordEdits) return true;
+        var dates = new[] { schedule.DailyScheduleDate }.Concat(schedule.AttendanceEntries.Select(e => e.Date));
+        return PastRecordGuard.ConfirmPastRecordsSave(dates, "Schedule Manager");
+    }
 
     private static bool IsEmpty(ScheduleRecord? s) =>
         s == null ||
@@ -84,13 +99,10 @@ public class Events : ManagerEventsBase<ScheduleRecord>
     public override void AutoOpen()
     {
         base.AutoOpen();
-        ExcelAsyncUtil.QueueAsMacro(() =>
-        {
-            if (_boardHooked) return;
-            ScheduleBoardMapper.RegisterDropdowns();
-            ParameterCells.RegisterChangeObserver(SheetObserver);
-            _boardHooked = true;
-        });
+        if (_boardHooked) return;
+        ScheduleBoardMapper.RegisterDropdowns();
+        ParameterCells.RegisterChangeObserver(SheetObserver);
+        _boardHooked = true;
     }
 
     public override void AutoClose()
@@ -99,6 +111,7 @@ public class Events : ManagerEventsBase<ScheduleRecord>
         {
             ParameterCells.UnregisterChangeObserver(SheetObserver);
             CustomDropdowns.Clear();
+            PastRecordGuard.ResetEditSession(SheetMapper.GuardSession);
             _boardHooked = false;
         });
         base.AutoClose();
@@ -109,7 +122,7 @@ public class Events : ManagerEventsBase<ScheduleRecord>
     // =========================================================================
     protected override void SyncCustomLookups(bool isInteractive)
     {
-        try { ServerSyncCommands.SyncLookupLists(); }
+        try { ServerSyncCommands.SyncLookupLists(CurrentDate()); }
         catch (Exception ex) { AppLogger.Warn($"[ScheduleManager] Lookup sync warning: {ex.Message}"); }
     }
 

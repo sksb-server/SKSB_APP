@@ -1,4 +1,4 @@
-﻿namespace SKSB_App.Core.ThumbprintSync;
+namespace SKSB_App.Core.ThumbprintSync;
 
 using System;
 using System.Collections.Generic;
@@ -13,6 +13,12 @@ using SKSB_App.Core.Types;
 
 /// <summary>One raw punch read from the attendance terminal.</summary>
 public sealed record TerminalPunch(string EnrollNumber, DateTime Timestamp);
+
+/// <summary>One user stored on the terminal.</summary>
+public sealed record TerminalUser(int Uid, string EnrollNumber, string Name, int Role, uint Card);
+
+/// <summary>Rewrite of a terminal user's EnrollNumber (and optionally Name) by Uid.</summary>
+public sealed record TerminalUserUpdate(int Uid, string EnrollNumber, string? Name = null);
 
 /// <summary>
 /// Biometric terminal sync. Talks to the terminal through the external <c>ZkBridge.exe</c> helper placed next to the
@@ -36,45 +42,88 @@ public static class DeviceSyncManager
     /// Runs <c>ZkBridge.exe &lt;ip&gt; &lt;port&gt; &lt;commKey&gt; attlog [yyyy-MM-dd]</c>, which must print a JSON array of
     /// <c>{"EnrollNumber":"12","Timestamp":"2026-11-17T08:05:12"}</c> objects on stdout.
     /// </summary>
-    public static Task<List<TerminalPunch>> FetchPunchesAsync(DateOnly? since = null, string ip = DefaultIp, int port = DefaultPort, int commKey = 0)
+    public static Task<List<TerminalPunch>> FetchPunchesAsync(DateOnly? since = null, string ip = DefaultIp, int port = DefaultPort, int commKey = 0, string? addinDirectory = null)
     {
         return Task.Run(() =>
         {
-            string addinDirectory = Path.GetDirectoryName(ExcelDnaUtil.XllPath) ?? AppDomain.CurrentDomain.BaseDirectory;
-            string bridgePath = Path.Combine(addinDirectory, "ZkBridge.exe");
-            if (!File.Exists(bridgePath)) bridgePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ZkBridge.exe");
-            if (!File.Exists(bridgePath))
-                throw new FileNotFoundException($"Cannot locate ZkBridge.exe next to the add-in ({addinDirectory}).");
-
-            var startInfo = new ProcessStartInfo
-            {
-                FileName = bridgePath,
-                Arguments = $"{ip} {port} {commKey} attlog" + (since.HasValue ? $" {since.Value:yyyy-MM-dd}" : string.Empty),
-                UseShellExecute = false,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                CreateNoWindow = true
-            };
-
-            using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("Could not start ZkBridge.exe.");
-            Task<string> stdout = process.StandardOutput.ReadToEndAsync();
-            Task<string> stderr = process.StandardError.ReadToEndAsync();
-            if (!process.WaitForExit(30000))
-            {
-                try { process.Kill(); } catch { }
-                throw new TimeoutException($"Terminal {ip}:{port} did not answer within 30 seconds.");
-            }
-
-            string error = stderr.GetAwaiter().GetResult();
-            if (process.ExitCode != 0 || !string.IsNullOrWhiteSpace(error))
-                throw new InvalidOperationException($"ZkBridge error (code {process.ExitCode}): {error}");
-
-            string output = stdout.GetAwaiter().GetResult();
-            if (string.IsNullOrWhiteSpace(output)) return new List<TerminalPunch>();
-
-            return JsonSerializer.Deserialize<List<TerminalPunch>>(output, new JsonSerializerOptions { PropertyNameCaseInsensitive = true })
-                   ?? new List<TerminalPunch>();
+            string output = RunBridge($"{ip} {port} {commKey} attlog" + (since.HasValue ? $" {since.Value:yyyy-MM-dd}" : string.Empty), null, $"{ip}:{port}", addinDirectory);
+            return Deserialize<List<TerminalPunch>>(output) ?? new List<TerminalPunch>();
         });
+    }
+
+    /// <summary>Runs <c>ZkBridge.exe &lt;ip&gt; &lt;port&gt; &lt;commKey&gt; users</c> and returns every user stored on the terminal.</summary>
+    public static Task<List<TerminalUser>> FetchTerminalUsersAsync(string ip = DefaultIp, int port = DefaultPort, int commKey = 0, string? addinDirectory = null)
+    {
+        return Task.Run(() =>
+        {
+            string output = RunBridge($"{ip} {port} {commKey} users", null, $"{ip}:{port}", addinDirectory);
+            return Deserialize<List<TerminalUser>>(output) ?? new List<TerminalUser>();
+        });
+    }
+
+    /// <summary>
+    /// Runs <c>ZkBridge.exe ... applyusers</c> with the updates as a JSON array on stdin. Rewrites EnrollNumber (and Name when
+    /// non-null) by Uid, preserving templates and all other user data. Returns the number of users updated.
+    /// </summary>
+    public static Task<int> ApplyTerminalUsersAsync(IReadOnlyCollection<TerminalUserUpdate> updates, string ip = DefaultIp, int port = DefaultPort, int commKey = 0, string? addinDirectory = null)
+    {
+        return Task.Run(() =>
+        {
+            string json = JsonSerializer.Serialize(updates);
+            string output = RunBridge($"{ip} {port} {commKey} applyusers", json, $"{ip}:{port}", addinDirectory);
+            using var doc = JsonDocument.Parse(output);
+            return doc.RootElement.TryGetProperty("Updated", out var n) ? n.GetInt32() : 0;
+        });
+    }
+
+    private static T? Deserialize<T>(string output) =>
+        string.IsNullOrWhiteSpace(output)
+            ? default
+            : JsonSerializer.Deserialize<T>(output, new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
+
+    /// <summary>Launches ZkBridge.exe, optionally feeds stdin, enforces a 30 s timeout and returns stdout (throws on any error).</summary>
+    private static string RunBridge(string arguments, string? stdin, string target, string? addinDirectory = null)
+    {
+        if (string.IsNullOrWhiteSpace(addinDirectory))
+        {
+            try { addinDirectory = Path.GetDirectoryName(ExcelDnaUtil.XllPath); } catch { }
+        }
+        if (string.IsNullOrWhiteSpace(addinDirectory)) addinDirectory = AppContext.BaseDirectory;
+        string bridgePath = Path.Combine(addinDirectory, "ZkBridge.exe");
+        if (!File.Exists(bridgePath)) bridgePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ZkBridge.exe");
+        if (!File.Exists(bridgePath))
+            throw new FileNotFoundException($"Cannot locate ZkBridge.exe next to the add-in ({addinDirectory}).");
+
+        var startInfo = new ProcessStartInfo
+        {
+            FileName = bridgePath,
+            Arguments = arguments,
+            UseShellExecute = false,
+            RedirectStandardInput = stdin != null,
+            RedirectStandardOutput = true,
+            RedirectStandardError = true,
+            CreateNoWindow = true
+        };
+
+        using var process = Process.Start(startInfo) ?? throw new InvalidOperationException("Could not start ZkBridge.exe.");
+        Task<string> stdout = process.StandardOutput.ReadToEndAsync();
+        Task<string> stderr = process.StandardError.ReadToEndAsync();
+        if (stdin != null)
+        {
+            process.StandardInput.Write(stdin);
+            process.StandardInput.Close();
+        }
+        if (!process.WaitForExit(30000))
+        {
+            try { process.Kill(); } catch { }
+            throw new TimeoutException($"Terminal {target} did not answer within 30 seconds.");
+        }
+
+        string error = stderr.GetAwaiter().GetResult();
+        if (process.ExitCode != 0 || !string.IsNullOrWhiteSpace(error))
+            throw new InvalidOperationException($"ZkBridge error (code {process.ExitCode}): {error}");
+
+        return stdout.GetAwaiter().GetResult();
     }
 
     // =========================================================================

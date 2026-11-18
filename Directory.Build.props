@@ -23,11 +23,13 @@
 
     <Message Importance="high" Text="[Clean] Wiping easy-access AddIns and Release directories..." />
 
-    <!-- 1a. Completely wipe everything inside Codes\SKSB_App\AddIns -->
-    <Exec Command="powershell -NoProfile -ExecutionPolicy Bypass -Command &quot;if (Test-Path '$(SourceAddInsDir)') { Get-ChildItem -Path '$(SourceAddInsDir)' -Recurse -Force -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue }&quot;" IgnoreExitCode="true" />
+    <!-- 1a. Remove only THIS project's artifacts from Codes\SKSB_App\AddIns -->
+    <Exec Condition="'$(MSBuildProjectName)' == 'Core' or '$(MSBuildProjectName)' == 'ZkBridge' or '@(PackageReference->WithMetadataValue(&quot;Identity&quot;, &quot;ExcelDna.AddIn&quot;))' != ''"
+          Command="powershell -NoProfile -ExecutionPolicy Bypass -Command &quot;if (Test-Path '$(SourceAddInsDir)') { Remove-Item -Path '$(SourceAddInsDir)\$(TargetName).*','$(SourceAddInsDir)\$(TargetName)-AddIn*' -Force -ErrorAction SilentlyContinue }&quot;"
+          IgnoreExitCode="true" />
 
     <!-- 1c. Only wipe Documents\SKSB_App when cleaning in RELEASE mode -->
-    <Exec Condition="'$(Configuration)' == 'Release'"
+    <Exec Condition="'$(Configuration)' == 'Release' and '$(MSBuildProjectName)' == 'Launcher'"
           Command="powershell -NoProfile -ExecutionPolicy Bypass -Command &quot;if (Test-Path '$(ReleaseDeploymentDir)') { Get-ChildItem -Path '$(ReleaseDeploymentDir)' -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch '\\Data\\' } | Remove-Item -Force -ErrorAction SilentlyContinue }&quot;"
           IgnoreExitCode="true" />
   </Target>
@@ -38,13 +40,14 @@
   <!-- ============================================================= -->
   <Target Name="SyncAddInsToCodesFolderOnBuild"
           AfterTargets="Build"
-          Condition="'$(MSBuildProjectName)' == 'Core' or '@(PackageReference->WithMetadataValue(&quot;Identity&quot;, &quot;ExcelDna.AddIn&quot;))' != ''">
+          Condition="'$(MSBuildProjectName)' == 'Core' or '$(MSBuildProjectName)' == 'ZkBridge' or '@(PackageReference->WithMetadataValue(&quot;Identity&quot;, &quot;ExcelDna.AddIn&quot;))' != ''">
 
     <MakeDir Directories="$(SourceAddInsDir)" Condition="!Exists('$(SourceAddInsDir)')" />
 
     <ItemGroup>
       <!-- Deploy project's DLL, config, and symbols (using wildcards so missing items won't break MSB3030) -->
       <ModuleArtifacts Include="$(TargetDir)$(TargetName).dll" />
+      <ModuleArtifacts Include="$(TargetDir)$(TargetName).exe" Condition="Exists('$(TargetDir)$(TargetName).exe')" />
       <ModuleArtifacts Include="$(TargetDir)$(TargetName).pdb" Condition="Exists('$(TargetDir)$(TargetName).pdb')" />
       <ModuleArtifacts Include="$(TargetDir)$(TargetName).deps.json" Condition="Exists('$(TargetDir)$(TargetName).deps.json')" />
       <ModuleArtifacts Include="$(TargetDir)$(TargetName).runtimeconfig.json" Condition="Exists('$(TargetDir)$(TargetName).runtimeconfig.json')" />
@@ -66,6 +69,21 @@
           Condition="'@(PackedArtifacts)' != ''" />
 
     <Message Importance="high" Text="[AddIn Sync] Deployed $(MSBuildProjectName) artifacts to $(SourceAddInsDir)" />
+  </Target>
+
+  <Target Name="CopyZkBridgeToConsumerBinOnBuild"
+          AfterTargets="Build"
+          Condition="'$(MSBuildProjectName)' == 'ScheduleManager' or '$(MSBuildProjectName)' == 'StaffManager'">
+    <PropertyGroup>
+      <ZkBridgeOutDir>$(MSBuildThisFileDirectory)ZkBridge\bin\$(Configuration)\net8.0-windows\</ZkBridgeOutDir>
+    </PropertyGroup>
+    <ItemGroup Condition="Exists('$(ZkBridgeOutDir)ZkBridge.exe')">
+      <ZkBridgeFiles Include="$(ZkBridgeOutDir)ZkBridge.exe" />
+      <ZkBridgeFiles Include="$(ZkBridgeOutDir)ZkBridge.dll" />
+      <ZkBridgeFiles Include="$(ZkBridgeOutDir)ZkBridge.deps.json" />
+      <ZkBridgeFiles Include="$(ZkBridgeOutDir)ZkBridge.runtimeconfig.json" />
+    </ItemGroup>
+    <Copy SourceFiles="@(ZkBridgeFiles)" DestinationFolder="$(TargetDir)" SkipUnchangedFiles="true" Condition="'@(ZkBridgeFiles)' != ''" />
   </Target>
 
 	<!-- ============================================================= -->

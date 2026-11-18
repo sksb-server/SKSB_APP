@@ -5,7 +5,7 @@
 CREATE TABLE IF NOT EXISTS daily_project_schedules (
     schedule_date DATE         NOT NULL,
     shift         VARCHAR(20)  NOT NULL,            -- Morning (Day Work band) | Night (Night Work band)
-    slot_index    INTEGER      NOT NULL CHECK (slot_index BETWEEN 0 AND 7),
+    slot_index    INTEGER      NOT NULL CHECK (slot_index >= 0),
     project_id    VARCHAR(50)  NOT NULL DEFAULT '',
     premix_holes  INTEGER      NOT NULL DEFAULT 0,
     workers       TEXT[]       NOT NULL DEFAULT '{}',
@@ -46,12 +46,19 @@ CREATE TABLE IF NOT EXISTS daily_attendances (
     ot_hours              NUMERIC(6,2)  NOT NULL DEFAULT 0,
     additional_ot_hours   NUMERIC(6,2)  NOT NULL DEFAULT 0,
     total_flattened_hours NUMERIC(8,2)  NOT NULL DEFAULT 0,
-    manual_override       VARCHAR(20)   NOT NULL DEFAULT 'None',
-    override_reason       TEXT          NOT NULL DEFAULT '',
-    is_allocated          BOOLEAN       NOT NULL DEFAULT FALSE,
+    is_allocated         BOOLEAN       NOT NULL DEFAULT FALSE,
     created_at            TIMESTAMPTZ   NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at            TIMESTAMPTZ   NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (schedule_date, staff_id)
+);
+
+-- Per-date attendance parameters (Daily Attendances C2 / D2). Missing row => defaults 11:00 / 18:00.
+CREATE TABLE IF NOT EXISTS daily_schedule_settings (
+    schedule_date     DATE         PRIMARY KEY,
+    late_cut_off_time TIME         NOT NULL DEFAULT '11:00:00',
+    ot_start_time     TIME         NOT NULL DEFAULT '18:00:00',
+    created_at        TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    updated_at        TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
 CREATE TABLE IF NOT EXISTS worker_preferences (

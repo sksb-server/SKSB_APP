@@ -2,23 +2,52 @@ namespace SKSB_App.ScheduleManager;
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.Integration.Database;
 using SKSB_App.Core.Types;
 using SKSB_App.Core.WorkbookSave.Storage;
 
-internal sealed record StaffInfo(long Id, string ShortName, string FullName, bool IsActive);
+/// <summary>A field worker with the dates needed to decide whether they were employed on a given day.</summary>
+internal sealed record StaffInfo(
+    long Id, string ShortName, string FullName,
+    DateOnly? JoinDate, DateOnly? ResignDate, ContractStatus Status, string Department);
+
 internal sealed record VehicleInfo(string Plate, VehicleType Type, decimal Odometer);
-internal sealed record ProjectInfo(string Id, IReadOnlyList<ProjectType> Types);
+internal sealed record ProjectInfo(
+    string Id, IReadOnlyList<ProjectType> Types,
+    ProjectStatus Status, ProjectCategory Category,
+    DateOnly StartDate, DateOnly TargetEndDate, DateOnly? ActualEndDate);
 
 /// <summary>
 /// Read-only reference data the board needs while the user types: staff, vehicles and projects.
+/// <para>
+/// Staff are FIELD workers only (see <see cref="FieldDepartments"/>); office / admin / management staff never appear.
+/// The roster keeps the FULL field-worker history (resigned and terminated included) so any record can be resolved
+/// to a Staff ID / name. Whether a worker may be <i>suggested or newly assigned</i> is a separate, date-effective
+/// question answered by <see cref="IsActiveOn(StaffInfo, DateOnly)"/>.
+/// </para>
 /// Server first (one query each), local snapshots when the server is unreachable; cached briefly so a
 /// dropdown open never waits on the network.
 /// </summary>
 internal static class Roster
 {
+    /// <summary>
+    /// Departments whose staff go on-site. Admin, Management, Office and None are deliberately absent.
+    /// Adjust here if a department stops (or starts) working in the field.
+    /// </summary>
+    internal static readonly Department[] FieldDepartments =
+    {
+        Department.Worker, Department.Driver, Department.Operator,
+        Department.Foreman, Department.Supervisor, Department.Mechanic
+    };
+
+    private static readonly string[] FieldDepartmentNames = FieldDepartments.Select(d => d.ToString().ToLowerInvariant()).ToArray();
+
+    internal static bool IsFieldDepartment(string? department) =>
+        !string.IsNullOrWhiteSpace(department) && FieldDepartmentNames.Contains(department.Trim().ToLowerInvariant());
+
     private static readonly TimeSpan CacheLifetime = TimeSpan.FromMinutes(5);
     private static DateTime _loadedAt = DateTime.MinValue;
 
@@ -30,10 +59,44 @@ internal static class Roster
     private static Dictionary<string, VehicleInfo> _vehicleByPlate = new(StringComparer.OrdinalIgnoreCase);
     private static Dictionary<string, ProjectInfo> _projectById = new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>Every field worker, past and present. Use for resolution; use <see cref="ActiveOn"/> for suggestions.</summary>
     public static IReadOnlyList<StaffInfo> Staff { get { EnsureLoaded(); return _staff; } }
     public static IReadOnlyList<VehicleInfo> Vehicles { get { EnsureLoaded(); return _vehicles; } }
     public static IReadOnlyList<ProjectInfo> Projects { get { EnsureLoaded(); return _projects; } }
 
+    // =========================================================================
+    // 1. DATE-EFFECTIVE EMPLOYMENT
+    // =========================================================================
+
+    /// <summary>
+    /// True when the worker was employed on <paramref name="date"/>: joined on or before it and has not yet resigned.
+    /// With a ResignDate the worker counts up to and including that day; without one, a Resigned / Terminated
+    /// contract status means not employed.
+    /// </summary>
+    internal static bool IsActiveOn(StaffInfo s, DateOnly date)
+    {
+        if (s.JoinDate.HasValue && s.JoinDate.Value > date) return false;
+        return s.ResignDate.HasValue
+            ? date <= s.ResignDate.Value
+            : s.Status is not (ContractStatus.Resigned or ContractStatus.Terminated);
+    }
+
+    internal static bool IsActiveOn(long staffId, DateOnly date) => FindStaff(staffId) is { } s && IsActiveOn(s, date);
+
+    /// <summary>Field workers employed on <paramref name="date"/> - the only ones suggested or newly assignable that day.</summary>
+    public static IReadOnlyList<StaffInfo> ActiveOn(DateOnly date) => Staff.Where(s => IsActiveOn(s, date)).ToList();
+
+    /// <summary>Why <paramref name="s"/> cannot work on <paramref name="date"/> (for validation messages).</summary>
+    internal static string DescribeInactive(StaffInfo s, DateOnly date)
+    {
+        if (s.JoinDate.HasValue && s.JoinDate.Value > date) return $"joined on {s.JoinDate.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)}";
+        if (s.ResignDate.HasValue) return $"resigned on {s.ResignDate.Value.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture)}";
+        return $"is {s.Status}";
+    }
+
+    // =========================================================================
+    // 2. RESOLUTION (all field workers, any date)
+    // =========================================================================
     public static StaffInfo? FindStaff(string? name)
     {
         EnsureLoaded();
@@ -45,6 +108,10 @@ internal static class Roster
         EnsureLoaded();
         return _staffById.TryGetValue(id, out var s) ? s : null;
     }
+
+    /// <summary>Display name for a Staff ID; resolves former field workers too so past dates keep their names.</summary>
+    public static string NameOf(long id, string fallback = "") =>
+        FindStaff(id)?.ShortName is { Length: > 0 } n ? n : fallback;
 
     public static VehicleInfo? FindVehicle(string? plate)
     {
@@ -58,10 +125,21 @@ internal static class Roster
         return !string.IsNullOrWhiteSpace(id) && _projectById.TryGetValue(id.Trim(), out var p) ? p : null;
     }
 
+    /// <summary>
+    /// Projects that are Active on <paramref name="date"/> (started, and not past the actual / target end date),
+    /// ordered iJob -> MWO -> PVT -> others, then by project ID.
+    /// </summary>
+    public static IReadOnlyList<ProjectInfo> ActiveProjectsOn(DateOnly date) =>
+        Projects
+            .Where(p => p.Status == ProjectStatus.Active && p.StartDate <= date && date <= (p.ActualEndDate ?? p.TargetEndDate))
+            .OrderBy(p => p.Category switch { ProjectCategory.iJob => 0, ProjectCategory.MWO => 1, ProjectCategory.PVT => 2, _ => 3 })
+            .ThenBy(p => p.Id, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
     public static void Invalidate() => _loadedAt = DateTime.MinValue;
 
     // =========================================================================
-    // LOADING
+    // 3. LOADING
     // =========================================================================
     private static void EnsureLoaded()
     {
@@ -69,17 +147,24 @@ internal static class Roster
 
         try
         {
-            if (ServerEnvironment.SimulateOffline) throw new TimeoutException("Simulated offline.");
+            if (ServerEnvironment.IsOffline) throw new TimeoutException("Offline Mode: roster comes from the local snapshot.");
             var db = new PostgreSqlService();
 
             _staff = new List<StaffInfo>();
-            foreach (var r in db.Query<dynamic>("SELECT staff_id, staff_name, short_name, contract_status FROM staff_master ORDER BY staff_id;"))
+            foreach (var r in db.Query<dynamic>(
+                @"SELECT staff_id, staff_name, short_name, contract_status, join_date, resign_date, department FROM staff_master
+                  WHERE LOWER(department) = ANY(@Departments)
+                  ORDER BY staff_id;",
+                new { Departments = FieldDepartmentNames }))
             {
                 long id = Convert.ToInt64(r.staff_id);
                 string? full = r.staff_name;
                 string? shortName = r.short_name;
                 string? status = r.contract_status;
-                _staff.Add(MakeStaff(id, full, shortName, status));
+                object? join = r.join_date;
+                object? resign = r.resign_date;
+                string? department = r.department;
+                _staff.Add(MakeStaff(id, full, shortName, status, ToDate(join), ToDate(resign), department));
             }
 
             _vehicles = new List<VehicleInfo>();
@@ -95,28 +180,37 @@ internal static class Roster
             }
 
             _projects = new List<ProjectInfo>();
-            foreach (var r in db.Query<dynamic>("SELECT project_id, project_type FROM project_master ORDER BY project_id;"))
+            foreach (var r in db.Query<dynamic>("SELECT project_id, project_type, status, category, start_date, target_end_date, actual_end_date FROM project_master ORDER BY project_id;"))
             {
                 string id = ((string)r.project_id).Trim().ToUpperInvariant();
                 string? types = r.project_type;
-                _projects.Add(new ProjectInfo(id, ParseProjectTypes(types)));
+                string? statusText = r.status;
+                string? categoryText = r.category;
+                object? start = r.start_date;
+                object? target = r.target_end_date;
+                object? actual = r.actual_end_date;
+                _projects.Add(new ProjectInfo(
+                    id, ParseProjectTypes(types),
+                    Enum.TryParse<ProjectStatus>(statusText, true, out var ps) ? ps : ProjectStatus.None,
+                    Enum.TryParse<ProjectCategory>(categoryText, true, out var pc) ? pc : ProjectCategory.None,
+                    ToDate(start) ?? DateOnly.MinValue, ToDate(target) ?? DateOnly.MaxValue, ToDate(actual)));
             }
         }
         catch (Exception ex)
         {
-            AppLogger.Warn($"[ScheduleManager.Roster] Server unreachable, using local snapshots: {ex.Message}");
-            _staff = (OfflineSnapshot.Load<List<StaffRecord>>() ?? new())
-                .Where(s => s.StaffID > 0)
-                .Select(s => MakeStaff(s.StaffID, s.StaffDetails.StaffName, s.StaffDetails.StaffShortName, s.StaffDetails.ContractStatus.ToString()))
-                .ToList();
-            _vehicles = (OfflineSnapshot.Load<List<VehicleRecord>>() ?? new())
-                .Where(v => !string.IsNullOrWhiteSpace(v.VehiclePlate))
-                .Select(v => new VehicleInfo(v.VehiclePlate.Trim().ToUpperInvariant(), v.VehicleDetail.Type, v.VehicleDetail.CurrentOdometer ?? 0m))
-                .ToList();
-            _projects = (OfflineSnapshot.Load<List<ProjectRecord>>() ?? new())
-                .Where(p => !string.IsNullOrWhiteSpace(p.ProjectCode))
-                .Select(p => new ProjectInfo(p.ProjectCode.Trim().ToUpperInvariant(), p.ProjectDetails.ProjectType.Where(t => t != ProjectType.None).ToList()))
-                .ToList();
+            if (ServerEnvironment.IsOffline)
+            {
+                AppLogger.Warn($"[ScheduleManager.Roster] OFFLINE MODE, using local snapshots: {ex.Message}");
+                LoadRosterFromSnapshots();
+            }
+            else
+            {
+                // Online + SQL error: never mix in offline data.
+                AppLogger.Error("[ScheduleManager.Roster] Server query failed while online; roster left empty", ex);
+                _staff = new List<StaffInfo>();
+                _vehicles = new List<VehicleInfo>();
+                _projects = new List<ProjectInfo>();
+            }
         }
 
         _staffByName = new Dictionary<string, StaffInfo>(StringComparer.OrdinalIgnoreCase);
@@ -127,12 +221,40 @@ internal static class Roster
         _loadedAt = DateTime.UtcNow;
     }
 
-    private static StaffInfo MakeStaff(long id, string? fullName, string? shortName, string? contractStatus)
+    private static void LoadRosterFromSnapshots()
+    {
+        _staff = (OfflineSnapshot.Load<List<StaffRecord>>() ?? new())
+            .Where(s => s.StaffID > 0 && IsFieldDepartment(s.StaffDetails.Department))
+            .Select(s => MakeStaff(
+                s.StaffID, s.StaffDetails.StaffName, s.StaffDetails.StaffShortName, s.StaffDetails.ContractStatus.ToString(),
+                s.StaffDetails.JoinDate, s.StaffDetails.ResignDate, s.StaffDetails.Department))
+            .ToList();
+        _vehicles = (OfflineSnapshot.Load<List<VehicleRecord>>() ?? new())
+            .Where(v => !string.IsNullOrWhiteSpace(v.VehiclePlate))
+            .Select(v => new VehicleInfo(v.VehiclePlate.Trim().ToUpperInvariant(), v.VehicleDetail.Type, v.VehicleDetail.CurrentOdometer ?? 0m))
+            .ToList();
+        _projects = (OfflineSnapshot.Load<List<ProjectRecord>>() ?? new())
+            .Where(p => !string.IsNullOrWhiteSpace(p.ProjectCode))
+            .Select(p => new ProjectInfo(
+                p.ProjectCode.Trim().ToUpperInvariant(),
+                p.ProjectDetails.ProjectType.Where(t => t != ProjectType.None).ToList(),
+                p.ProjectDetails.Status, p.Category,
+                p.ProjectDetails.StartDate, p.ProjectDetails.TargetEndDate, p.ProjectDetails.ActualEndDate))
+            .ToList();
+    }
+
+    private static DateOnly? ToDate(object? raw) =>
+        raw == null ? null : DateOnly.FromDateTime(Convert.ToDateTime(raw));
+
+    private static StaffInfo MakeStaff(long id, string? fullName, string? shortName, string? contractStatus, DateOnly? join, DateOnly? resign, string? department)
     {
         string full = fullName?.Trim() ?? string.Empty;
         string shortN = !string.IsNullOrWhiteSpace(shortName) ? shortName.Trim() : full;
-        bool active = !string.Equals(contractStatus, nameof(ContractStatus.Resigned), StringComparison.OrdinalIgnoreCase);
-        return new StaffInfo(id, shortN, full, active);
+        var status = Enum.TryParse<ContractStatus>(contractStatus, true, out var parsed) ? parsed : ContractStatus.None;
+        // Year <= 1900 is the "unset" sentinel used elsewhere in the app.
+        if (join is { Year: <= 1900 }) join = null;
+        if (resign is { Year: <= 1900 }) resign = null;
+        return new StaffInfo(id, shortN, full, join, resign, status, department?.Trim() ?? string.Empty);
     }
 
     internal static List<ProjectType> ParseProjectTypes(string? csv) =>

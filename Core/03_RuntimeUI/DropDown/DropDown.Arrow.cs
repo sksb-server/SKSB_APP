@@ -9,6 +9,7 @@ using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using ExcelDna.Integration;
 using SKSB_App.Core.Bootstrap.Environment;
+using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.RuntimeUI.RuleEngine;
 
 public static class Arrow
@@ -210,8 +211,8 @@ public static class Arrow
         if (rawObj is not DropdownOption item)
         {
             e.DrawBackground();
-            using var defBrush = new SolidBrush(Color.Gray);
-            e.Graphics.DrawString(rawObj.ToString(), e.Font!, defBrush, e.Bounds.X + 6, e.Bounds.Y + 3);
+            TextRenderer.DrawText(e.Graphics, rawObj.ToString() ?? string.Empty, e.Font!, new Rectangle(e.Bounds.X + 6, e.Bounds.Y + 2, e.Bounds.Width - 8, e.Bounds.Height - 4),
+                Color.Gray, TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
             return;
         }
 
@@ -227,13 +228,13 @@ public static class Arrow
         using var bgBrush = new SolidBrush(backColor);
         e.Graphics.FillRectangle(bgBrush, e.Bounds);
 
-        using var fgBrush = new SolidBrush(foreColor);
         var textBounds = new Rectangle(e.Bounds.X + 6, e.Bounds.Y + 2, e.Bounds.Width - 8, e.Bounds.Height - 4);
-        var sf = new StringFormat { LineAlignment = StringAlignment.Center };
         string label = _isMultiSelectSession && item.IsValid
             ? (isChecked ? "\u2713  " : "     ") + item.Display
             : item.Display;
-        e.Graphics.DrawString(label, e.Font!, fgBrush, textBounds, sf);
+        // GDI text (not GDI+ DrawString) so Windows font-linking falls back to Segoe UI Emoji / Symbol for icons.
+        TextRenderer.DrawText(e.Graphics, label, e.Font!, textBounds, foreColor,
+            TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
     }
 
     public static void ShowArrowForCell(dynamic cell)
@@ -265,8 +266,13 @@ public static class Arrow
             int cellRightPx = targetPane.PointsToScreenPixelsX((double)_activeCell.Left + (double)_activeCell.Width);
             int cellBottomPx = targetPane.PointsToScreenPixelsY((double)_activeCell.Top + (double)_activeCell.Height);
 
-            if (cellRightPx <= 0 || cellBottomPx <= 0)
+            // Screen coordinates can be negative on monitors left of / above the primary,
+            // so validate against the full virtual desktop instead of 0.
+            Rectangle virtualScreen = SystemInformation.VirtualScreen;
+            if (cellRightPx <= virtualScreen.Left || cellBottomPx <= virtualScreen.Top ||
+                cellRightPx >= virtualScreen.Right || cellTopPx >= virtualScreen.Bottom)
             {
+                AppLogger.Warn($"[Arrow] ShowArrowForCell hidden: off-screen pixels (right={cellRightPx}, top={cellTopPx}, bottom={cellBottomPx}, virtual={virtualScreen}) for row {targetRow}, col {targetCol}.");
                 HideAll();
                 return;
             }
@@ -281,8 +287,9 @@ public static class Arrow
             SetWindowPos(_arrowHost.Handle, HWND_TOP, arrowXPx, arrowYPx, arrowWidthPx, arrowHeightPx, SWP_SHOWWINDOW | SWP_NOACTIVATE);
             HidePopup();
         }
-        catch
+        catch (Exception ex)
         {
+            AppLogger.Warn($"[Arrow] ShowArrowForCell failed: {ex.GetType().Name}: {ex.Message}");
             HideAll();
         }
     }
@@ -459,6 +466,8 @@ public static class Arrow
                     {
                         SyncEngine.ExecuteSync(singleCell, config.SyncLeft, targetItem.Raw, targetItem.Display);
                     }
+
+                    ParameterCells.NotifyChanged(sheet, singleCell);
                 };
             }
 
@@ -509,13 +518,24 @@ public static class Arrow
 
             int cellLeftPx = targetPane.PointsToScreenPixelsX((double)singleCell.Left);
             int cellRightPx = targetPane.PointsToScreenPixelsX((double)singleCell.Left + (double)singleCell.Width);
+            int cellTopPx = targetPane.PointsToScreenPixelsY((double)singleCell.Top);
             int cellBottomPx = targetPane.PointsToScreenPixelsY((double)singleCell.Top + (double)singleCell.Height);
 
             int popupWidthPx = Math.Max((cellRightPx - cellLeftPx) + 19, 160);
             int calculatedHeightPx = Math.Min(240, Math.Max(38, (_listBox.Items.Count * _listBox.ItemHeight) + 4));
 
+            // Fit to the working area of the monitor hosting the cell (coordinates may be negative
+            // on secondary monitors); flip above the cell / shift left only when it would overflow.
+            Rectangle workArea = Screen.FromPoint(new Point(cellLeftPx, cellBottomPx)).WorkingArea;
+            int popupXPx = cellLeftPx;
+            int popupYPx = cellBottomPx;
+            if (popupYPx + calculatedHeightPx > workArea.Bottom && cellTopPx - calculatedHeightPx >= workArea.Top)
+                popupYPx = cellTopPx - calculatedHeightPx;
+            if (popupXPx + popupWidthPx > workArea.Right)
+                popupXPx = Math.Max(workArea.Left, workArea.Right - popupWidthPx);
+
             if (!_popupHost!.Visible) _popupHost.Show();
-            SetWindowPos(_popupHost.Handle, HWND_TOP, cellLeftPx, cellBottomPx, popupWidthPx, calculatedHeightPx, SWP_SHOWWINDOW | SWP_NOACTIVATE);
+            SetWindowPos(_popupHost.Handle, HWND_TOP, popupXPx, popupYPx, popupWidthPx, calculatedHeightPx, SWP_SHOWWINDOW | SWP_NOACTIVATE);
         }
         catch (Exception ex)
         {

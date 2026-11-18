@@ -22,9 +22,6 @@ internal static class AttendanceRollupService
     /// <summary>A worker who stays under this many hours earns a half shift instead of a full one.</summary>
     private const decimal HalfShiftBelowHours = 5m;
 
-    /// <summary>Hours beyond this count as overtime.</summary>
-    private const decimal RegularShiftHours = 8m;
-
     // =========================================================================
     // 1. PUNCH ANALYSIS (shared with the board header / worker cells)
     // =========================================================================
@@ -37,7 +34,7 @@ internal static class AttendanceRollupService
     {
         if (!string.IsNullOrWhiteSpace(entry.ProjectID)) return entry.ProjectID.Trim().ToUpperInvariant();
 
-        string name = Roster.FindStaff(entry.StaffID)?.ShortName ?? string.Empty;
+        string name = Roster.NameOf(entry.StaffID);
         if (name.Length == 0) return string.Empty;
 
         return slots
@@ -99,19 +96,26 @@ internal static class AttendanceRollupService
 
     /// <summary>
     /// Builds the daily attendance rows. Unapproved entries (pending WhatsApp confirmations) are ignored.
-    /// Workers appear when they have an approved punch, are scheduled on the board, or already carry a manual
-    /// override in <paramref name="existing"/> (which is preserved).
+    /// Every field worker active on <paramref name="date"/> (<see cref="Roster.ActiveOn(DateOnly)"/>) always gets a row,
+    /// even when unscheduled or unpunched. A worker no longer active on that date is kept only when
+    /// <paramref name="existing"/> already has a row for them and they have an approved punch or are scheduled on the board.
+    /// Day-band overtime is the time clocked after <paramref name="otStartTime"/> (floored to 0.5 h).
     /// </summary>
     internal static List<DailyWorkerAttendance> Run(
         DateOnly date,
         IReadOnlyList<AttendanceEntry> entries,
         IReadOnlyList<DailyProjectSchedule> slots,
         IReadOnlyList<DailyWorkerAttendance> existing,
-        TimeOnly lateCutOff)
+        TimeOnly lateCutOff,
+        TimeOnly otStartTime)
     {
         var approved = ApprovedFor(entries, date);
         var byStaff = approved.GroupBy(e => e.StaffID).ToDictionary(g => g.Key, g => g.ToList());
         var existingById = existing.Where(a => a.StaffID > 0).GroupBy(a => a.StaffID).ToDictionary(g => g.Key, g => g.First());
+
+        // Date-effective: a worker is rolled up when employed on this date. Someone who had already left by this date is
+        // only kept when the date already carries a row for them, so history is preserved but nobody new is added.
+        bool Eligible(long id) => Roster.IsActiveOn(id, date) || (existingById.ContainsKey(id) && Roster.FindStaff(id) != null);
 
         // Board assignments: staff id -> slots they are listed in.
         var scheduled = new Dictionary<long, List<DailyProjectSchedule>>();
@@ -126,12 +130,11 @@ internal static class AttendanceRollupService
             }
         }
 
-        var ids = new SortedSet<long>(byStaff.Keys);
-        ids.UnionWith(scheduled.Keys);
-        foreach (var kv in existingById)
-        {
-            if (kv.Value.ManualOverride != AttendanceStatus.None || !string.IsNullOrWhiteSpace(kv.Value.OverrideReason)) ids.Add(kv.Key);
-        }
+        // Only active field workers are rolled up (office / admin staff may still punch the terminal).
+        // Every field worker employed on this date gets a row, even without a punch, slot, or override.
+        var ids = new SortedSet<long>(Roster.ActiveOn(date).Select(s => s.Id));
+        ids.UnionWith(byStaff.Keys.Where(Eligible));
+        ids.UnionWith(scheduled.Keys.Where(Eligible));
 
         var result = new List<DailyWorkerAttendance>();
         foreach (long id in ids)
@@ -163,8 +166,8 @@ internal static class AttendanceRollupService
             decimal worked = WorkedHours(clockIn, clockOut);
 
             decimal regular = !present ? 0m : (clockOut.HasValue && worked < HalfShiftBelowHours ? 0.5m : 1m);
-            decimal ot = present && clockOut.HasValue
-                ? RuleFloor(Math.Max(0m, worked - RegularShiftHours), 0.5m)
+            decimal ot = present && clockOut.HasValue && !nightBand
+                ? OvertimeHours(clockIn!.Value, clockOut.Value, otStartTime)
                 : 0m;
             decimal additionalShifts = Math.Max(0, projectsDone.Count - 2) * 0.5m;
             // +1.0 OT hour per premix hole, no thresholds - but only for a worker who actually clocked in.
@@ -176,14 +179,11 @@ internal static class AttendanceRollupService
                 : clockIn!.Value > lateCutOff ? AttendanceStatus.Late
                 : AttendanceStatus.Presence;
 
-            var manual = prior?.ManualOverride ?? AttendanceStatus.None;
-            if (manual != AttendanceStatus.None) status = manual;
-
             result.Add(new DailyWorkerAttendance
             {
                 DailyScheduleDate = date,
                 StaffID = id,
-                StaffName = Roster.FindStaff(id)?.ShortName ?? prior?.StaffName ?? string.Empty,
+                StaffName = Roster.NameOf(id, prior?.StaffName ?? string.Empty),
                 AttendanceStatus = status,
                 ClockInTime = clockIn,
                 ClockOutTime = clockOut,
@@ -194,8 +194,6 @@ internal static class AttendanceRollupService
                 OTHours = ot,
                 AdditionalOTHours = additionalOt,
                 TotalFlattenedHours = Flatten(regular, additionalShifts, ot, additionalOt),
-                ManualOverride = manual,
-                OverrideReason = prior?.OverrideReason ?? string.Empty,
                 IsAllocated = mySlots.Count > 0
             });
         }
@@ -213,6 +211,18 @@ internal static class AttendanceRollupService
         double minutes = (clockOut.Value.ToTimeSpan() - clockIn.Value.ToTimeSpan()).TotalMinutes;
         if (minutes < 0) minutes += 24 * 60; // night shift crossing midnight
         return (decimal)minutes / MinutesPerHour;
+    }
+
+    /// <summary>Hours clocked after the OT start time (a clock-out past midnight runs on into the next day).</summary>
+    private static decimal OvertimeHours(TimeOnly clockIn, TimeOnly clockOut, TimeOnly otStartTime)
+    {
+        TimeSpan start = clockIn.ToTimeSpan();
+        TimeSpan end = clockOut.ToTimeSpan();
+        if (end < start) end += TimeSpan.FromHours(24);
+
+        TimeSpan otStart = otStartTime.ToTimeSpan();
+        TimeSpan otBegin = start > otStart ? start : otStart;
+        return end > otBegin ? RuleFloor((decimal)(end - otBegin).TotalMinutes / MinutesPerHour, 0.5m) : 0m;
     }
 
     private static decimal RuleFloor(decimal value, decimal step) => Math.Floor(value / step) * step;

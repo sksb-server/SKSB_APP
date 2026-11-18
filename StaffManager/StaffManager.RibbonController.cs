@@ -1,15 +1,18 @@
-﻿namespace SKSB_App.StaffManager;
+namespace SKSB_App.StaffManager;
 
 using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 using ExcelDna.Integration;
 using ExcelDna.Integration.CustomUI;
+using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.Integration.Erp;
 using SKSB_App.Core.RuntimeUI.Ribbon;
+using SKSB_App.Core.ThumbprintSync;
 using SKSB_App.Core.RuntimeUI.TableRowManager;
 using SKSB_App.Core.Types;
 using SKSB_App.Core.WorkbookOpen.Sheet;
@@ -44,6 +47,15 @@ public class RibbonController : ManagerRibbonBase
                           screentip='Import from SQL Payroll'
                           supertip='Imports employee records from an exported SQL Payroll Excel or CSV file while retaining existing licenses.'
                           onAction='OnImportStaffsClicked' />
+                </group>
+                <group id='grpThumbprintTerminal' label='Thumbprint Terminal'>
+                  <button id='btnPushStaffToTerminal'
+                          label='Push ID &amp; Name&#10;to Controller'
+                          size='large'
+                          imageMso='AccessRefreshAllLists'
+                          screentip='Push Staff ID &amp; Name to Controller'
+                          supertip='Compares Staff IDs on the thumbprint controller and updates matching users names (preserving fingerprint templates and roles) after confirmation.'
+                          onAction='OnPushStaffToTerminalClicked' />
                 </group>";
 
     protected override string EmptyLoadMessage => "No staff records found in database or local snapshot.";
@@ -140,5 +152,102 @@ public class RibbonController : ManagerRibbonBase
         {
             MessageBox.Show($"Import failed: {ex.Message}", "Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
+    }
+
+    // =========================================================================
+    // 4. THUMBPRINT TERMINAL PUSH CALLBACK
+    // =========================================================================
+    public void OnPushStaffToTerminalClicked(IRibbonControl control)
+    {
+        const string Title = "Push ID & Name to Controller";
+        const int MaxNameLen = 23;
+
+        ExcelAsyncUtil.QueueAsMacro(() =>
+        {
+            Dictionary<string, string> staffById;
+            try
+            {
+                var (staffs, _, _) = SheetMapper.ExtractStaffRecordsWithDiagnostics();
+                staffById = new Dictionary<string, string>();
+                foreach (var s in staffs ?? new List<StaffRecord>())
+                {
+                    if (s.StaffID <= 0) continue;
+                    string name = !string.IsNullOrWhiteSpace(s.StaffDetails?.StaffShortName)
+                        ? s.StaffDetails!.StaffShortName.Trim()
+                        : (s.StaffDetails?.StaffName ?? "").Trim();
+                    if (name.Length == 0) continue;
+                    if (name.Length > MaxNameLen) name = name.Substring(0, MaxNameLen);
+                    staffById[s.StaffID.ToString()] = name;
+                }
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error("Failed to read staff records for terminal push", ex);
+                MessageBox.Show($"Failed to read staff records: {ex.Message}", Title, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
+            Task.Run(async () =>
+            {
+                try
+                {
+                    var terminalUsers = await DeviceSyncManager.FetchTerminalUsersAsync();
+
+                    var updates = new List<TerminalUserUpdate>();
+                    int alreadySynced = 0;
+                    int unmatched = 0;
+                    foreach (var u in terminalUsers)
+                    {
+                        if (!staffById.TryGetValue(u.EnrollNumber, out var targetName))
+                            unmatched++;
+                        else if (string.Equals((u.Name ?? "").Trim(), targetName, StringComparison.Ordinal))
+                            alreadySynced++;
+                        else
+                            updates.Add(new TerminalUserUpdate(u.Uid, u.EnrollNumber, targetName));
+                    }
+
+                    ExcelAsyncUtil.QueueAsMacro(() =>
+                    {
+                        if (updates.Count == 0)
+                        {
+                            MessageBox.Show(
+                                $"Nothing to update.\n\nAlready synced: {alreadySynced}\nNot in staff list: {unmatched}",
+                                Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                            return;
+                        }
+
+                        var confirm = MessageBox.Show(
+                            $"Names to update: {updates.Count}\nAlready synced: {alreadySynced}\nNot in staff list: {unmatched}\n\n" +
+                            $"Push the name updates to {DeviceSyncManager.DefaultIp}?\n" +
+                            "Fingerprint templates and roles are preserved.",
+                            Title, MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                        if (confirm != DialogResult.Yes) return;
+
+                        Task.Run(async () =>
+                        {
+                            try
+                            {
+                                int updated = await DeviceSyncManager.ApplyTerminalUsersAsync(updates);
+                                ExcelAsyncUtil.QueueAsMacro(() => MessageBox.Show(
+                                    $"Updated {updated} user name(s) on the controller.",
+                                    Title, MessageBoxButtons.OK, MessageBoxIcon.Information));
+                            }
+                            catch (Exception ex)
+                            {
+                                AppLogger.Error("Terminal name push failed", ex);
+                                ExcelAsyncUtil.QueueAsMacro(() => MessageBox.Show(
+                                    $"Push failed: {ex.Message}", Title, MessageBoxButtons.OK, MessageBoxIcon.Error));
+                            }
+                        });
+                    });
+                }
+                catch (Exception ex)
+                {
+                    AppLogger.Error("Terminal fetch failed", ex);
+                    ExcelAsyncUtil.QueueAsMacro(() => MessageBox.Show(
+                        $"Could not read users from controller: {ex.Message}", Title, MessageBoxButtons.OK, MessageBoxIcon.Error));
+                }
+            });
+        });
     }
 }

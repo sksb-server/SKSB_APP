@@ -4,6 +4,8 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Text.RegularExpressions;
+using SKSB_App.Core.Diagnostics;
+using SKSB_App.Core.Integration.Database;
 using SKSB_App.Core.Types;
 using SKSB_App.Core.WorkbookSave.Storage;
 
@@ -22,9 +24,35 @@ public static class StaffLookupHelper
         return WhitespaceRegex.Replace(name.Trim(), " ");
     }
 
-    /// <summary>Loads the staff directory from the local snapshot refreshed by Staff Manager.</summary>
-    public static List<StaffRecord> LoadCachedStaff() =>
-        OfflineSnapshot.Load<List<StaffRecord>>() ?? new List<StaffRecord>();
+    /// <summary>
+    /// Loads the staff directory: from PostgreSQL in Online Mode (never mixed with the snapshot), from the local
+    /// offline snapshot only in Offline Mode.
+    /// </summary>
+    public static List<StaffRecord> LoadCachedStaff()
+    {
+        if (ServerEnvironment.IsOnline)
+        {
+            try
+            {
+                return new PostgreSqlService()
+                    .Query<dynamic>(
+                        "SELECT staff_id, staff_name, short_name FROM staff_master ORDER BY staff_id;")
+                    .Select(r => new StaffRecord
+                    {
+                        StaffID = (long)r.staff_id,
+                        StaffDetails = new StaffDetails { StaffName = (string)(r.staff_name ?? string.Empty), StaffShortName = (string)(r.short_name ?? string.Empty) }
+                    })
+                    .ToList();
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error("[StaffLookupHelper] staff_master query failed", ex);
+                if (!ServerEnvironment.IsConnectionException(ex)) return new List<StaffRecord>();
+                // connection failure already switched the app to Offline Mode: fall through to the snapshot.
+            }
+        }
+        return OfflineSnapshot.Load<List<StaffRecord>>() ?? new List<StaffRecord>();
+    }
 
     /// <summary>
     /// Builds the exact-match index (normalised ShortName / FullName -> StaffID).

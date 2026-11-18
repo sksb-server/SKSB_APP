@@ -1,4 +1,4 @@
-﻿namespace SKSB_App.Core.WorkbookOpen.Sync;
+namespace SKSB_App.Core.WorkbookOpen.Sync;
 
 using System;
 using System.Collections;
@@ -114,7 +114,9 @@ public static class DataList
         IEnumerable<TEntity>? entities = null,
         string? customListName = null) where TEntity : class
     {
-        var records = entities?.ToList() ?? OfflineSnapshot.Load<List<TEntity>>();
+        // Online Mode never reads the snapshot: callers pass server-sourced entities.
+        var records = entities?.ToList()
+            ?? (SKSB_App.Core.Integration.Database.ServerEnvironment.IsOffline ? OfflineSnapshot.Load<List<TEntity>>() : null);
         if (records == null || records.Count == 0) return false;
 
         string propName = (propertyExpression.Body as MemberExpression)?.Member.Name ?? "Item";
@@ -145,6 +147,44 @@ public static class DataList
             WriteMode.SmartOrganize,
             injectPlaceholderIfEmpty: SheetOperations.IsTemplateEditMode
         );
+    }
+
+    /// <summary>
+    /// Writes index-aligned lists (e.g. StaffIDList / StaffNameList for [ColumnSync]).
+    /// Unlike <see cref="SyncValues"/>, items are only trimmed: no filtering, de-duplication or sorting,
+    /// so position N in every list refers to the same record.
+    /// </summary>
+    public static void SyncAlignedLists(Dictionary<string, IEnumerable<string>> lists)
+    {
+        if (lists == null || lists.Count == 0) return;
+
+        var mappings = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
+        foreach (var (rawName, items) in lists)
+        {
+            if (string.IsNullOrWhiteSpace(rawName)) continue;
+
+            string listName = rawName.EndsWith("List", StringComparison.OrdinalIgnoreCase)
+                ? rawName
+                : $"{rawName}List";
+
+            var values = (items ?? Enumerable.Empty<string>())
+                .Select(v => v?.Trim() ?? string.Empty)
+                .ToArray();
+
+            if (values.Length > 0)
+            {
+                mappings[listName] = values;
+            }
+            else if (SheetOperations.IsTemplateEditMode)
+            {
+                mappings[listName] = new[] { $"[{listName.Replace("List", "")} Placeholder]" };
+            }
+        }
+
+        if (mappings.Count > 0)
+        {
+            SyncHelper.SyncNamedLists(TargetSheet, mappings, WriteMode.SmartOrganize);
+        }
     }
 
     private static EntityTableBlock? BuildEntityBlock(

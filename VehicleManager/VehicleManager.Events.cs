@@ -1,10 +1,11 @@
-﻿namespace SKSB_App.VehicleManager;
+namespace SKSB_App.VehicleManager;
 
 using SKSB_App.Core.RuntimeUI.DateFilter;
 using SKSB_App.Core.Types;
 using SKSB_App.Core.WorkbookOpen.Entry;
 using SKSB_App.Core.WorkbookOpen.Sync;
 using SKSB_App.Core.WorkbookSave.Entry;
+using SKSB_App.Core.WorkbookSave.SheetMapper;
 using System.Collections.Generic;
 using System.Linq;
 
@@ -42,6 +43,7 @@ public class Events : ManagerEventsBase<List<VehicleRecord>>
         // otherwise fuel companies / workshops / cards never load until the user presses Load.
         PopulateStartupWhenEmpty = true,
         SaveToServer = list => (ServerSyncCommands.SaveVehiclesSilent(list, out string err), err),
+        SaveToOffline = list => ServerSyncCommands.SaveVehiclesOffline(list),
         PopulateWorksheet = list => SheetMapper.PopulateWorksheet(list),
         FetchFromServer = () => ServerSyncCommands.FetchVehicleRecords(),
         ValidateOfflinePayload = list => list.Count > 0 && list.TrueForAll(v => !string.IsNullOrWhiteSpace(v.VehiclePlate)),
@@ -77,25 +79,21 @@ public class Events : ManagerEventsBase<List<VehicleRecord>>
     // =========================================================================
     protected override void SyncCustomLookups(bool isInteractive)
     {
-        // 1. Sync Staff IDs (ordered numerically)
-        DataList.SyncProperty<StaffRecord, long>(
-            s => s.StaffID,
-            customListName: "StaffIDList"
-        );
+        // Online Mode: staff come purely from PostgreSQL. Offline Mode: purely from the local snapshot.
+        var staff = StaffLookupHelper.LoadCachedStaff();
 
-        // 2. Push StaffShortName into StaffNameList (with fallback to StaffName if blank)
+        // 1. Staff IDs (ordered numerically)
+        DataList.SyncProperty<StaffRecord, long>(s => s.StaffID, staff, "StaffIDList");
+
+        // 2. StaffShortName into StaffNameList (fallback to StaffName if blank)
         DataList.SyncProperty<StaffRecord, string>(
             s => !string.IsNullOrWhiteSpace(s.StaffDetails.StaffShortName)
                 ? s.StaffDetails.StaffShortName
                 : s.StaffDetails.StaffName,
-            customListName: "StaffNameList"
-        );
+            staff, "StaffNameList");
 
         // 3. Dedicated StaffShortNameList (Staff ID / Staff Name ColumnSync on Odometers and Insurance Claims)
-        DataList.SyncProperty<StaffRecord, string>(
-            s => s.StaffDetails.StaffShortName,
-            customListName: "StaffShortNameList"
-        );
+        DataList.SyncProperty<StaffRecord, string>(s => s.StaffDetails.StaffShortName, staff, "StaffShortNameList");
     }
 
     // =========================================================================

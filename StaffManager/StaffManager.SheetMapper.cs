@@ -1,4 +1,4 @@
-﻿namespace SKSB_App.StaffManager;
+namespace SKSB_App.StaffManager;
 
 using System;
 using System.Collections.Generic;
@@ -107,14 +107,13 @@ public static class SheetMapper
     // =========================================================================
     // 3. SKILL LICENSE TYPES (AUXILIARY REFERENCE TABLE)
     // =========================================================================
-    /// <summary>Populate-time path: local cache first (refreshed during FetchStaffRecords), server only if no cache exists.</summary>
+    /// <summary>Populate-time path: server in Online Mode, local snapshot in Offline Mode (decided inside the fetch).</summary>
     private static void PopulateSkillLicenseTypesFromCache(object wbObj)
     {
         try
         {
-            var savedTypes = OfflineSnapshot.Load<List<SkillLicenseType>>()
-                             ?? ServerSyncCommands.FetchSkillLicenseTypesFromDb();
-            WriteSkillLicenseTypes(wbObj, savedTypes);
+            // Online: PostgreSQL only. Offline: FetchSkillLicenseTypesFromDb reads the local snapshot.
+            WriteSkillLicenseTypes(wbObj, ServerSyncCommands.FetchSkillLicenseTypesFromDb());
         }
         catch { }
     }

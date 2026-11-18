@@ -22,4 +22,10 @@
 		<PackageReference Include="Dapper" Version="2.1.35" />
 	</ItemGroup>
 
+	<ItemGroup>
+		<ProjectReference Include="..\ZkBridge\ZkBridge.csproj">
+			<ReferenceOutputAssembly>false</ReferenceOutputAssembly>
+		</ProjectReference>
+	</ItemGroup>
+
 </Project>

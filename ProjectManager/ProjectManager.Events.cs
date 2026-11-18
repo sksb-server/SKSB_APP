@@ -32,6 +32,7 @@ public class Events : ManagerEventsBase<List<ProjectRecord>>
         // Companies and the summary selector must populate even before the first project exists.
         PopulateStartupWhenEmpty = true,
         SaveToServer = list => (ServerSyncCommands.SaveProjectsSilent(list, out string err), err),
+        SaveToOffline = list => ServerSyncCommands.SaveProjectsOffline(list),
         PopulateWorksheet = list => SheetMapper.PopulateWorksheet(list),
         FetchFromServer = () => ServerSyncCommands.FetchProjectRecords(),
         ValidateOfflinePayload = list => list.Count > 0 && list.TrueForAll(p => !string.IsNullOrWhiteSpace(p.ProjectCode)),

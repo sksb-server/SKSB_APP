@@ -1,4 +1,4 @@
-﻿namespace SKSB_App.VehicleManager;
+namespace SKSB_App.VehicleManager;
 
 using ExcelDna.Integration;
 using SKSB_App.Core.Diagnostics;
@@ -12,38 +12,73 @@ using System.Linq;
 
 internal static class ServerSyncCommands
 {
+    private static (List<Workshop> Workshops, List<InsuranceCompanyRecord> Insurers, List<FuelCardRecord> FuelCards, List<string> FuelCompanies) ExtractAuxiliaryTables()
+    {
+        var workshops = new List<Workshop>();
+        var insuranceCompanies = new List<InsuranceCompanyRecord>();
+        var fuelCards = new List<FuelCardRecord>();
+        var fuelCompanies = new List<string>();
+
+        dynamic xlApp = ExcelDnaUtil.Application;
+        dynamic? wb = xlApp.ActiveWorkbook;
+        if (wb == null) return (workshops, insuranceCompanies, fuelCards, fuelCompanies);
+
+        dynamic? wsWorkshops = SheetMapperHelper.ResolveSheetSafely((object)wb, new[] { "Workshops", "Workshop" }, "Workshops");
+        if (wsWorkshops != null)
+            workshops = TableMapper.ExtractFromTable<Workshop>((object)wsWorkshops, "WorkshopsTable");
+
+        dynamic? wsInsurances = SheetMapperHelper.ResolveSheetSafely((object)wb, new[] { "Insurances", "Insurance" }, "Insurances");
+        if (wsInsurances != null)
+            insuranceCompanies = TableMapper.ExtractFromTable<InsuranceCompanyRecord>((object)wsInsurances, "InsuranceCompaniesTable");
+
+        dynamic? wsOdometers = SheetMapperHelper.ResolveSheetSafely((object)wb, new[] { "Odometers", "Odometer" }, "Odometers");
+        if (wsOdometers != null)
+        {
+            fuelCards = TableMapper.ExtractFromTable<FuelCardRecord>((object)wsOdometers, "FuelCardsTable");
+
+            // Extract ONLY valid rows inside the ListObject boundary so deleted rows are excluded
+            var companyRecords = TableMapper.ExtractFromTable<FuelCompanyNameRecord>((object)wsOdometers, "FuelCompanyNamesTable", "FuelCompaniesTable");
+            fuelCompanies = companyRecords.Select(c => c.FuelCompanyName).Where(n => !string.IsNullOrWhiteSpace(n)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        }
+
+        return (workshops, insuranceCompanies, fuelCards, fuelCompanies);
+    }
+
+    private static void SaveAuxiliarySnapshots(List<Workshop> workshops, List<InsuranceCompanyRecord> insuranceCompanies, List<FuelCardRecord> fuelCards, List<string> fuelCompanies)
+    {
+        OfflineSnapshot.Save(workshops, writeToDatabase: false);
+        OfflineSnapshot.Save(insuranceCompanies, writeToDatabase: false);
+        OfflineSnapshot.Save(fuelCards, writeToDatabase: false);
+        OfflineSnapshot.Save(fuelCompanies.Select(n => new FuelCompanyNameRecord { FuelCompanyName = n }).ToList(), writeToDatabase: false);
+    }
+
+    /// <summary>Offline save: snapshots the master list AND every auxiliary table, and queues the pending upload.</summary>
+    internal static void SaveVehiclesOffline(List<VehicleRecord> vehicleList)
+    {
+        var (workshops, insuranceCompanies, fuelCards, fuelCompanies) = ExtractAuxiliaryTables();
+        SaveAuxiliarySnapshots(workshops, insuranceCompanies, fuelCards, fuelCompanies);
+        OfflineSnapshot.SaveOfflineSnapshot(vehicleList);
+    }
+
     internal static bool SaveVehiclesSilent(List<VehicleRecord> vehicleList, out string errorMessage)
     {
         errorMessage = string.Empty;
         try
         {
-            dynamic xlApp = ExcelDnaUtil.Application;
-            dynamic wb = xlApp.ActiveWorkbook;
-
             // 1. Extract Auxiliary Tables from active workbook
-            var workshops = new List<Workshop>();
-            var insuranceCompanies = new List<InsuranceCompanyRecord>();
-            var fuelCards = new List<FuelCardRecord>();
-            var fuelCompanies = new List<string>();
+            var (workshops, insuranceCompanies, fuelCards, fuelCompanies) = ExtractAuxiliaryTables();
 
-            if (wb != null)
+            // Startup pending-upload commit runs before PopulateWorksheet: empty sheets must not wipe the
+            // auxiliary tables that were saved offline, so fall back to their snapshots.
+            if (OfflineSnapshot.HasPendingSnapshot<List<VehicleRecord>>())
             {
-                dynamic? wsWorkshops = SheetMapperHelper.ResolveSheetSafely((object)wb, new[] { "Workshops", "Workshop" }, "Workshops");
-                if (wsWorkshops != null)
-                    workshops = TableMapper.ExtractFromTable<Workshop>((object)wsWorkshops, "WorkshopsTable");
-
-                dynamic? wsInsurances = SheetMapperHelper.ResolveSheetSafely((object)wb, new[] { "Insurances", "Insurance" }, "Insurances");
-                if (wsInsurances != null)
-                    insuranceCompanies = TableMapper.ExtractFromTable<InsuranceCompanyRecord>((object)wsInsurances, "InsuranceCompaniesTable");
-
-                dynamic? wsOdometers = SheetMapperHelper.ResolveSheetSafely((object)wb, new[] { "Odometers", "Odometer" }, "Odometers");
-                if (wsOdometers != null)
+                if (workshops.Count == 0) workshops = OfflineSnapshot.Load<List<Workshop>>() ?? workshops;
+                if (insuranceCompanies.Count == 0) insuranceCompanies = OfflineSnapshot.Load<List<InsuranceCompanyRecord>>() ?? insuranceCompanies;
+                if (fuelCards.Count == 0) fuelCards = OfflineSnapshot.Load<List<FuelCardRecord>>() ?? fuelCards;
+                if (fuelCompanies.Count == 0)
                 {
-                    fuelCards = TableMapper.ExtractFromTable<FuelCardRecord>((object)wsOdometers, "FuelCardsTable");
-
-                    // Extract ONLY valid rows inside the ListObject boundary so deleted rows are excluded
-                    var companyRecords = TableMapper.ExtractFromTable<FuelCompanyNameRecord>((object)wsOdometers, "FuelCompanyNamesTable", "FuelCompaniesTable");
-                    fuelCompanies = companyRecords.Select(c => c.FuelCompanyName).Where(n => !string.IsNullOrWhiteSpace(n)).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+                    fuelCompanies = (OfflineSnapshot.Load<List<FuelCompanyNameRecord>>() ?? new())
+                        .Select(c => c.FuelCompanyName).Where(n => !string.IsNullOrWhiteSpace(n)).ToList();
                 }
             }
 
@@ -57,12 +92,9 @@ internal static class ServerSyncCommands
             ServerDispatcher.PersistVehicles(vehicleList, isFullBatch: true);
             ServerDispatcher.SaveAuxiliaryTables(workshops, insuranceCompanies, fuelCards, fuelCompanies);
 
-            // 3. Persist local offline snapshots
+            // 3. Persist local offline snapshots (only after the server commit succeeded)
+            SaveAuxiliarySnapshots(workshops, insuranceCompanies, fuelCards, fuelCompanies);
             OfflineSnapshot.Save(vehicleList, writeToDatabase: false);
-            OfflineSnapshot.Save(workshops, writeToDatabase: false);
-            OfflineSnapshot.Save(insuranceCompanies, writeToDatabase: false);
-            OfflineSnapshot.Save(fuelCards, writeToDatabase: false);
-            OfflineSnapshot.Save(fuelCompanies.Select(n => new FuelCompanyNameRecord { FuelCompanyName = n }).ToList(), writeToDatabase: false);
 
             return true;
         }
@@ -422,26 +454,11 @@ internal static class ServerSyncCommands
         FROM vehicle_fuel_cards
         ORDER BY fuel_card_number;");
 
-    internal static List<string> FetchFuelCompanies()
-    {
-        try
-        {
-            var db = new PostgreSqlService();
-            const string sql = "SELECT fuel_company_name FROM lookup_fuel_companies ORDER BY fuel_company_name;";
-            var list = db.Query<string>(sql).Where(s => !string.IsNullOrWhiteSpace(s)).Distinct().ToList();
-
-            // Server is authoritative (even when empty): keep the local cache in step.
-            try { OfflineSnapshot.Save(list.Select(n => new FuelCompanyNameRecord { FuelCompanyName = n }).ToList(), writeToDatabase: false); } catch { }
-            OfflineSnapshot.LogDataSource(Module, "FuelCompanyNamesTable", "SERVER", $"{list.Count} row(s)");
-            return list;
-        }
-        catch (Exception ex)
-        {
-            AppLogger.Error($"[{Module}] FuelCompanyNamesTable server query failed", ex);
-            OfflineSnapshot.LogDataSource(Module, "FuelCompanyNamesTable", "OFFLINE CACHE", $"server query failed: {ex.GetType().Name}: {ex.Message}");
-        }
-
-        var cached = OfflineSnapshot.Load<List<FuelCompanyNameRecord>>();
-        return cached?.Select(c => c.FuelCompanyName).Where(n => !string.IsNullOrWhiteSpace(n)).ToList() ?? new List<string>();
-    }
+    internal static List<string> FetchFuelCompanies() =>
+        ServerSyncHelper.FetchAuthoritativeList<FuelCompanyNameRecord>(Module, "FuelCompanyNamesTable", db =>
+                db.Query<FuelCompanyNameRecord>("SELECT fuel_company_name AS FuelCompanyName FROM lookup_fuel_companies ORDER BY fuel_company_name;").ToList())
+            .Select(c => c.FuelCompanyName)
+            .Where(n => !string.IsNullOrWhiteSpace(n))
+            .Distinct()
+            .ToList();
 }

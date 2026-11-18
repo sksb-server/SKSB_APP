@@ -317,8 +317,6 @@ public static partial class RuleRegistry
             dynamic? activeSheet = null;
             try { activeSheet = wb.ActiveSheet; } catch { }
 
-            Commands.EnsureNamedStyleExists(xlApp, Commands.DropDownStyleName);
-
             foreach (dynamic ws in wb.Sheets)
             {
                 string sName = ws.Name?.ToString() ?? string.Empty;
@@ -390,28 +388,10 @@ public static partial class RuleRegistry
                         {
                             try
                             {
-                                // Pre-read the template's original format & style on the archetype cell
-                                string origStyle = archCell.Style?.Name?.ToString() ?? string.Empty;
-                                string origFmt = archCell.NumberFormat?.ToString() ?? string.Empty;
-                                dynamic? origFmtLocal = null;
-                                try { origFmtLocal = archCell.NumberFormatLocal; } catch { }
-
                                 dynamic targetRange = (bodyRange != null) ? table.ListColumns[c].DataBodyRange : archCell;
                                 if (targetRange != null)
                                 {
-                                    // Only set DropDown style if the cell doesn't already have a custom unlocked style
-                                    if (string.IsNullOrEmpty(origStyle) || origStyle.Equals("Normal", StringComparison.OrdinalIgnoreCase))
-                                    {
-                                        targetRange.Style = Commands.DropDownStyleName;
-                                    }
                                     try { targetRange.Validation.Delete(); } catch { }
-
-                                    // Restore the template's cell-level NumberFormat (e.g. Date format) if the style reset it
-                                    if (!string.IsNullOrWhiteSpace(origFmt) && !origFmt.Equals("General", StringComparison.OrdinalIgnoreCase))
-                                    {
-                                        try { targetRange.NumberFormat = origFmt; } catch { }
-                                        try { if (origFmtLocal != null) targetRange.NumberFormatLocal = origFmtLocal; } catch { }
-                                    }
                                 }
                             }
                             catch { }

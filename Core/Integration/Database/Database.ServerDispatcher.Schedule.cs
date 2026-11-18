@@ -49,8 +49,8 @@ public static partial class ServerDispatcher
 
         // ---- board slots ----------------------------------------------------
         var slots = schedule.Projects
-            .Where(p => p.SlotIndex is >= 0 and <= 7 &&
-                        (!string.IsNullOrWhiteSpace(p.ProjectID) || p.Workers.Count > 0 || p.Vehicles.Count > 0 || p.PremixHoles > 0))
+            .Where(p => p.SlotIndex >= 0 &&
+                        (p.Workers.Count > 0 || p.Vehicles.Count > 0 || p.PremixHoles > 0))
             .Select(p => new
             {
                 ScheduleDate = date,
@@ -79,8 +79,6 @@ public static partial class ServerDispatcher
             OtHours = a.OTHours,
             AdditionalOtHours = a.AdditionalOTHours,
             a.TotalFlattenedHours,
-            ManualOverride = a.ManualOverride.ToString(),
-            OverrideReason = a.OverrideReason ?? string.Empty,
             a.IsAllocated
         }).ToList();
         long[] activeAttendanceIds = attendances.Select(a => a.StaffId).ToArray();
@@ -135,11 +133,11 @@ public static partial class ServerDispatcher
         INSERT INTO daily_attendances (
             schedule_date, staff_id, attendance_status, clock_in_time, clock_out_time, project_check_ins, projects_done,
             regular_shift, additional_shifts, ot_hours, additional_ot_hours, total_flattened_hours,
-            manual_override, override_reason, is_allocated)
+            is_allocated)
         VALUES (
             @ScheduleDate, @StaffId, @AttendanceStatus, @ClockInTime, @ClockOutTime, @ProjectCheckIns, @ProjectsDone,
             @RegularShift, @AdditionalShifts, @OtHours, @AdditionalOtHours, @TotalFlattenedHours,
-            @ManualOverride, @OverrideReason, @IsAllocated)
+            @IsAllocated)
         ON CONFLICT (schedule_date, staff_id) DO UPDATE SET
             attendance_status     = EXCLUDED.attendance_status,
             clock_in_time         = EXCLUDED.clock_in_time,
@@ -151,8 +149,6 @@ public static partial class ServerDispatcher
             ot_hours              = EXCLUDED.ot_hours,
             additional_ot_hours   = EXCLUDED.additional_ot_hours,
             total_flattened_hours = EXCLUDED.total_flattened_hours,
-            manual_override       = EXCLUDED.manual_override,
-            override_reason       = EXCLUDED.override_reason,
             is_allocated          = EXCLUDED.is_allocated,
             updated_at            = CURRENT_TIMESTAMP;";
 
@@ -183,8 +179,25 @@ public static partial class ServerDispatcher
             default_vehicles     = EXCLUDED.default_vehicles,
             updated_at           = CURRENT_TIMESTAMP;";
 
+        const string sqlSettingsUpsert = @"
+        INSERT INTO daily_schedule_settings (schedule_date, late_cut_off_time, ot_start_time)
+        VALUES (@ScheduleDate, @LateCutOffTime, @OtStartTime)
+        ON CONFLICT (schedule_date) DO UPDATE SET
+            late_cut_off_time = EXCLUDED.late_cut_off_time,
+            ot_start_time     = EXCLUDED.ot_start_time,
+            updated_at        = CURRENT_TIMESTAMP;";
+
+        var settings = new
+        {
+            ScheduleDate = date,
+            LateCutOffTime = schedule.LateCutOffTime.ToTimeSpan(),
+            OtStartTime = schedule.OTStartTime.ToTimeSpan()
+        };
+
         Db.ExecuteInTransaction((conn, trans) =>
         {
+            conn.Execute(sqlSettingsUpsert, settings, trans);
+
             // Date-scoped reconciliation: removed slots / workers disappear for THIS date only.
             conn.Execute(
                 "DELETE FROM daily_project_schedules WHERE schedule_date = @ScheduleDate AND (shift || ':' || slot_index::text) != ALL(@ActiveKeys);",
@@ -208,6 +221,7 @@ public static partial class ServerDispatcher
 
         AppLogger.Info(
             $"[PostgreSQL Upload - Schedule {schedule.DailyScheduleDate:yyyy-MM-dd}] " +
+            $"lateCutOff={schedule.LateCutOffTime:HH:mm}, otStart={schedule.OTStartTime:HH:mm}, " +
             $"slots={slots.Count}, attendances={attendances.Count}, entries={entries.Count}, prefs={prefs.Count}, teams={teams.Count}");
     }
 

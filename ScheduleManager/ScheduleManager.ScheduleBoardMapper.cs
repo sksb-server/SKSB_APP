@@ -10,15 +10,16 @@ using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.RuntimeUI.DropDown;
 using SKSB_App.Core.RuntimeUI.RuleEngine;
 using SKSB_App.Core.Types;
+using SKSB_App.Core.WorkbookOpen.Sheet;
 using SKSB_App.Core.WorkbookSave.SheetMapper;
 
 /// <summary>
-/// Reads and renders the 'Daily Schedule' dispatch board: 8 slots x (Day Work rows 3-18, Night Work rows 19-34).
-/// Every slot is three columns wide (B:D, E:G, ... W:Y):
-///   header   : project code + live "(HH:mm - HH:mm)" window                    (anchor of the merged header)
-///   premix   : "Premix Holes" label / count one row above the header
-///   workers  : Staff Name | Staff Skills (icons) | Check in and out Time        (9 rows)
-///   vehicles : Vehicle Plate | Vehicle Type (icon) | Current Odometer            (3 rows)
+/// Reads and renders the 'Daily Schedule' dispatch board: a dynamic number of three-column slots (B:D, E:G, H:J, ...),
+/// one per active project of the shown date, for Day Work (rows 4-18) and Night Work (rows 20-34).
+///   row 4 / 20 : Project Code (+ requirement flag) | Premix Hole Amount | Project start time - end time
+///   workers    : Staff Name | Staff Skills (icons) | Check in and out Time        (10 rows: 5-14 / 21-30)
+///   vehicles   : Vehicle Plate | Vehicle Type (icon) | Current Odometer             (4 rows: 15-18 / 31-34)
+/// The template carries its own static labels; the board only writes the header row and the data blocks.
 /// The board is not a ListObject, so reads and writes are single 2D-array COM calls per block.
 /// </summary>
 internal static class ScheduleBoardMapper
@@ -31,33 +32,41 @@ internal static class ScheduleBoardMapper
     internal const string DateCell = "A2";
     internal const string DayCell = "B2";
 
-    internal const int SlotCount = 8;
     internal const int SlotWidth = 3;
     internal const int FirstSlotColumn = 2;                 // B
-    internal const int WorkerRowsPerBand = 9;
-    internal const int VehicleRowsPerBand = 3;
-    private const int FirstBoardRow = 3;                    // Day premix row
+    internal const int WorkerRowsPerBand = 10;
+    internal const int VehicleRowsPerBand = 4;
+    private const int FirstBoardRow = 4;                    // Day Work project header row
     private const int LastBoardRow = 34;
-    private const int LastBoardColumn = FirstSlotColumn + (SlotCount * SlotWidth) - 1; // Y
-    private const string EmptyHeaderText = "Project Code (Time start - Time end)";
-    private const string PremixLabel = "Premix Holes";
+    private const int MaxScanSlots = 100;                   // upper bound when detecting the rendered board width
+    private const string EmptyHeaderText = "Project Code";
+    private static readonly HashSet<string> PlaceholderTexts = new(StringComparer.OrdinalIgnoreCase) { "Staff Name", "Vehicle Plate" };
 
-    private sealed record Band(Shifts Shift, string Label, int PremixRow, int HeaderRow, int FirstWorkerRow, int VehicleHeaderRow, int FirstVehicleRow)
+    /// <summary>Slots currently drawn across the board (refreshed by <see cref="Read"/> / <see cref="Render"/>).</summary>
+    private static int _slotCount = 1;
+    private static int LastBoardColumn => FirstSlotColumn + (_slotCount * SlotWidth) - 1;
+
+    private sealed record Band(Shifts Shift, string Label, int HeaderRow, int FirstWorkerRow, int FirstVehicleRow)
     {
         public int LastWorkerRow => FirstWorkerRow + WorkerRowsPerBand - 1;
         public int LastVehicleRow => FirstVehicleRow + VehicleRowsPerBand - 1;
     }
 
     private static Band MakeBand(Shifts shift, string label, int offset) =>
-        new(shift, label, 3 + offset, 4 + offset, 6 + offset, 15 + offset, 16 + offset);
+        new(shift, label, 4 + offset, 5 + offset, 15 + offset);
 
     private static readonly Band[] Bands = { MakeBand(Shifts.Morning, "Day Work", 0), MakeBand(Shifts.Night, "Night Work", 16) };
 
     internal static int SlotColumn(int slot) => FirstSlotColumn + (slot * SlotWidth);
 
     private static readonly Regex HeaderCode = new(@"^\s*(\S+)", RegexOptions.Compiled);
+    private static readonly Regex LeadingInt = new(@"^\s*(\d+)", RegexOptions.Compiled);
 
-    internal enum CellKind { None, Header, Worker, Vehicle, Premix }
+    /// <summary>Premix header cell keeps a numeric value when &gt; 0 ("1 Hole", "5 Holes"); when 0 it displays the project type instead.</summary>
+    private const string PremixHoleFormat = "[=1]0 \"Hole\";0 \"Holes\"";
+    private const string EmptyOdometerDash = "—";
+
+    internal enum CellKind { None, Header, Premix, Worker, WorkerSkill, Vehicle, VehicleType }
     internal readonly record struct CellLocation(CellKind Kind, Shifts Shift, int Slot, int Row);
 
     internal static CellLocation Locate(int row, int column)
@@ -69,16 +78,52 @@ internal static class ScheduleBoardMapper
 
         foreach (var b in Bands)
         {
-            if (row == b.HeaderRow && within == 0) return new(CellKind.Header, b.Shift, slot, row);
-            if (row == b.PremixRow && within == 1) return new(CellKind.Premix, b.Shift, slot, row);
-            if (row >= b.FirstWorkerRow && row <= b.LastWorkerRow && within == 0) return new(CellKind.Worker, b.Shift, slot, row);
-            if (row >= b.FirstVehicleRow && row <= b.LastVehicleRow && within == 0) return new(CellKind.Vehicle, b.Shift, slot, row);
+            if (row == b.HeaderRow)
+            {
+                if (within == 0) return new(CellKind.Header, b.Shift, slot, row);
+                if (within == 1) return new(CellKind.Premix, b.Shift, slot, row);
+            }
+            if (row >= b.FirstWorkerRow && row <= b.LastWorkerRow)
+            {
+                if (within == 0) return new(CellKind.Worker, b.Shift, slot, row);
+                if (within == 1) return new(CellKind.WorkerSkill, b.Shift, slot, row);
+            }
+            if (row >= b.FirstVehicleRow && row <= b.LastVehicleRow)
+            {
+                if (within == 0) return new(CellKind.Vehicle, b.Shift, slot, row);
+                if (within == 1) return new(CellKind.VehicleType, b.Shift, slot, row);
+            }
         }
         return none;
     }
 
+    /// <summary>Any cell right of the date column inside the board rows (the width is dynamic, so there is no upper column bound).</summary>
     internal static bool IsBoardArea(int row, int column) =>
-        row >= FirstBoardRow && row <= LastBoardRow && column >= FirstSlotColumn && column <= LastBoardColumn;
+        row >= FirstBoardRow && row <= LastBoardRow && column >= FirstSlotColumn;
+
+    /// <summary>
+    /// Counts the slots actually drawn on the sheet: last populated project header cell (starting at B) on the
+    /// header row of either band. Always at least 1.
+    /// </summary>
+    private static int DetectSlotCount(object wsObj)
+    {
+        int best = 1;
+        try
+        {
+            dynamic ws = wsObj;
+            int cols = MaxScanSlots * SlotWidth;
+            foreach (var band in Bands)
+            {
+                dynamic range = ws.Range[ws.Cells[band.HeaderRow, FirstSlotColumn], ws.Cells[band.HeaderRow, FirstSlotColumn + cols - 1]];
+                object[,] v = TableMapper.GetRange2DValues(range, 1, cols);
+                // Last populated header wins, so a header the user just cleared does not truncate the board.
+                for (int slot = MaxScanSlots - 1; slot >= best; slot--)
+                    if (!string.IsNullOrWhiteSpace(v[1, (slot * SlotWidth) + 1]?.ToString())) { best = slot + 1; break; }
+            }
+        }
+        catch (Exception ex) { AppLogger.Warn($"[ScheduleBoard] slot detection failed: {ex.Message}"); }
+        return best;
+    }
 
     internal static bool IsBoardSheet(object sheetObj)
     {
@@ -90,8 +135,6 @@ internal static class ScheduleBoardMapper
         }
         catch { return false; }
     }
-
-    private static Band BandOf(Shifts shift) => Bands.First(b => b.Shift == shift);
 
     // =========================================================================
     // 2. DATE CELL
@@ -115,8 +158,14 @@ internal static class ScheduleBoardMapper
         dynamic ws = wsObj;
         ws.Range[DateCell].Value2 = date.ToDateTime(TimeOnly.MinValue).ToOADate();
         try { ws.Range[DateCell].NumberFormat = "dd/mm/yyyy"; } catch { }
-        ws.Range[DayCell].Value2 = date.ToString("dddd", CultureInfo.CurrentCulture);
+        ws.Range[DayCell].Value2 = DayName(date);
     }
+
+    /// <summary>English day name (Monday..Sunday) - exactly the values of the <see cref="Days"/> enum list that backs the B2 dropdown.</summary>
+    internal static string DayName(DateOnly date) => date.DayOfWeek.ToString();
+
+    private static bool IsDateCell(dynamic cell) => (int)cell.Row == 2 && (int)cell.Column == 1;
+    private static bool IsDayCell(dynamic cell) => (int)cell.Row == 2 && (int)cell.Column == 2;
 
     // =========================================================================
     // 3. READ (one COM call)
@@ -138,15 +187,16 @@ internal static class ScheduleBoardMapper
         return m.Success ? m.Groups[1].Value.Trim().ToUpperInvariant() : string.Empty;
     }
 
-    /// <summary>Reads every non-empty slot. Rank prefixes ("[95%] ") pasted into a cell are stripped.</summary>
+    /// <summary>Reads every non-empty slot of the rendered width. Rank prefixes ("[95%] ") pasted into a cell are stripped.</summary>
     internal static List<DailyProjectSchedule> Read(object wsObj, DateOnly date)
     {
+        _slotCount = DetectSlotCount(wsObj);
         object[,] grid = ReadGrid(wsObj);
         var result = new List<DailyProjectSchedule>();
 
         foreach (var band in Bands)
         {
-            for (int slot = 0; slot < SlotCount; slot++)
+            for (int slot = 0; slot < _slotCount; slot++)
             {
                 int col = SlotColumn(slot);
                 var record = new DailyProjectSchedule
@@ -155,18 +205,18 @@ internal static class ScheduleBoardMapper
                     Shift = band.Shift,
                     SlotIndex = slot,
                     ProjectID = ParseProjectCode(Text(grid, band.HeaderRow, col)),
-                    PremixHoles = int.TryParse(Text(grid, band.PremixRow, col + 1), NumberStyles.Any, CultureInfo.InvariantCulture, out int holes) ? Math.Max(0, holes) : 0
+                    PremixHoles = ParsePremixHoles(Text(grid, band.HeaderRow, col + 1))
                 };
 
                 for (int r = band.FirstWorkerRow; r <= band.LastWorkerRow; r++)
                 {
                     string worker = ScheduleMatchEngine.StripPercent(Text(grid, r, col));
-                    if (worker.Length > 0) record.Workers.Add(worker);
+                    if (worker.Length > 0 && !PlaceholderTexts.Contains(worker)) record.Workers.Add(worker);
                 }
                 for (int r = band.FirstVehicleRow; r <= band.LastVehicleRow; r++)
                 {
                     string plate = Text(grid, r, col).ToUpperInvariant();
-                    if (plate.Length > 0) record.Vehicles.Add(plate);
+                    if (plate.Length > 0 && !PlaceholderTexts.Contains(plate)) record.Vehicles.Add(plate);
                 }
 
                 if (record.ProjectID.Length > 0 || record.Workers.Count > 0 || record.Vehicles.Count > 0 || record.PremixHoles > 0)
@@ -174,6 +224,14 @@ internal static class ScheduleBoardMapper
             }
         }
         return result;
+    }
+
+    /// <summary>Accepts a raw number ("5") or typed text with a unit ("5 Holes"); anything else is 0.</summary>
+    private static int ParsePremixHoles(string text)
+    {
+        if (int.TryParse(text, NumberStyles.Any, CultureInfo.InvariantCulture, out int holes)) return Math.Max(0, holes);
+        var m = LeadingInt.Match(text);
+        return m.Success && int.TryParse(m.Groups[1].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out holes) ? Math.Max(0, holes) : 0;
     }
 
     /// <summary>Workers listed in more than one slot of the same band, as save-blocking messages.</summary>
@@ -223,10 +281,13 @@ internal static class ScheduleBoardMapper
 
                 changed = true;
                 var members = new List<string>();
-                if (!string.IsNullOrWhiteSpace(team.TeamLeader)) members.Add(team.TeamLeader.Trim());
+                if (!string.IsNullOrWhiteSpace(team.TeamLeader) && Roster.FindStaff(team.TeamLeader) is { } lead &&
+                    Roster.IsActiveOn(lead, slot.DailyScheduleDate))
+                    members.Add(lead.ShortName);
                 members.AddRange(BoardContext.Preferences
                     .Where(p => p.Team.Contains(team.TeamName.Trim(), StringComparer.OrdinalIgnoreCase))
-                    .Select(p => Roster.FindStaff(p.StaffID)?.ShortName ?? p.StaffName)
+                    .Where(p => Roster.IsActiveOn(p.StaffID, slot.DailyScheduleDate))   // employed on the slot's date
+                    .Select(p => Roster.NameOf(p.StaffID))
                     .Where(n => !string.IsNullOrWhiteSpace(n))
                     .OrderBy(n => n, StringComparer.OrdinalIgnoreCase));
                 expanded.AddRange(members);
@@ -254,26 +315,69 @@ internal static class ScheduleBoardMapper
     // =========================================================================
     // 5. RENDER (2D array writes, caller owns the Excel freeze)
     // =========================================================================
-    internal static void Render(object wsObj, DateOnly date, IReadOnlyList<DailyProjectSchedule> slots, IReadOnlyList<AttendanceEntry> entries)
+    /// <summary>
+    /// Slots to draw for one band, left to right. With <paramref name="autoPopulate"/> (a date load) every project that is
+    /// Active on the date gets a slot (iJob -> MWO -> PVT) merged with its saved row; saved rows for other projects follow.
+    /// Without it (a live refresh) the slots the user currently has are kept in place.
+    /// </summary>
+    private static List<DailyProjectSchedule> LayoutSlots(Shifts shift, DateOnly date, IReadOnlyList<DailyProjectSchedule> slots, bool autoPopulate)
+    {
+        var saved = slots.Where(s => s.Shift == shift).OrderBy(s => s.SlotIndex).ToList();
+        if (!autoPopulate) return saved;
+
+        var result = new List<DailyProjectSchedule>();
+        var used = new HashSet<int>();
+        foreach (var project in Roster.ActiveProjectsOn(date))
+        {
+            int idx = -1;
+            for (int i = 0; i < saved.Count && idx < 0; i++)
+                if (!used.Contains(i) && saved[i].ProjectID.Trim().Equals(project.Id, StringComparison.OrdinalIgnoreCase)) idx = i;
+            if (idx >= 0) { used.Add(idx); result.Add(saved[idx]); }
+            else result.Add(new DailyProjectSchedule { DailyScheduleDate = date, Shift = shift, ProjectID = project.Id });
+        }
+        for (int i = 0; i < saved.Count; i++)
+            if (!used.Contains(i)) result.Add(saved[i]);
+        return result;
+    }
+
+    internal static void Render(object wsObj, DateOnly date, IReadOnlyList<DailyProjectSchedule> slots, IReadOnlyList<AttendanceEntry> entries, bool autoPopulate = false)
     {
         dynamic ws = wsObj;
         var spans = AttendanceRollupService.BuildSpans(entries, date, slots);
         string cutOffText = BoardContext.LateCutOff.ToString("HH:mm", CultureInfo.InvariantCulture);
 
+        var layouts = Bands.ToDictionary(b => b.Shift, b => LayoutSlots(b.Shift, date, slots, autoPopulate));
+        int slotCount = Math.Max(1, layouts.Values.Max(l => l.Count));
+
+        int drawn = DetectSlotCount(wsObj);
+        int previous = Math.Max(drawn, _slotCount);
+
+        // Live refresh: snapshot the current board (old bounds, before PrepareColumns widens it) so a pending
+        // Staff Skills filter on an empty worker row survives the rewrite.
+        object[,]? existingGrid = null;
+        int existingLastColumn = LastBoardColumn;
+        if (!autoPopulate)
+        {
+            try { existingGrid = ReadGrid(wsObj); }
+            catch (Exception ex) { AppLogger.Warn($"[ScheduleBoard] reading pending skill filters failed: {ex.Message}"); }
+        }
+
+        _slotCount = slotCount;
+        PrepareColumns(ws, slotCount, drawn, previous);
+
+        int cols = slotCount * SlotWidth;
         foreach (var band in Bands)
         {
-            int cols = SlotCount * SlotWidth;
+            var layout = layouts[band.Shift];
+            var header = new object?[1, cols];
             var workers = new object?[WorkerRowsPerBand, cols];
             var vehicles = new object?[VehicleRowsPerBand, cols];
-            var premix = new object?[1, cols];
+            var comments = new string?[slotCount];
 
-            for (int slot = 0; slot < SlotCount; slot++)
+            for (int slot = 0; slot < slotCount; slot++)
             {
-                var data = slots.FirstOrDefault(s => s.Shift == band.Shift && s.SlotIndex == slot) ?? new DailyProjectSchedule { Shift = band.Shift, SlotIndex = slot };
+                var data = slot < layout.Count ? layout[slot] : new DailyProjectSchedule { DailyScheduleDate = date, Shift = band.Shift };
                 int c0 = slot * SlotWidth;
-
-                premix[0, c0] = PremixLabel;
-                premix[0, c0 + 1] = data.PremixHoles;
 
                 var assignedSkills = new List<string>();
                 for (int i = 0; i < WorkerRowsPerBand && i < data.Workers.Count; i++)
@@ -282,14 +386,27 @@ internal static class ScheduleBoardMapper
                     var staff = Roster.FindStaff(name);
                     var pref = staff != null ? BoardContext.PreferenceFor(staff.Id) : null;
 
-                    var skills = SkillsOf(pref);
+                    var skills = SkillsFor(staff, pref);
                     assignedSkills.AddRange(skills);
 
                     workers[i, c0] = name;
                     workers[i, c0 + 1] = string.Join(" ", skills.Select(BoardContext.IconFor).Where(s => s.Length > 0));
                     workers[i, c0 + 2] = staff != null && data.ProjectID.Length > 0 && spans.TryGetValue((staff.Id, data.ProjectID), out var list) && list.Count > 0
                         ? FormatSpan(list[0].In, list.Any(s => s.Out == null) ? null : list.Max(s => s.Out))
-                        : null;
+                        : FormatSpan(null, null);
+                }
+
+                // Keep pending skill filters (Staff Skills set, Staff Name still empty) on unassigned rows,
+                // even when no worker currently matches them.
+                if (existingGrid != null && SlotColumn(slot) + 1 <= existingLastColumn)
+                {
+                    for (int i = data.Workers.Count; i < WorkerRowsPerBand; i++)
+                    {
+                        int r = band.FirstWorkerRow + i;
+                        if (Text(existingGrid, r, SlotColumn(slot)).Length > 0) continue;
+                        string pending = Text(existingGrid, r, SlotColumn(slot) + 1);
+                        if (pending.Length > 0) workers[i, c0 + 1] = pending;
+                    }
                 }
 
                 var vehicleTypes = new List<VehicleType>();
@@ -300,27 +417,118 @@ internal static class ScheduleBoardMapper
                     if (v != null)
                     {
                         vehicleTypes.Add(v.Type);
-                        vehicles[i, c0 + 1] = $"{BoardContext.IconFor(v.Type)} {v.Type.ToString().Replace('_', ' ')}".Trim();
-                        vehicles[i, c0 + 2] = v.Odometer > 0 ? (double)v.Odometer : null;
+                        vehicles[i, c0 + 1] = BoardContext.IconFor(v.Type);
+                        vehicles[i, c0 + 2] = v.Odometer > 0 ? (double)v.Odometer : EmptyOdometerDash;
+                    }
+                    else
+                    {
+                        vehicles[i, c0 + 2] = EmptyOdometerDash;
                     }
                 }
 
-                WriteHeader(ws, band, slot, data, spans, assignedSkills, vehicleTypes);
+                // Keep pending type filters (Vehicle Type set, Vehicle Plate still empty) on unassigned rows,
+                // even when no vehicle currently matches them.
+                if (existingGrid != null && SlotColumn(slot) + 1 <= existingLastColumn)
+                {
+                    for (int i = data.Vehicles.Count; i < VehicleRowsPerBand; i++)
+                    {
+                        int r = band.FirstVehicleRow + i;
+                        if (Text(existingGrid, r, SlotColumn(slot)).Length > 0) continue;
+                        string pendingType = Text(existingGrid, r, SlotColumn(slot) + 1);
+                        if (pendingType.Length > 0) vehicles[i, c0 + 1] = pendingType;
+                    }
+                }
+
+                var h = BuildHeader(data, spans, assignedSkills, vehicleTypes);
+                header[0, c0] = h.Text;
+                header[0, c0 + 1] = FormatPremixCell(data);
+                header[0, c0 + 2] = h.Window;
+                comments[slot] = h.Comment;
             }
 
-            dynamic workerRange = ws.Range[ws.Cells[band.FirstWorkerRow, FirstSlotColumn], ws.Cells[band.LastWorkerRow, LastBoardColumn]];
-            workerRange.Value2 = workers;
-            dynamic vehicleRange = ws.Range[ws.Cells[band.FirstVehicleRow, FirstSlotColumn], ws.Cells[band.LastVehicleRow, LastBoardColumn]];
-            vehicleRange.Value2 = vehicles;
-            dynamic premixRange = ws.Range[ws.Cells[band.PremixRow, FirstSlotColumn], ws.Cells[band.PremixRow, LastBoardColumn]];
-            premixRange.Value2 = premix;
+            WriteBlock(ws, band.HeaderRow, band.HeaderRow, header);
+            WriteBlock(ws, band.FirstWorkerRow, band.LastWorkerRow, workers);
+            WriteBlock(ws, band.FirstVehicleRow, band.LastVehicleRow, vehicles);
+
+            for (int slot = 0; slot < slotCount; slot++)
+            {
+                try { ws.Cells[band.HeaderRow, SlotColumn(slot) + 1].NumberFormat = PremixHoleFormat; } catch { }
+                try
+                {
+                    dynamic cell = ws.Cells[band.HeaderRow, SlotColumn(slot)];
+                    cell.ClearComments();
+                    if (!string.IsNullOrEmpty(comments[slot])) cell.AddComment(comments[slot]);
+                }
+                catch { /* comments are advisory */ }
+            }
         }
 
-        EnsureConditionalFormats(ws, cutOffText);
+        EnsureConditionalFormats(ws, cutOffText, slotCount);
     }
 
-    private static string FormatSpan(TimeOnly start, TimeOnly? end) =>
-        $"{start:HH:mm} - {(end.HasValue ? end.Value.ToString("HH:mm", CultureInfo.InvariantCulture) : "…")}";
+    private static void WriteBlock(dynamic ws, int firstRow, int lastRow, object?[,] values)
+    {
+        dynamic range = ws.Range[ws.Cells[firstRow, FirstSlotColumn], ws.Cells[lastRow, LastBoardColumn]];
+        range.Value2 = values;
+    }
+
+    /// <summary>
+    /// Clones the prototype B:D formatting / widths (Range B4:D18 and B20:D34) into slots that are not drawn yet and
+    /// clears columns left over from a previously loaded date that had more slots.
+    /// </summary>
+    private static void PrepareColumns(dynamic ws, int slotCount, int drawn, int previous)
+    {
+        try
+        {
+            for (int slot = Math.Max(1, drawn); slot < slotCount; slot++)
+            {
+                foreach (var band in Bands)
+                {
+                    dynamic proto = ws.Range[ws.Cells[band.HeaderRow, FirstSlotColumn], ws.Cells[band.LastVehicleRow, FirstSlotColumn + SlotWidth - 1]];
+                    proto.Copy(ws.Cells[band.HeaderRow, SlotColumn(slot)]);
+                }
+                for (int k = 0; k < SlotWidth; k++)
+                {
+                    try { ws.Columns[SlotColumn(slot) + k].ColumnWidth = ws.Columns[FirstSlotColumn + k].ColumnWidth; } catch { }
+                }
+            }
+            try { dynamic xlApp = ExcelDna.Integration.ExcelDnaUtil.Application; xlApp.CutCopyMode = false; } catch { }
+
+            if (previous > slotCount)
+            {
+                dynamic leftover = ws.Range[ws.Cells[FirstBoardRow, SlotColumn(slotCount)], ws.Cells[LastBoardRow, SlotColumn(previous) - 1]];
+                try { leftover.ClearComments(); } catch { }
+                leftover.Clear();
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn($"[ScheduleBoard] preparing board columns failed: {ex.Message}");
+        }
+    }
+
+    private static object? FormatPremixCell(DailyProjectSchedule data)
+    {
+        if (data.PremixHoles > 0) return data.PremixHoles;
+        if (data.ProjectID.Length == 0) return null;
+        var info = Roster.FindProject(data.ProjectID);
+        if (info != null && info.Types.Count > 0)
+        {
+            var icons = string.Join(" ", info.Types.Select(BoardContext.IconFor).Where(s => s.Length > 0));
+            if (icons.Length > 0) return icons;
+        }
+        return 0;
+    }
+
+    private static string FormatSpan(TimeOnly? start, TimeOnly? end)
+    {
+        string s = start.HasValue ? start.Value.ToString("HH:mm", CultureInfo.InvariantCulture) : "No Start";
+        string e = end.HasValue ? end.Value.ToString("HH:mm", CultureInfo.InvariantCulture) : "No End";
+        return $"{s} - {e}";
+    }
+
+    private static string TypeText(VehicleType type) =>
+        $"{BoardContext.IconFor(type)} {type.ToString().Replace('_', ' ')}".Trim();
 
     internal static List<string> SkillsOf(WorkerPreference? pref)
     {
@@ -332,24 +540,40 @@ internal static class ScheduleBoardMapper
         return list.Where(s => !string.IsNullOrWhiteSpace(s)).Select(s => s.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
     }
 
-    // ---- header: "CODE (08:05 - 17:30) ⚠" + requirements note -------------------------------
-    private static void WriteHeader(
-        dynamic ws, Band band, int slot, DailyProjectSchedule data,
+    /// <summary>
+    /// Skills from the worker's preference row; when that row is missing or lists no skills, falls back to the
+    /// default skill of their staff_master department so every field worker has at least one skill.
+    /// </summary>
+    internal static List<string> SkillsFor(StaffInfo? staff, WorkerPreference? pref)
+    {
+        var skills = SkillsOf(pref);
+        if (skills.Count == 0 && staff != null && DefaultSkillForDepartment(staff.Department) is { } fallback)
+            skills.Add(fallback);
+        return skills;
+    }
+
+    private static string? DefaultSkillForDepartment(string? department) =>
+        (department ?? string.Empty).Trim().ToLowerInvariant() switch
+        {
+            "driver" => "Driver",
+            "operator" => "Excavator Operator",
+            "foreman" => "Foreman",
+            "worker" => "General Worker",
+            "mechanic" => "Mechanic",
+            "supervisor" => "Supervisor",
+            _ => null
+        };
+
+    // ---- header: "CODE ⚠" + derived "HH:mm - HH:mm" window + requirements note --------------------
+    private static (string Text, string? Window, string? Comment) BuildHeader(
+        DailyProjectSchedule data,
         Dictionary<(long StaffId, string ProjectId), List<WorkerProjectSpan>> spans,
         List<string> assignedSkills, List<VehicleType> assignedVehicleTypes)
     {
-        dynamic cell = ws.Cells[band.HeaderRow, SlotColumn(slot)];
-        if (data.ProjectID.Length == 0)
-        {
-            cell.Value2 = EmptyHeaderText;
-            try { cell.ClearComments(); } catch { }
-            return;
-        }
+        if (data.ProjectID.Length == 0) return (EmptyHeaderText, null, null);
 
         var window = AttendanceRollupService.WindowFor(data.ProjectID, spans);
-        string timeText = window.Start.HasValue
-            ? $" ({window.Start:HH:mm} - {(window.End.HasValue ? window.End.Value.ToString("HH:mm", CultureInfo.InvariantCulture) : "…")})"
-            : string.Empty;
+        string windowText = FormatSpan(window.Start, window.End);
 
         var info = Roster.FindProject(data.ProjectID);
         var (reqSkills, reqVehicles) = BoardContext.RequirementsFor(info?.Types ?? Array.Empty<ProjectType>());
@@ -357,36 +581,32 @@ internal static class ScheduleBoardMapper
         var missingVehicles = reqVehicles.Where(r => !assignedVehicleTypes.Contains(r)).ToList();
         bool unmet = missingSkills.Count > 0 || missingVehicles.Count > 0;
 
-        cell.Value2 = $"{data.ProjectID}{timeText}{(unmet ? " ⚠" : string.Empty)}";
-
-        try
+        string? comment = null;
+        if (reqSkills.Count > 0 || reqVehicles.Count > 0)
         {
-            cell.ClearComments();
-            if (reqSkills.Count > 0 || reqVehicles.Count > 0)
-            {
-                var sb = new StringBuilder();
-                sb.AppendLine($"Requirements ({string.Join(", ", info?.Types ?? Array.Empty<ProjectType>())})");
-                sb.AppendLine("Skills:   " + (reqSkills.Count == 0 ? "-" : string.Join(", ", reqSkills.Select(r => $"{BoardContext.IconFor(r)} {r} {(missingSkills.Contains(r) ? "✘" : "✔")}"))));
-                sb.Append("Vehicles: " + (reqVehicles.Count == 0 ? "-" : string.Join(", ", reqVehicles.Select(r => $"{BoardContext.IconFor(r)} {r.ToString().Replace('_', ' ')} {(missingVehicles.Contains(r) ? "✘" : "✔")}"))));
-                cell.AddComment(sb.ToString());
-            }
+            var sb = new StringBuilder();
+            sb.AppendLine($"Requirements ({string.Join(", ", info?.Types ?? Array.Empty<ProjectType>())})");
+            sb.AppendLine("Skills:   " + (reqSkills.Count == 0 ? "-" : string.Join(", ", reqSkills.Select(r => $"{BoardContext.IconFor(r)} {r} {(missingSkills.Contains(r) ? "✘" : "✔")}"))));
+            sb.Append("Vehicles: " + (reqVehicles.Count == 0 ? "-" : string.Join(", ", reqVehicles.Select(r => $"{BoardContext.IconFor(r)} {r.ToString().Replace('_', ' ')} {(missingVehicles.Contains(r) ? "✘" : "✔")}"))));
+            comment = sb.ToString();
         }
-        catch { /* comments are advisory */ }
+
+        return ($"{data.ProjectID}{(unmet ? " ⚠" : string.Empty)}", windowText, comment);
     }
 
     // =========================================================================
     // 6. CONDITIONAL FORMATS (duplicate worker = red, late check-in = amber)
     // =========================================================================
-    private static void EnsureConditionalFormats(dynamic ws, string cutOffText)
+    private static void EnsureConditionalFormats(dynamic ws, string cutOffText, int slotCount)
     {
         const int xlExpression = 2;
         foreach (var band in Bands)
         {
-            // Duplicate worker: same name anywhere in the band's 8 name columns.
-            var nameCols = Enumerable.Range(0, SlotCount).Select(s => ColumnLetter(SlotColumn(s))).ToList();
+            // Duplicate worker: same name anywhere in the band's name columns.
+            var nameCols = Enumerable.Range(0, slotCount).Select(s => ColumnLetter(SlotColumn(s))).ToList();
             string counts = string.Join("+", nameCols.Select(c => $"COUNTIF(${c}${band.FirstWorkerRow}:${c}${band.LastWorkerRow},{{0}})"));
 
-            for (int slot = 0; slot < SlotCount; slot++)
+            for (int slot = 0; slot < slotCount; slot++)
             {
                 string nameCol = ColumnLetter(SlotColumn(slot));
                 string timeCol = ColumnLetter(SlotColumn(slot) + 2);
@@ -408,7 +628,7 @@ internal static class ScheduleBoardMapper
                     dynamic times = ws.Range[$"{timeCol}{band.FirstWorkerRow}:{timeCol}{band.LastWorkerRow}"];
                     times.FormatConditions.Delete();
                     string first = $"{timeCol}{band.FirstWorkerRow}";
-                    dynamic late = times.FormatConditions.Add(xlExpression, Type.Missing, $"=AND(LEN({first})>=5,LEFT({first},5)>\"{cutOffText}\")");
+                    dynamic late = times.FormatConditions.Add(xlExpression, Type.Missing, $"=AND(LEN({first})>=5,ISNUMBER(--LEFT({first},2)),LEFT({first},5)>\"{cutOffText}\")");
                     late.Interior.Color = 10284031;  // RGB(255,235,156)
                     late.Font.Color = 22428;         // RGB(156,87,0)
                 }
@@ -435,8 +655,14 @@ internal static class ScheduleBoardMapper
     private static bool AppliesTo(dynamic cell)
     {
         if (!IsBoardSheet((object)cell.Worksheet)) return false;
-        var loc = Locate((int)cell.Row, (int)cell.Column);
-        return loc.Kind is CellKind.Header or CellKind.Worker or CellKind.Vehicle;
+        if (IsDateCell(cell) || IsDayCell(cell)) return true;   // A2: quick date picker, B2: day-of-week list
+
+        int row = (int)cell.Row, col = (int)cell.Column;
+        // The board width is dynamic: re-detect when the cell lies right of what we last saw.
+        if (col > LastBoardColumn && IsBoardArea(row, col)) _slotCount = Math.Max(_slotCount, DetectSlotCount((object)cell.Worksheet));
+
+        var loc = Locate(row, col);
+        return loc.Kind is CellKind.Header or CellKind.Worker or CellKind.WorkerSkill or CellKind.Vehicle or CellKind.VehicleType;
     }
 
     private static CustomDropdownResult? BuildDropdown(dynamic cell)
@@ -445,46 +671,115 @@ internal static class ScheduleBoardMapper
         object ws = cell.Worksheet;
         DateOnly date = ReadDate(ws) ?? DateOnly.FromDateTime(DateTime.Today);
 
+        if (IsDateCell(cell)) return BuildDateDropdown(date);
+        if (IsDayCell(cell)) return BuildDayDropdown();
+
         switch (loc.Kind)
         {
             case CellKind.Header:
-                return new CustomDropdownResult(
-                    Roster.Projects.Select((p, i) => new DropdownOption { Display = p.Id, Raw = p.Id, Section = i }).ToList(),
-                    (c, opt) => c.Value2 = opt.Raw);
-
-            case CellKind.Vehicle:
             {
-                var slot = ReadSlotContext(ws, date, loc);
-                var ranked = Roster.Vehicles
-                    .OrderBy(v => slot.RequiredVehicleTypes.Contains(v.Type) ? 0 : 1)
-                    .ThenBy(v => v.Plate, StringComparer.OrdinalIgnoreCase)
-                    .Select((v, i) => new DropdownOption { Display = v.Plate, Raw = v.Plate, Section = i })
-                    .ToList();
-                return new CustomDropdownResult(ranked, (c, opt) => c.Value2 = opt.Raw);
+                var active = Roster.ActiveProjectsOn(date).Select(p => p.Id).ToList();
+                var ordered = active.Concat(Roster.Projects.Select(p => p.Id).Where(id => !active.Contains(id, StringComparer.OrdinalIgnoreCase)))
+                    .Select((id, i) => new DropdownOption { Display = id, Raw = id, Section = i }).ToList();
+                return new CustomDropdownResult(ordered, (c, opt) => c.Value2 = opt.Raw);
             }
 
+            case CellKind.Vehicle:
+                return BuildVehicleDropdown(ws, date, loc, (int)cell.Row, (int)cell.Column);
+
             case CellKind.Worker:
-                return BuildWorkerDropdown(ws, date, loc);
+                return BuildWorkerDropdown(ws, date, loc, (int)cell.Row, (int)cell.Column);
+
+            case CellKind.WorkerSkill:
+                return BuildSkillDropdown(ws, date, loc);
+
+            case CellKind.VehicleType:
+                return BuildVehicleTypeDropdown(ws, date, loc);
 
             default:
                 return null;
         }
     }
 
+    /// <summary>A2 quick picks: the shown date +/- one week and today, oldest first. The pick fires the normal date-change flow.</summary>
+    private static CustomDropdownResult BuildDateDropdown(DateOnly shown)
+    {
+        DateOnly today = DateOnly.FromDateTime(DateTime.Today);
+        var options = Enumerable.Range(-7, 15).Select(o => shown.AddDays(o)).Append(today).Distinct().OrderBy(d => d)
+            .Select((d, i) => new DropdownOption
+            {
+                Display = d.ToString("ddd dd MMM yyyy", CultureInfo.InvariantCulture) + (d == today ? "  (Today)" : d == shown ? "  (Shown)" : string.Empty),
+                Raw = d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                Section = i
+            }).ToList();
+
+        return new CustomDropdownResult(options, (c, opt) =>
+            c.Value2 = DateOnly.ParseExact(opt.Raw, "yyyy-MM-dd", CultureInfo.InvariantCulture).ToDateTime(TimeOnly.MinValue).ToOADate());
+    }
+
+    /// <summary>B2 picks: Monday..Sunday (the <see cref="Days"/> enum). The pick fires the normal day-change flow.</summary>
+    private static CustomDropdownResult BuildDayDropdown()
+    {
+        var options = Enum.GetValues<Days>().Where(d => d != Days.None)
+            .Select((d, i) => new DropdownOption { Display = d.ToString(), Raw = d.ToString(), Section = i }).ToList();
+        return new CustomDropdownResult(options, (c, opt) => c.Value2 = opt.Raw);
+    }
+
+    /// <summary>
+    /// Vehicle Plate picks. Pending type filter: Vehicle Type (col + 1) holds a type while Vehicle Plate is still empty.
+    /// Vehicles of another type are greyed out and sorted last, but remain pickable.
+    /// </summary>
+    private static CustomDropdownResult BuildVehicleDropdown(object wsObj, DateOnly date, CellLocation loc, int row, int col)
+    {
+        var slot = ReadSlotContext(wsObj, date, loc);
+
+        string? typeFilter = null;
+        try
+        {
+            dynamic ws = wsObj;
+            string plateText = ((ws.Cells[row, col].Value2 as object)?.ToString() ?? string.Empty).Trim();
+            string typeText = ((ws.Cells[row, col + 1].Value2 as object)?.ToString() ?? string.Empty).Trim();
+            if (plateText.Length == 0 && typeText.Length > 0) typeFilter = typeText;
+        }
+        catch { /* filter is advisory */ }
+
+        var ranked = Roster.Vehicles
+            .Select(v => (Vehicle: v, IsMismatch: typeFilter != null && !MatchesTypeFilter(v.Type, typeFilter)))
+            .OrderBy(x => x.IsMismatch ? 1 : 0)
+            .ThenBy(x => slot.RequiredVehicleTypes.Contains(x.Vehicle.Type) ? 0 : 1)
+            .ThenBy(x => x.Vehicle.Plate, StringComparer.OrdinalIgnoreCase)
+            .Select((x, i) => new DropdownOption { Display = x.Vehicle.Plate, Raw = x.Vehicle.Plate, Section = i, IsValid = !x.IsMismatch })
+            .ToList();
+        return new CustomDropdownResult(ranked, (c, opt) => c.Value2 = opt.Raw);
+    }
+
     private const string TeamPrefix = "T:";
     private const string StaffPrefix = "S:";
 
-    private static CustomDropdownResult BuildWorkerDropdown(object wsObj, DateOnly date, CellLocation loc)
+    private static CustomDropdownResult BuildWorkerDropdown(object wsObj, DateOnly date, CellLocation loc, int row, int col)
     {
         var slot = ReadSlotContext(wsObj, date, loc);
         var scored = new List<(string Display, string Raw, int Percent, bool Blocked)>();
 
+        // Pending skill filter: Staff Skills (col + 1) holds a skill while Staff Name is still empty. Workers / teams
+        // without that skill are greyed out and sorted last, but remain pickable.
+        string? skillFilter = null;
+        try
+        {
+            dynamic ws = wsObj;
+            string nameText = ((ws.Cells[row, col].Value2 as object)?.ToString() ?? string.Empty).Trim();
+            string skillText = ((ws.Cells[row, col + 1].Value2 as object)?.ToString() ?? string.Empty).Trim();
+            if (nameText.Length == 0 && skillText.Length > 0) skillFilter = skillText;
+        }
+        catch { /* filter is advisory */ }
+
         var profiles = new Dictionary<long, WorkerProfile>();
-        foreach (var s in Roster.Staff.Where(s => s.ShortName.Length > 0 && s.IsActive))
+        foreach (var s in Roster.ActiveOn(date).Where(s => s.ShortName.Length > 0))
         {
             profiles[s.Id] = new WorkerProfile(s, BoardContext.PreferenceFor(s.Id), BoardContext.DaysWorkedEarlierThisWeek(s.Id, date), false);
             var r = ScheduleMatchEngine.Score(profiles[s.Id], slot);
-            scored.Add((ScheduleMatchEngine.WithPercent(s.ShortName, r.Percent), StaffPrefix + s.ShortName, r.Percent, r.Blocked));
+            bool blocked = r.Blocked || (skillFilter != null && !MatchesSkillFilter(s, skillFilter));
+            scored.Add((ScheduleMatchEngine.WithPercent(s.ShortName, r.Percent), StaffPrefix + s.ShortName, r.Percent, blocked));
         }
 
         foreach (var team in BoardContext.Teams.Where(t => !string.IsNullOrWhiteSpace(t.TeamName)))
@@ -494,7 +789,8 @@ internal static class ScheduleBoardMapper
                 .Select(p => profiles.TryGetValue(p.StaffID, out var wp) ? wp : null)
                 .Where(wp => wp != null).Select(wp => wp!).ToList();
             var r = ScheduleMatchEngine.ScoreTeam(members, slot);
-            scored.Add((ScheduleMatchEngine.WithPercent(team.TeamName.Trim(), r.Percent), TeamPrefix + team.TeamName.Trim(), r.Percent, r.Blocked));
+            bool blocked = r.Blocked || (skillFilter != null && !members.Any(m => MatchesSkillFilter(m.Staff, skillFilter)));
+            scored.Add((ScheduleMatchEngine.WithPercent(team.TeamName.Trim(), r.Percent), TeamPrefix + team.TeamName.Trim(), r.Percent, blocked));
         }
 
         var ordered = scored
@@ -511,9 +807,134 @@ internal static class ScheduleBoardMapper
                 : opt.Raw));
     }
 
-    private static SlotContext ReadSlotContext(object wsObj, DateOnly date, CellLocation loc)
+    // ---- Staff Skills <-> Staff Name -------------------------------------------------------------
+    private static bool HasSkill(StaffInfo staff, string skill) =>
+        SkillsFor(staff, BoardContext.PreferenceFor(staff.Id)).Contains(skill, StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>True when the worker holds a skill whose name or unicode icon equals the pending Staff Skills filter text.</summary>
+    private static bool MatchesSkillFilter(StaffInfo staff, string filter) =>
+        SkillsFor(staff, BoardContext.PreferenceFor(staff.Id)).Any(skill =>
+            skill.Equals(filter, StringComparison.OrdinalIgnoreCase) ||
+            BoardContext.IconFor(skill).Equals(filter, StringComparison.OrdinalIgnoreCase));
+
+    private static CustomDropdownResult BuildSkillDropdown(object wsObj, DateOnly date, CellLocation loc)
     {
-        var slots = Read(wsObj, date);
+        var slot = ReadSlotContext(wsObj, date, loc);
+        var required = slot.RequiredSkills.Where(s => !string.IsNullOrWhiteSpace(s)).ToList();
+        // Department fallback skills are included so workers without a worker_preferences row can still be picked.
+        var others = BoardContext.Preferences.SelectMany(p => SkillsOf(p))
+            .Concat(Roster.ActiveOn(date).SelectMany(s => SkillsFor(s, BoardContext.PreferenceFor(s.Id))))
+            .Where(s => !required.Contains(s, StringComparer.OrdinalIgnoreCase))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(s => s, StringComparer.OrdinalIgnoreCase);
+
+        var options = required.Concat(others).Distinct(StringComparer.OrdinalIgnoreCase)
+            .Select((s, i) => new DropdownOption { Display = $"{BoardContext.IconFor(s)} {s}".Trim(), Raw = s, Section = i })
+            .ToList();
+
+        return new CustomDropdownResult(options, (c, opt) => ApplySkillPick(c, date, loc, opt.Raw));
+    }
+
+    /// <summary>
+    /// A skill pick never auto-picks a worker. If the Staff Name cell (col - 1) already holds a worker with the skill it
+    /// is kept; otherwise Staff Name is cleared and the skill stays as a pending filter for the Staff Name dropdown
+    /// (<see cref="BuildWorkerDropdown"/>). The caller's change notification queues the refresh that derives icons.
+    /// </summary>
+    private static void ApplySkillPick(dynamic cell, DateOnly date, CellLocation loc, string skill)
+    {
+        _suppressNextHelperClear = true;   // this commit must never be read as the user clearing the row
+        object ws = cell.Worksheet;
+        int row = (int)cell.Row, col = (int)cell.Column;
+        dynamic nameCell = ((dynamic)ws).Cells[row, col - 1];
+
+        string current = ScheduleMatchEngine.StripPercent((nameCell.Value2 as object)?.ToString());
+        var existing = Roster.FindStaff(current);
+        if (existing == null || !HasSkill(existing, skill))
+            nameCell.ClearContents();
+
+        // The clicked cell must stay non-empty or the change observer reads it as "cleared".
+        string icon = BoardContext.IconFor(skill);
+        cell.Value2 = icon.Length > 0 ? icon : skill;
+    }
+
+    // ---- Vehicle Type <-> Vehicle Plate ----------------------------------------------------------
+    /// <summary>True when the pending Vehicle Type filter text is the type's unicode icon, its name, or legacy "Icon Name" text.</summary>
+    private static bool MatchesTypeFilter(VehicleType type, string filter) =>
+        BoardContext.IconFor(type).Equals(filter, StringComparison.OrdinalIgnoreCase) ||
+        type.ToString().Replace('_', ' ').Equals(filter.Replace('_', ' '), StringComparison.OrdinalIgnoreCase) ||
+        TypeText(type).Equals(filter, StringComparison.OrdinalIgnoreCase);
+
+    private static CustomDropdownResult BuildVehicleTypeDropdown(object wsObj, DateOnly date, CellLocation loc)
+    {
+        var slot = ReadSlotContext(wsObj, date, loc);
+        var options = Enum.GetValues<VehicleType>().Where(t => t != VehicleType.None)
+            .OrderBy(t => slot.RequiredVehicleTypes.Contains(t) ? 0 : 1)
+            .ThenBy(t => t.ToString(), StringComparer.OrdinalIgnoreCase)
+            .Select((t, i) => new DropdownOption { Display = TypeText(t), Raw = t.ToString(), Section = i })
+            .ToList();
+
+        return new CustomDropdownResult(options, (c, opt) => ApplyTypePick(c, date, loc, opt.Raw));
+    }
+
+    /// <summary>
+    /// Mirrors <see cref="ApplySkillPick"/>: a type pick never auto-picks a vehicle. If the Vehicle Plate cell (col - 1)
+    /// already holds a vehicle of that type it is kept; otherwise Vehicle Plate is cleared and the type stays as a
+    /// pending filter for the Vehicle Plate dropdown (<see cref="BuildVehicleDropdown"/>).
+    /// </summary>
+    private static void ApplyTypePick(dynamic cell, DateOnly date, CellLocation loc, string typeName)
+    {
+        _suppressNextHelperClear = true;   // this commit must never be read as the user clearing the row
+        if (!Enum.TryParse<VehicleType>(typeName, true, out var type) || type == VehicleType.None) return;
+
+        object ws = cell.Worksheet;
+        int row = (int)cell.Row, col = (int)cell.Column;
+        dynamic plateCell = ((dynamic)ws).Cells[row, col - 1];
+
+        string current = ((plateCell.Value2 as object)?.ToString() ?? string.Empty).Trim();
+        var existing = Roster.FindVehicle(current);
+        if (existing == null || existing.Type != type)
+            plateCell.ClearContents();
+
+        // The clicked cell must stay non-empty or the change observer reads it as "cleared".
+        string icon = BoardContext.IconFor(type);
+        cell.Value2 = icon.Length > 0 ? icon : TypeText(type);
+    }
+
+    // ---- clearing a helper cell clears its lead cell ---------------------------------------------
+    /// <summary>Set by <see cref="ApplySkillPick"/> / <see cref="ApplyTypePick"/>; the next helper-cell change is a dropdown commit, not a clear.</summary>
+    private static bool _suppressNextHelperClear;
+
+    /// <summary>True when a single Staff Skills / Vehicle Type cell was just emptied (the user is clearing the row).</summary>
+    internal static bool IsClearedHelperCell(dynamic target, out int row, out int col)
+    {
+        row = 0; col = 0;
+        try
+        {
+            if ((int)target.Cells.Count != 1) return false;
+            row = (int)target.Row; col = (int)target.Column;
+            if (Locate(row, col).Kind is not (CellKind.WorkerSkill or CellKind.VehicleType)) return false;
+            if (_suppressNextHelperClear)
+            {
+                _suppressNextHelperClear = false;
+                return false;
+            }
+            return string.IsNullOrWhiteSpace((target.Value2 as object)?.ToString());
+        }
+        catch { return false; }
+    }
+
+    /// <summary>Empties the Staff Name / Vehicle Plate left of a cleared helper cell. Caller owns the Excel freeze.</summary>
+    internal static void ClearLeadCell(object wsObj, int row, int helperColumn)
+    {
+        dynamic ws = wsObj;
+        ws.Cells[row, helperColumn - 1].ClearContents();
+    }
+
+    private static SlotContext ReadSlotContext(object wsObj, DateOnly date, CellLocation loc) =>
+        ReadSlotContext(Read(wsObj, date), date, loc);
+
+    private static SlotContext ReadSlotContext(List<DailyProjectSchedule> slots, DateOnly date, CellLocation loc)
+    {
         var mine = slots.FirstOrDefault(s => s.Shift == loc.Shift && s.SlotIndex == loc.Slot) ?? new DailyProjectSchedule { Shift = loc.Shift, SlotIndex = loc.Slot };
 
         var info = Roster.FindProject(mine.ProjectID);

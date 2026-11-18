@@ -1,9 +1,10 @@
-﻿namespace SKSB_App.Core.WorkbookSave.Entry;
+namespace SKSB_App.Core.WorkbookSave.Entry;
 
 using SKSB_App.Core.Diagnostics;
 using System;
 using System.Windows.Forms;
 using ExcelDna.Integration;
+using SKSB_App.Core.Integration.Database;
 using SKSB_App.Core.WorkbookOpen.Sheet;
 using SKSB_App.Core.WorkbookSave.Storage;
 using SKSB_App.Core.WorkbookSave.Validation;
@@ -41,6 +42,12 @@ public static class SaveEntry
                     return;
                 }
 
+                if (contract.ConfirmBeforeSave != null && !contract.ConfirmBeforeSave(data))
+                {
+                    AppLogger.Info($"[{contract.ModuleName}] Save cancelled at the pre-save confirmation.");
+                    return;
+                }
+
 #if DEBUG
                 // DEBUG ONLY: confirm before every commit. Rule 2 modal exception: unfreeze + hide floating widgets first.
                 SKSB_App.Core.RuntimeUI.DropDown.Arrow.HideAll();
@@ -60,7 +67,9 @@ public static class SaveEntry
                         try { xlApp.ScreenUpdating = false; } catch { }
                         break; // Proceed to contract.SaveToServer(data) below
                     case ExitResolution.SaveLocallyAndQuit:
-                        OfflineSnapshot.SaveOfflineSnapshot(data);
+                        contract.SaveOffline(data);
+                        ServerEnvironment.EnterOfflineMode("Saved records to local offline storage.");
+                        contract.UpdateWindowCaption();
                         contract.PopulateWorksheet?.Invoke(data);
                         try { ((dynamic)ExcelDnaUtil.Application).ActiveWorkbook.Saved = true; } catch { }
                         SaveNotificationDialog.ShowOffline(contract.ModuleName, "Debug: Records stashed to offline JSON storage.");
@@ -93,9 +102,12 @@ public static class SaveEntry
                 switch (conflictDialog.Resolution)
                 {
                     case ExitResolution.Retry:
+                        if (ServerEnvironment.IsOffline && !ServerEnvironment.SimulateOffline) ServerEnvironment.PingServer(out _);
                         continue;
                     case ExitResolution.SaveLocallyAndQuit:
-                        OfflineSnapshot.SaveOfflineSnapshot(data);
+                        contract.SaveOffline(data);
+                        ServerEnvironment.EnterOfflineMode("Saved records to local offline storage.");
+                        contract.UpdateWindowCaption();
                         contract.PopulateWorksheet?.Invoke(data);
                         try { ((dynamic)ExcelDnaUtil.Application).ActiveWorkbook.Saved = true; } catch { }
                         SaveNotificationDialog.ShowOffline(contract.ModuleName, "Saved records to local offline storage.");
@@ -184,6 +196,14 @@ public static class SaveEntry
                     return;
                 }
 
+                // Pre-save failsafe (e.g. past-record confirmation). Declining keeps the workbook open.
+                if (contract.ConfirmBeforeSave != null && !contract.ConfirmBeforeSave(data))
+                {
+                    AppLogger.Info($"[{contract.ModuleName}] Close cancelled at the pre-save confirmation.");
+                    cancel = true;
+                    return;
+                }
+
 #if DEBUG
                 // DEBUG ONLY: confirm before every commit. ScreenUpdating / EnableEvents are already true here (step 3 above).
                 using var closePrompt = new ExitConflictDialog(
@@ -198,7 +218,8 @@ public static class SaveEntry
                     case ExitResolution.Retry:
                         break; // Proceed to freeze + contract.SaveToServer(data) below
                     case ExitResolution.SaveLocallyAndQuit:
-                        OfflineSnapshot.SaveOfflineSnapshot(data);
+                        contract.SaveOffline(data);
+                        ServerEnvironment.EnterOfflineMode("Saved records to local offline storage.");
                         isExiting = true;
                         unEventHooks();
                         wb.Saved = true;
@@ -249,9 +270,11 @@ public static class SaveEntry
                 switch (dialog.Resolution)
                 {
                     case ExitResolution.Retry:
+                        if (ServerEnvironment.IsOffline && !ServerEnvironment.SimulateOffline) ServerEnvironment.PingServer(out _);
                         continue;
                     case ExitResolution.SaveLocallyAndQuit:
-                        OfflineSnapshot.SaveOfflineSnapshot(data);
+                        contract.SaveOffline(data);
+                        ServerEnvironment.EnterOfflineMode("Saved records to local offline storage.");
                         isExiting = true;
                         unEventHooks();
                         wb.Saved = true;

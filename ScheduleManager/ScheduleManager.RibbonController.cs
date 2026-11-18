@@ -1,6 +1,7 @@
-namespace SKSB_App.ScheduleManager;
+﻿namespace SKSB_App.ScheduleManager;
 
 using System;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -44,11 +45,11 @@ public class RibbonController : ManagerRibbonBase
     // =========================================================================
     protected override string GetCustomGroupsXml() => @"
                 <group id='grpScheduleDay' label='Working Day'>
-                  <button id='btnPrevDay' label='Previous Day' size='large' onAction='OnPreviousDayClicked'
+                  <button id='btnPrevDay' label='Previous Day' size='large' imageMso='LeftArrow2' onAction='OnPreviousDayClicked'
                           screentip='Previous Day' supertip='Loads the schedule for the day before the one on the board.' />
-                  <button id='btnToday' label='Today' size='large' onAction='OnTodayClicked'
+                  <button id='btnToday' label='Today' size='large' imageMso='DateAndTimeInsert' onAction='OnTodayClicked'
                           screentip='Today' supertip='Loads the schedule for today.' />
-                  <button id='btnNextDay' label='Next Day' size='large' onAction='OnNextDayClicked'
+                  <button id='btnNextDay' label='Next Day' size='large' imageMso='RightArrow2' onAction='OnNextDayClicked'
                           screentip='Next Day' supertip='Loads the schedule for the day after the one on the board.' />
                 </group>
                 <group id='grpScheduleAttendance' label='Attendance'>
@@ -93,13 +94,19 @@ public class RibbonController : ManagerRibbonBase
         ExcelAsyncUtil.QueueAsMacro(() =>
         {
             DateOnly date = Events.CurrentDate();
+            AppLogger.Info($"[ScheduleManager] Syncing thumbprint terminal ({DeviceSyncManager.DefaultIp})...");
+            string? addinDir = null;
+            try { addinDir = Path.GetDirectoryName(ExcelDnaUtil.XllPath); } catch { }
+            try { ((dynamic)ExcelDnaUtil.Application).StatusBar = $"Syncing thumbprint terminal ({DeviceSyncManager.DefaultIp})..."; } catch { }
             Task.Run(async () =>
             {
                 try
                 {
-                    var punches = await DeviceSyncManager.FetchPunchesAsync(since: date);
+                    var punches = await DeviceSyncManager.FetchPunchesAsync(since: date, addinDirectory: addinDir);
                     ExcelAsyncUtil.QueueAsMacro(() =>
                     {
+                        try
+                        {
                         var (added, duplicates, unknown) = SheetMapper.AppendTerminalPunches(punches);
                         MessageBox.Show(
                             $"Terminal {DeviceSyncManager.DefaultIp}: {punches.Count} punch(es) read.\n\n" +
@@ -108,13 +115,27 @@ public class RibbonController : ManagerRibbonBase
                             $"  Unknown staff / other dates : {unknown}\n\n" +
                             "Use 'Save to System' to persist the new entries.",
                             "Thumbprint Sync", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        }
+                        catch (Exception ex2)
+                        {
+                            AppLogger.Error("[ScheduleManager] Appending terminal punches failed", ex2);
+                            MessageBox.Show($"Appending terminal punches failed:\n\n{ex2.Message}", "Thumbprint Sync", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        }
+                        finally
+                        {
+                            try { ((dynamic)ExcelDnaUtil.Application).StatusBar = false; } catch { }
+                        }
                     });
                 }
                 catch (Exception ex)
                 {
                     AppLogger.Error("[ScheduleManager] Terminal sync failed", ex);
-                    ExcelAsyncUtil.QueueAsMacro(() => MessageBox.Show(
-                        $"Terminal sync failed:\n\n{ex.Message}", "Thumbprint Sync", MessageBoxButtons.OK, MessageBoxIcon.Error));
+                    ExcelAsyncUtil.QueueAsMacro(() =>
+                    {
+                        try { ((dynamic)ExcelDnaUtil.Application).StatusBar = false; } catch { }
+                        MessageBox.Show(
+                            $"Terminal sync failed:\n\n{ex.Message}", "Thumbprint Sync", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    });
                 }
             });
         });

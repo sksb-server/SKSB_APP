@@ -96,7 +96,7 @@ internal static class ScheduleMatchEngine
         if (blacklisted) { score -= 40; notes.Add("blacklisted skill"); }
 
         int percent = (int)Math.Round(Math.Clamp(score, 0, 100));
-        return new MatchResult(percent, blacklisted || worker.IsUnavailableToday || !worker.Staff.IsActive, string.Join(", ", notes));
+        return new MatchResult(percent, blacklisted || worker.IsUnavailableToday || !Roster.IsActiveOn(worker.Staff, slot.Date), string.Join(", ", notes));
     }
 
     /// <summary>A team's score is the mean of its members' scores.</summary>

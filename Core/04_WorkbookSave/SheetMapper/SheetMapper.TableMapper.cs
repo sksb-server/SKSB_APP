@@ -1,4 +1,4 @@
-namespace SKSB_App.Core.WorkbookSave.SheetMapper;
+﻿namespace SKSB_App.Core.WorkbookSave.SheetMapper;
 
 using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.RuntimeUI.RuleEngine;
@@ -252,7 +252,6 @@ public static class TableMapper
 
                 // 0. PRE-READ FORMATS (Crucial: Read these BEFORE setting colRange.Style, 
                 // because colRange includes archCell and applying a named style overwrites its custom decimals)
-                string archStyleName = archCell.Style?.Name?.ToString() ?? string.Empty;
                 string archFmt = string.Empty;
                 dynamic? archFmtLocal = null;
                 try
@@ -308,12 +307,6 @@ public static class TableMapper
                     worksheet.Cells[headerRow + 1, binding.ColumnIndex],
                     worksheet.Cells[headerRow + effectiveRows, binding.ColumnIndex]
                 ];
-
-                // 1. Inherit Archetype Named Style across all populated rows
-                if (!string.IsNullOrEmpty(archStyleName) && !archStyleName.Equals("Normal", StringComparison.OrdinalIgnoreCase))
-                {
-                    try { colRange.Style = archStyleName; } catch { }
-                }
 
                 // 2. Preserve explicit column NumberFormat using the pre-read values
                 if (isTextFormattedCell)

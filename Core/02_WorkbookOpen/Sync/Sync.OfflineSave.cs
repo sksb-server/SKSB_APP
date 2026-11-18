@@ -1,7 +1,8 @@
-﻿namespace SKSB_App.Core.WorkbookOpen.Sync;
+namespace SKSB_App.Core.WorkbookOpen.Sync;
 
 using ExcelDna.Integration;
 using SKSB_App.Core.Diagnostics;
+using SKSB_App.Core.Integration.Database;
 using SKSB_App.Core.WorkbookOpen.Sheet;
 using SKSB_App.Core.WorkbookSave.Entry;
 using SKSB_App.Core.WorkbookSave.Storage;
@@ -28,11 +29,23 @@ public static class OfflineSave
             dynamic? activeSheetBefore = null;
             try { activeSheetBefore = xlApp.ActiveSheet; } catch { }
 
+            // Make Online/Offline authoritative BEFORE any lookup sync or fetch decides where to read from.
+            bool online = ServerEnvironment.PingServer(out string pingError);
+            AppLogger.Info($"Startup ping: {(online ? "ONLINE" : $"OFFLINE ({pingError})")}");
+            contract.UpdateWindowCaption();
+
             AppLogger.Info("Calling contract.SyncLookups...");
             contract.SyncLookups?.Invoke(false);
 
             bool hasPending = OfflineSnapshot.HasPendingSnapshot<T>();
             AppLogger.Info($"HasPendingSnapshot<{typeof(T).Name}> = {hasPending}");
+
+            // Offline Mode: never try to upload; the pending file stays queued until the server is reachable.
+            if (ServerEnvironment.IsOffline)
+            {
+                LoadOfflineSnapshotIntoWorkbook(contract, xlApp, activeSheetBefore, hasPending);
+                return;
+            }
 
             if (hasPending)
             {
@@ -109,7 +122,8 @@ public static class OfflineSave
                             try { origCalculation = (int)xlApp.Calculation; xlApp.Calculation = -4135; /* xlCalculationManual */ } catch { }
                             try
                             {
-                                contract.PopulateWorksheet?.Invoke(pendingData!);
+                                var authoritative = contract.FetchFromServer != null ? contract.FetchFromServer() : default;
+                                contract.PopulateWorksheet?.Invoke(authoritative ?? pendingData!);
                                 if (activeSheetBefore != null)
                                 {
                                     try { activeSheetBefore.Activate(); } catch { }
@@ -177,7 +191,10 @@ public static class OfflineSave
                         try { xlApp.ScreenUpdating = origUpdating; } catch { }
                     }
 
-                    SheetOperations.ShowStatusConfirmation($"{contract.ModuleName} records loaded from server.");
+                    SheetOperations.ShowStatusConfirmation(ServerEnvironment.IsOffline
+                        ? $"[OFFLINE MODE] {contract.ModuleName} loaded from local offline snapshot (server became unreachable)."
+                        : $"{contract.ModuleName} records loaded from server.");
+                    contract.UpdateWindowCaption();
                 }
             }
         }
@@ -185,5 +202,41 @@ public static class OfflineSave
         {
             AppLogger.Error("OfflineSave.HandleStartup failed", ex);
         }
+    }
+
+    /// <summary>Offline Mode startup: loads the local snapshot (and auxiliary snapshots) into the workbook.</summary>
+    private static void LoadOfflineSnapshotIntoWorkbook<T>(SaveContract<T> contract, dynamic xlApp, dynamic? activeSheetBefore, bool hasPending)
+    {
+        AppLogger.Info("OFFLINE MODE: loading local offline snapshot (no upload attempted).");
+        var data = contract.FetchFromServer != null ? contract.FetchFromServer() : OfflineSnapshot.Load<T>();
+        bool isEmpty = contract.IsDatasetEmpty(data);
+
+        if (data != null && (!isEmpty || contract.PopulateStartupWhenEmpty))
+        {
+            bool origUpdating = true;
+            bool origEvents = true;
+            int origCalculation = -4105; // xlCalculationAutomatic
+            try { origUpdating = (bool)xlApp.ScreenUpdating; xlApp.ScreenUpdating = false; } catch { }
+            try { origEvents = (bool)xlApp.EnableEvents; xlApp.EnableEvents = false; } catch { }
+            try { origCalculation = (int)xlApp.Calculation; xlApp.Calculation = -4135; /* xlCalculationManual */ } catch { }
+            try
+            {
+                contract.PopulateWorksheet?.Invoke(data);
+                if (activeSheetBefore != null)
+                {
+                    try { activeSheetBefore.Activate(); } catch { }
+                }
+            }
+            finally
+            {
+                try { xlApp.Calculation = origCalculation; } catch { }
+                try { xlApp.EnableEvents = origEvents; } catch { }
+                try { xlApp.ScreenUpdating = origUpdating; } catch { }
+            }
+        }
+
+        SheetOperations.ShowStatusConfirmation(hasPending
+            ? $"[OFFLINE MODE] {contract.ModuleName} loaded from local offline snapshot (pending upload queued)."
+            : $"[OFFLINE MODE] {contract.ModuleName} loaded from local offline snapshot.");
     }
 }

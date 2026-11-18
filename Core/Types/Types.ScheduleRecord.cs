@@ -62,6 +62,12 @@ public record ScheduleRecord
     /// <summary>The working date the date-scoped collections below belong to.</summary>
     public DateOnly DailyScheduleDate { get; set; } = DateOnly.FromDateTime(DateTime.Today);
 
+    /// <summary>Late Checked In Cut Off Time for <see cref="DailyScheduleDate"/> (Daily Attendances C2). Default 11:00.</summary>
+    public TimeOnly LateCutOffTime { get; set; } = new(11, 0);
+
+    /// <summary>OT Start Time for <see cref="DailyScheduleDate"/> (Daily Attendances D2). Default 18:00.</summary>
+    public TimeOnly OTStartTime { get; set; } = new(18, 0);
+
     /// <summary>Day / Night dispatch board slots (8 per band) for <see cref="DailyScheduleDate"/>.</summary>
     public List<DailyProjectSchedule> Projects { get; set; } = new();
 
@@ -205,15 +211,6 @@ public record DailyWorkerAttendance
     [ExcelColumn("Total Flattened Hours")]
     [ColumnFormat(ColumnFormatKind.Hours)]
     public decimal TotalFlattenedHours { get; set; }
-
-    [ExcelColumn("Manual Override")]
-    [ColumnRule("AttendanceStatusList", IsRequired = false)]
-    [ColumnDefault(DefaultKind.Literal, literalValue: "None")]
-    public AttendanceStatus ManualOverride { get; set; } = AttendanceStatus.None;
-
-    [ExcelColumn("Override Reason")]
-    [ColumnRule(IsRequired = false)]
-    public string OverrideReason { get; set; } = string.Empty;
 
     [ExcelColumn("Is Allocated")]
     [ColumnRule(IsRequired = false)]

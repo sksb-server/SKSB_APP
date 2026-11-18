@@ -1,4 +1,4 @@
-﻿[CmdletBinding()]
+[CmdletBinding()]
 param(
     [Parameter(Position = 0, Mandatory = $false, HelpMessage = "Optional version (e.g. 1.1.0 or v1.1.0). Omit to auto-increment patch.")]
     [string]$ReleaseVersion = "",
@@ -132,6 +132,13 @@ foreach ($proj in ($RequiredAddInProjects + $OptionalAddInProjects)) {
     Get-ChildItem -Path $rel -Filter "*.dna" -File | ForEach-Object {
         Copy-Item $_.FullName -Destination (Join-Path $StagingDir "AddIns") -Force
     }
+}
+
+# 6b. ZkBridge helper (standalone console, no Excel-DNA)
+$zkRel = Join-Path $ScriptDir "ZkBridge\bin\Release\net8.0-windows"
+foreach ($n in @("ZkBridge.exe","ZkBridge.dll","ZkBridge.deps.json","ZkBridge.runtimeconfig.json")) {
+    $src = Join-Path $zkRel $n
+    if (Test-Path $src) { Copy-Item $src -Destination (Join-Path $StagingDir "AddIns") -Force }
 }
 
 # 7. Write and stage version.json (repo copy is written only after a successful upload)

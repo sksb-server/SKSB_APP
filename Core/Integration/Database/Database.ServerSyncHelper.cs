@@ -14,13 +14,13 @@ using SKSB_App.Core.WorkbookSave.Storage;
 public static class ServerSyncHelper
 {
     // =========================================================================
-    // 1. FETCH WITH OFFLINE FALLBACK
+    // 1. FETCH (ONLINE = SERVER ONLY, OFFLINE = LOCAL SNAPSHOT ONLY)
     // =========================================================================
 
     /// <summary>
-    /// Runs <paramref name="dbFetcher"/> against PostgreSQL and caches the result to the local JSON snapshot.
-    /// Falls back to <see cref="OfflineSnapshot.Load{T}"/> when the server is (simulated) offline, the query
-    /// throws, or the fetcher returns null (the fetcher's way of saying "nothing usable on the server").
+    /// Online Mode: runs <paramref name="dbFetcher"/> against PostgreSQL and returns the result; a null result or a
+    /// non-connection failure yields null (never snapshot data). Offline Mode (or a connection failure, which flips
+    /// the app into Offline Mode): returns <see cref="OfflineSnapshot.Load{T}"/>. Fetching never writes the snapshot.
     /// </summary>
     public static T? FetchWithOfflineFallback<T>(
         string scopeName,
@@ -30,37 +30,29 @@ public static class ServerSyncHelper
     {
         using var _ = AppLogger.Scope(scopeName);
 
-        try
+        if (ServerEnvironment.IsOnline)
         {
-            if (!ServerEnvironment.SimulateOffline)
+            try
             {
                 T? result = dbFetcher(new PostgreSqlService());
-                if (result != null)
-                {
-                    if (saveSnapshot)
-                    {
-                        // A cache write failure must never discard a successful server read.
-                        try { OfflineSnapshot.Save(result, writeToDatabase: false); }
-                        catch (Exception exCache) { AppLogger.Warn($"[{scopeName}] Snapshot cache write failed: {exCache.Message}"); }
-                    }
-
 #if DEBUG
-                    if (debugFormatter != null)
-                    {
-                        AppLogger.Info($"[PostgreSQL Download - {scopeName}]\n{debugFormatter(result)}");
-                    }
-#endif
-                    return result;
+                if (result != null && debugFormatter != null)
+                {
+                    AppLogger.Info($"[PostgreSQL Download - {scopeName}]\n{debugFormatter(result)}");
                 }
+#endif
+                return result;
             }
-        }
-        catch (Exception ex)
-        {
-            AppLogger.Error($"[{scopeName}] Server fetch failed; falling back to offline snapshot", ex);
+            catch (Exception ex)
+            {
+                AppLogger.Error($"[{scopeName}] Server fetch failed", ex);
+                if (ServerEnvironment.IsConnectionException(ex)) ServerEnvironment.EnterOfflineMode(ex.Message);
+                else return default; // Online + SQL error: never mix in offline data.
+            }
         }
 
         T? fallback = OfflineSnapshot.Load<T>();
-        AppLogger.Warn($"[{scopeName}] Offline fallback: {(fallback == null ? "no local snapshot found" : "loaded local snapshot")}.");
+        AppLogger.Warn($"[{scopeName}] OFFLINE MODE: {(fallback == null ? "no local snapshot found" : "loaded local snapshot")}.");
         return fallback;
     }
 
@@ -69,9 +61,9 @@ public static class ServerSyncHelper
     // =========================================================================
 
     /// <summary>
-    /// Runs <paramref name="dbFetcher"/> and treats the result as authoritative even when empty: the local snapshot
-    /// is refreshed (so a stale cache can never resurrect wiped data) and the list is returned as-is.
-    /// The offline snapshot is used only when the server is (simulated) offline or the query throws.
+    /// Online Mode: the server result is authoritative even when empty (never mixed with the snapshot).
+    /// Offline Mode (or a connection failure that flips the app offline): the local snapshot is used.
+    /// A non-connection error while online is logged and yields an empty list. Never writes the snapshot.
     /// </summary>
     public static List<T> FetchAuthoritativeList<T>(
         string module,
@@ -81,37 +73,32 @@ public static class ServerSyncHelper
     {
         using var _ = AppLogger.Scope($"{module}.Fetch {tableLabel}");
 
-        if (ServerEnvironment.SimulateOffline)
+        if (ServerEnvironment.IsOnline)
         {
-            OfflineSnapshot.LogDataSource(module, tableLabel, "OFFLINE CACHE", "Simulate Server Offline is ON");
-            return OfflineSnapshot.Load<List<T>>() ?? new List<T>();
-        }
-
-        try
-        {
-            var list = dbFetcher(new PostgreSqlService());
-
-            // A cache write failure must never discard a successful server read.
-            try { OfflineSnapshot.Save(list, writeToDatabase: false); }
-            catch (Exception exCache) { AppLogger.Warn($"[{module}] {tableLabel} snapshot cache write failed: {exCache.Message}"); }
-
-            OfflineSnapshot.LogDataSource(module, tableLabel, "SERVER", list.Count == 0 ? "server reachable but empty; local cache reset (no offline fallback)" : $"{list.Count} row(s)");
-#if DEBUG
-            if (debugFormatter != null)
+            try
             {
-                AppLogger.Info($"[PostgreSQL Download - {tableLabel}]\n{debugFormatter(list)}");
-            }
+                var list = dbFetcher(new PostgreSqlService());
+                OfflineSnapshot.LogDataSource(module, tableLabel, "SERVER", list.Count == 0 ? "server reachable but empty" : $"{list.Count} row(s)");
+#if DEBUG
+                if (debugFormatter != null)
+                {
+                    AppLogger.Info($"[PostgreSQL Download - {tableLabel}]\n{debugFormatter(list)}");
+                }
 #endif
-            return list;
+                return list;
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error($"[{module}] {tableLabel} server query failed", ex);
+                if (ServerEnvironment.IsConnectionException(ex)) ServerEnvironment.EnterOfflineMode(ex.Message);
+                else return new List<T>(); // Online + SQL error: never mix in offline data.
+            }
         }
-        catch (Exception ex)
-        {
-            AppLogger.Error($"[{module}] {tableLabel} server query failed", ex);
-            OfflineSnapshot.LogDataSource(module, tableLabel, "OFFLINE CACHE", $"server query failed: {ex.GetType().Name}: {ex.Message}");
-            var fallback = OfflineSnapshot.Load<List<T>>() ?? new List<T>();
-            AppLogger.Warn($"[{module}] Offline fallback: loaded {fallback.Count} {tableLabel} row(s) from the local snapshot.");
-            return fallback;
-        }
+
+        OfflineSnapshot.LogDataSource(module, tableLabel, "OFFLINE CACHE", ServerEnvironment.LastOfflineReason);
+        var fallback = OfflineSnapshot.Load<List<T>>() ?? new List<T>();
+        AppLogger.Warn($"[{module}] OFFLINE MODE: loaded {fallback.Count} {tableLabel} row(s) from the local snapshot.");
+        return fallback;
     }
 
     /// <summary>Server-authoritative fetch of a lookup / auxiliary table with a plain Dapper-mapped query.</summary>
@@ -155,7 +142,7 @@ public static class ServerSyncHelper
 
     /// <summary>
     /// Runs <paramref name="preSaveAuxiliary"/> (reference / lookup tables), then persists <paramref name="data"/>
-    /// through <see cref="OfflineSnapshot.Save{T}"/> with server dispatch. Any failure is captured into
+    /// to PostgreSQL via <see cref="ServerDispatcher.Dispatch{T}"/> and only then refreshes the local snapshot. Any failure is captured into
     /// <paramref name="errorMessage"/> instead of being thrown. An empty collection is treated as
     /// "nothing to persist" and succeeds without touching the snapshot or the server.
     /// </summary>
@@ -169,8 +156,10 @@ public static class ServerSyncHelper
             if (data == null) return true;
             if (data is ICollection { Count: 0 }) return true;
 
-            string snapshotPath = OfflineSnapshot.Save(data, writeToDatabase: true);
-            return !string.IsNullOrEmpty(snapshotPath);
+            // Database first: a failed save must never overwrite the local snapshot.
+            ServerDispatcher.Dispatch(data);
+            OfflineSnapshot.Save(data, writeToDatabase: false);
+            return true;
         }
         catch (Exception ex)
         {

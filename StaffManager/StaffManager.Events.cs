@@ -1,5 +1,9 @@
-﻿namespace SKSB_App.StaffManager;
+namespace SKSB_App.StaffManager;
 
+using SKSB_App.Core.Diagnostics;
+using SKSB_App.Core.Integration.Database;
+using SKSB_App.Core.WorkbookSave.Storage;
+using System;
 using System.Collections.Generic;
 using System.Linq;
 using SKSB_App.Core.RuntimeUI.DateFilter;
@@ -33,6 +37,7 @@ public class Events : ManagerEventsBase<List<StaffRecord>>
         ExtractAndValidate = () => SheetMapper.ExtractStaffRecordsWithDiagnostics(),
         IsDatasetEmpty = list => list == null || list.Count == 0,
         SaveToServer = list => (ServerSyncCommands.SaveStaffSilent(list, out string err), err),
+        SaveToOffline = list => ServerSyncCommands.SaveStaffOffline(list),
         PopulateWorksheet = list => SheetMapper.PopulateWorksheet(list),
         FetchFromServer = () => ServerSyncCommands.FetchStaffRecords(),
         ValidateOfflinePayload = list => list != null && list.Count > 0 && list.TrueForAll(s => s.StaffID > 0),
@@ -55,14 +60,35 @@ public class Events : ManagerEventsBase<List<StaffRecord>>
     // =========================================================================
     protected override void SyncCustomLookups(bool isInteractive)
     {
-        // External Vehicle Plates -> 'Data' sheet
+        // External Vehicle Plates -> 'Data' sheet. Online Mode: PostgreSQL only; Offline Mode: local snapshot only.
         DataList.SyncProperty<VehicleRecord, string>(
             v => v.VehiclePlate,
+            LoadVehiclePlates(),
             customListName: "VehiclePlateList"
         );
 
         // SkillLicenseTypesTable & SkillLicenseTypeList
         SheetMapper.PopulateSkillLicenseTypesTable(showDialogIfFailed: isInteractive);
+    }
+
+    private static List<VehicleRecord> LoadVehiclePlates()
+    {
+        if (ServerEnvironment.IsOnline)
+        {
+            try
+            {
+                return new PostgreSqlService()
+                    .Query<string>("SELECT vehicle_plate FROM vehicle_master ORDER BY vehicle_plate;")
+                    .Select(p => new VehicleRecord { VehiclePlate = p })
+                    .ToList();
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Warn($"[StaffManager] vehicle_master query failed: {ex.Message}");
+                if (!ServerEnvironment.IsOffline) return new List<VehicleRecord>();
+            }
+        }
+        return OfflineSnapshot.Load<List<VehicleRecord>>() ?? new List<VehicleRecord>();
     }
 
     // =========================================================================

@@ -29,6 +29,10 @@ public abstract class ManagerRibbonBase : ExcelRibbon
 {
     protected static IRibbonUI? RibbonUi { get; private set; }
 
+    private static bool _statusHooked;
+    private static Action? _statusChangedHandler; // pinned static delegate (CLAUDE.md Rule 4)
+    private static ISaveContract? _statusContract;
+
     // =========================================================================
     // 1. MODULE DESCRIPTOR & CUSTOMIZATION HOOKS
     // =========================================================================
@@ -63,7 +67,8 @@ public abstract class ManagerRibbonBase : ExcelRibbon
         <customUI xmlns='http://schemas.microsoft.com/office/2009/07/customui' onLoad='OnRibbonLoad'>
           <ribbon>
             <tabs>
-              <tab id='{TabId}' label='{Esc(TabLabel)}'>
+              <tab id='{TabId}' getLabel='GetTabLabel'>
+                {BuildServerStatusGroupXml()}
                 {PersistenceGroupXml}
                 {GetCustomGroupsXml()}
                 {(ShowRowManagementGroup ? BuildRowManagementGroupXml() : string.Empty)}
@@ -102,6 +107,26 @@ public abstract class ManagerRibbonBase : ExcelRibbon
                           supertip='{Esc(saveSupertip)}'
                           onAction='OnSaveClicked' />
                   {extraControlsXml}
+                </group>";
+    }
+
+    /// <summary>Online/Offline status display plus the Ping Server (go online) button.</summary>
+    protected static string BuildServerStatusGroupXml()
+    {
+        return @"
+                <group id='grpServerStatus' getLabel='GetServerStatusGroupLabel'>
+                  <box id='boxServerStatus' boxStyle='vertical'>
+                    <labelControl id='lblServerMode' getLabel='GetServerModeLabel' />
+                    <labelControl id='lblServerSource' getLabel='GetServerSourceLabel' />
+                    <labelControl id='lblServerPending' getLabel='GetServerPendingLabel' />
+                  </box>
+                  <button id='btnPingServer'
+                          size='large'
+                          getLabel='GetPingServerButtonLabel'
+                          getImage='GetPingServerImage'
+                          screentip='Ping PostgreSQL Server'
+                          supertip='Tests the connection to the PostgreSQL server (192.168.0.20:5432) and brings the app back online when it is reachable.'
+                          onAction='OnPingServerClicked' />
                 </group>";
     }
 
@@ -157,7 +182,7 @@ public abstract class ManagerRibbonBase : ExcelRibbon
                   <toggleButton id='btnToggleOffline'
                                 label='Simulate Server Offline'
                                 size='large'
-                                imageMso='AccessSetOfflineStatus'
+                                imageMso='HighImportance'
                                 getPressed='GetSimulateOfflinePressed'
                                 onAction='OnToggleOfflineClicked' />
                 </group>";
@@ -172,7 +197,120 @@ public abstract class ManagerRibbonBase : ExcelRibbon
     // =========================================================================
     // 3. PERSISTENCE CALLBACKS
     // =========================================================================
-    public void OnRibbonLoad(IRibbonUI ribbon) => RibbonUi = ribbon;
+    public void OnRibbonLoad(IRibbonUI ribbon)
+    {
+        RibbonUi = ribbon;
+        _statusContract = Contract;
+        if (_statusHooked) return;
+        _statusHooked = true;
+        _statusChangedHandler = () =>
+        {
+            try { RibbonUi?.Invalidate(); } catch { }
+            ExcelAsyncUtil.QueueAsMacro(() =>
+            {
+                try { _statusContract?.UpdateWindowCaption(); } catch { }
+            });
+        };
+        ServerEnvironment.StatusChanged += _statusChangedHandler;
+    }
+
+    // =========================================================================
+    // 3a. SERVER STATUS CALLBACKS
+    // =========================================================================
+    public string GetTabLabel(IRibbonControl control)
+        => ServerEnvironment.IsOffline ? $"{TabLabel} [OFFLINE MODE]" : TabLabel;
+
+    public string GetServerStatusGroupLabel(IRibbonControl control)
+        => ServerEnvironment.IsOffline ? "⚠ OFFLINE MODE" : "Server Status";
+
+    public string GetServerModeLabel(IRibbonControl control)
+        => ServerEnvironment.IsOffline ? "STATUS: OFFLINE MODE" : "STATUS: ONLINE";
+
+    public string GetServerSourceLabel(IRibbonControl control)
+        => ServerEnvironment.IsOffline ? "Source: Local Offline Snapshot" : "Source: PostgreSQL Server";
+
+    public string GetServerPendingLabel(IRibbonControl control)
+        => Contract.HasPendingUpload ? "Pending Upload: YES (Uncommitted)" : "Pending Upload: None";
+
+    public string GetPingServerButtonLabel(IRibbonControl control)
+        => ServerEnvironment.IsOffline ? "Ping Server\n(Go Online)" : "Ping Server\n(Online)";
+
+    public object? GetPingServerImage(IRibbonControl control)
+    {
+        try
+        {
+            string mso = ServerEnvironment.IsOffline ? "HighImportance" : "Refresh";
+            dynamic xlApp = ExcelDnaUtil.Application;
+            return xlApp.CommandBars.GetImageMso(mso, 32, 32);
+        }
+        catch
+        {
+            return null;
+        }
+    }
+
+    public void OnPingServerClicked(IRibbonControl control)
+    {
+        try
+        {
+#if DEBUG
+            if (ServerEnvironment.SimulateOffline)
+            {
+                var answer = MessageBox.Show(
+                    "Offline simulation is ON.\n\nDisable the simulation and reconnect to the server?",
+                    "Simulated Offline", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                if (answer == DialogResult.Yes) ServerEnvironment.SimulateOffline = false;
+            }
+#endif
+            bool online = ServerEnvironment.PingServer(out string err);
+            RibbonUi?.Invalidate();
+
+            if (!online)
+            {
+                MessageBox.Show(
+                    $"The PostgreSQL server is still unreachable.\n\n{err}\n\nThe app remains in OFFLINE MODE.",
+                    "Server Unreachable", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                return;
+            }
+
+            // Ribbon callback: defer all worksheet / dialog work to the macro thread.
+            ExcelAsyncUtil.QueueAsMacro(() =>
+            {
+                try
+                {
+                    Contract.UpdateWindowCaption();
+                    SheetOperations.ShowStatusConfirmation($"Server reachable: {Contract.ModuleName} is back in Online Mode.");
+
+                    var choice = MessageBox.Show(
+                        "Server is reachable. The app is back in ONLINE MODE.\n\n" +
+                        "  Yes:     Save the current worksheet records to the server now.\n" +
+                        "  No:      Discard any pending offline upload and reload the latest records from the server.\n" +
+                        "  Cancel:  Stay on the current sheet without syncing yet.",
+                        $"{Contract.ModuleName} - Back Online",
+                        MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
+
+                    if (choice == DialogResult.Yes)
+                    {
+                        Contract.Save();
+                    }
+                    else if (choice == DialogResult.No)
+                    {
+                        Contract.ClearPendingUpload();
+                        OnLoadClicked(control);
+                    }
+                    RibbonUi?.Invalidate();
+                }
+                catch (Exception ex)
+                {
+                    AppLogger.Error($"[{Contract.ModuleName}] Post-ping handling failed", ex);
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error($"[{Contract.ModuleName}] Ping server failed", ex);
+        }
+    }
 
     public virtual void OnLoadClicked(IRibbonControl control)
     {
@@ -196,6 +334,11 @@ public abstract class ManagerRibbonBase : ExcelRibbon
                 try
                 {
                     populate();
+                    Contract.UpdateWindowCaption();
+                    SheetOperations.ShowStatusConfirmation(ServerEnvironment.IsOffline
+                        ? $"[OFFLINE MODE] {Contract.ModuleName} records loaded from local offline snapshot."
+                        : $"{Contract.ModuleName} records loaded from server (Online Mode).");
+                    RibbonUi?.Invalidate();
                 }
                 catch (Exception ex)
                 {

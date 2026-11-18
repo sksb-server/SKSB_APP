@@ -11,4 +11,5 @@
   <Project Path="ScheduleManager/ScheduleManager.csproj" />
   <Project Path="StaffManager/StaffManager.csproj" />
   <Project Path="VehicleManager/VehicleManager.csproj" />
+  <Project Path="ZkBridge/ZkBridge.csproj" />
 </Solution>

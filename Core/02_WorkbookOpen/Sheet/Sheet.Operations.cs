@@ -1,4 +1,4 @@
-﻿namespace SKSB_App.Core.WorkbookOpen.Sheet;
+namespace SKSB_App.Core.WorkbookOpen.Sheet;
 
 using System;
 using ExcelDna.Integration;
@@ -100,7 +100,9 @@ public static class SheetOperations
             dynamic xlApp = ExcelDnaUtil.Application;
             if (xlApp != null)
             {
-                xlApp.StatusBar = $"[SKSB System] {message}";
+                bool offlineTag = SKSB_App.Core.Integration.Database.ServerEnvironment.IsOffline
+                    && !message.Contains("[OFFLINE MODE]", StringComparison.Ordinal);
+                xlApp.StatusBar = $"[SKSB System] {(offlineTag ? "[OFFLINE MODE] " : string.Empty)}{message}";
             }
         }
         catch { }

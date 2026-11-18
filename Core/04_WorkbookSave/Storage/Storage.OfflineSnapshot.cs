@@ -1,4 +1,4 @@
-﻿namespace SKSB_App.Core.WorkbookSave.Storage;
+namespace SKSB_App.Core.WorkbookSave.Storage;
 
 using System;
 using System.IO;
@@ -166,11 +166,17 @@ public static class OfflineSnapshot
     }
 
     public static string GetPendingUploadPath<T>() =>
-        FolderRegistry.Data.GetFilePath($"{typeof(T).Name}_PendingUpload.json");
+        FolderRegistry.Data.GetFilePath($"{ResolveTypeName(typeof(T)).ToLowerInvariant()}_PendingUpload.json");
 
+    /// <summary>
+    /// Offline save: refreshes the module's local cache (<c>*_data.json</c>) AND queues the same payload as a
+    /// pending upload (<c>*_PendingUpload.json</c>) for commit once the server is reachable again.
+    /// </summary>
     public static string SaveOfflineSnapshot<T>(T data)
     {
         FolderRegistry.Data.EnsureExists();
+        if (data != null) Save(data, writeToDatabase: false);
+
         string filePath = GetPendingUploadPath<T>();
         string json = JsonSerializer.Serialize(data, JsonOptions);
         File.WriteAllText(filePath, json);
@@ -202,6 +208,13 @@ public static class OfflineSnapshot
         if (File.Exists(filePath))
         {
             File.Delete(filePath);
+        }
+
+        // Legacy name (e.g. "List`1_PendingUpload.json") written by older builds.
+        string legacyPath = FolderRegistry.Data.GetFilePath($"{typeof(T).Name}_PendingUpload.json");
+        if (File.Exists(legacyPath))
+        {
+            File.Delete(legacyPath);
         }
     }
 

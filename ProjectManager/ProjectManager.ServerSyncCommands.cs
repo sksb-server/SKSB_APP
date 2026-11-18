@@ -1,4 +1,4 @@
-﻿namespace SKSB_App.ProjectManager;
+namespace SKSB_App.ProjectManager;
 
 using ExcelDna.Integration;
 using SKSB_App.Core.Diagnostics;
@@ -17,23 +17,41 @@ internal static class ServerSyncCommands
     // =========================================================================
     // 1. SAVE
     // =========================================================================
+    private static List<CompanyRecord> ExtractCompaniesFromWorkbook()
+    {
+        var companies = new List<CompanyRecord>();
+        try
+        {
+            dynamic xlApp = ExcelDnaUtil.Application;
+            dynamic? wb = xlApp.ActiveWorkbook;
+            if (wb != null) companies = SheetMapper.ExtractCompanies((object)wb);
+        }
+        catch (Exception exCompanies)
+        {
+            AppLogger.Warn($"[{Module}] Could not read CompaniesTable: {exCompanies.Message}");
+        }
+        return companies;
+    }
+
+    /// <summary>Offline save: snapshots the projects AND the companies table, and queues the pending upload.</summary>
+    internal static void SaveProjectsOffline(List<ProjectRecord> projects)
+    {
+        OfflineSnapshot.Save(ExtractCompaniesFromWorkbook(), writeToDatabase: false);
+        OfflineSnapshot.SaveOfflineSnapshot(projects);
+    }
+
     internal static bool SaveProjectsSilent(List<ProjectRecord> projects, out string errorMessage)
     {
         errorMessage = string.Empty;
         try
         {
             // 1. Companies live on their own sheet; persist them with the projects.
-            var companies = new List<CompanyRecord>();
-            try
-            {
-                dynamic xlApp = ExcelDnaUtil.Application;
-                dynamic? wb = xlApp.ActiveWorkbook;
-                if (wb != null) companies = SheetMapper.ExtractCompanies((object)wb);
-            }
-            catch (Exception exCompanies)
-            {
-                AppLogger.Warn($"[{Module}] Could not read CompaniesTable for save: {exCompanies.Message}");
-            }
+            var companies = ExtractCompaniesFromWorkbook();
+
+            // Startup pending-upload commit runs before PopulateWorksheet: an unpopulated CompaniesTable must not
+            // wipe the companies saved offline.
+            if (companies.Count == 0 && OfflineSnapshot.HasPendingSnapshot<List<ProjectRecord>>())
+                companies = OfflineSnapshot.Load<List<CompanyRecord>>() ?? companies;
 
             AppLogger.Info(
                 $"[ProjectManager.SaveProjectsSilent] Projects={projects.Count}, " +
@@ -43,7 +61,7 @@ internal static class ServerSyncCommands
             ServerDispatcher.PersistCompanies(companies, isFullBatch: true);
             ServerDispatcher.PersistProjects(projects, isFullBatch: true);
 
-            // 3. Local offline snapshots
+            // 3. Local offline snapshots (only after the server commit succeeded)
             OfflineSnapshot.Save(projects, writeToDatabase: false);
             OfflineSnapshot.Save(companies, writeToDatabase: false);
             return true;
@@ -149,34 +167,39 @@ internal static class ServerSyncCommands
         SyncProjectList();
     }
 
+    /// <summary>
+    /// Online Mode: PostgreSQL only (a SQL error yields an empty list, never snapshot data).
+    /// Offline Mode, or a connection failure that flips the app offline: the local snapshot.
+    /// </summary>
+    private static List<T> LookupFromServerOrSnapshot<T>(string label, Func<PostgreSqlService, List<T>> query, Func<List<T>> snapshot)
+    {
+        if (ServerEnvironment.IsOnline)
+        {
+            try
+            {
+                return query(new PostgreSqlService());
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Warn($"[{Module}] {label} query failed: {ex.Message}");
+                if (!ServerEnvironment.IsOffline) return new List<T>();
+            }
+        }
+        return snapshot();
+    }
+
     private static void SyncStaffLists()
     {
-        List<StaffRecord> staff;
-        try
-        {
-            var db = new PostgreSqlService();
-            staff = db.Query<dynamic>("SELECT staff_id, staff_name, short_name FROM staff_master ORDER BY staff_id;")
+        var staff = LookupFromServerOrSnapshot(
+            "staff_master",
+            db => db.Query<dynamic>("SELECT staff_id, staff_name, short_name FROM staff_master ORDER BY staff_id;")
                 .Select(r => new StaffRecord
                 {
                     StaffID = Convert.ToInt64(r.staff_id),
                     StaffDetails = new ProjectStaffStub((string?)r.staff_name, (string?)r.short_name).ToDetails()
                 })
-                .ToList();
-
-            // Staff Manager owns the full staff snapshot (licences etc.): only seed the cache when it has none.
-            try
-            {
-                var existing = OfflineSnapshot.Load<List<StaffRecord>>();
-                if ((existing == null || existing.Count == 0) && staff.Count > 0)
-                    OfflineSnapshot.Save(staff, writeToDatabase: false);
-            }
-            catch { }
-        }
-        catch (Exception ex)
-        {
-            AppLogger.Warn($"[{Module}] staff_master not reachable, using local snapshot: {ex.Message}");
-            staff = OfflineSnapshot.Load<List<StaffRecord>>() ?? new List<StaffRecord>();
-        }
+                .ToList(),
+            () => OfflineSnapshot.Load<List<StaffRecord>>() ?? new List<StaffRecord>());
 
         // StaffIDList and StaffShortNameList are index-aligned (Staff ID <-> PIC sync), so both skip the same rows.
         var valid = staff
@@ -195,26 +218,10 @@ internal static class ServerSyncCommands
 
     private static void SyncVehicleList()
     {
-        List<string> plates;
-        try
-        {
-            var db = new PostgreSqlService();
-            plates = db.Query<string>("SELECT vehicle_plate FROM vehicle_master ORDER BY vehicle_plate;").ToList();
-
-            try
-            {
-                var existing = OfflineSnapshot.Load<List<VehicleRecord>>();
-                if ((existing == null || existing.Count == 0) && plates.Count > 0)
-                    OfflineSnapshot.Save(plates.Select(pl => new VehicleRecord { VehiclePlate = pl }).ToList(), writeToDatabase: false);
-            }
-            catch { }
-        }
-        catch (Exception ex)
-        {
-            AppLogger.Warn($"[{Module}] vehicle_master not reachable, using local snapshot: {ex.Message}");
-            plates = (OfflineSnapshot.Load<List<VehicleRecord>>() ?? new List<VehicleRecord>())
-                .Select(v => v.VehiclePlate).ToList();
-        }
+        var plates = LookupFromServerOrSnapshot(
+            "vehicle_master",
+            db => db.Query<string>("SELECT vehicle_plate FROM vehicle_master ORDER BY vehicle_plate;").ToList(),
+            () => (OfflineSnapshot.Load<List<VehicleRecord>>() ?? new List<VehicleRecord>()).Select(v => v.VehiclePlate).ToList());
 
         var clean = plates.Where(pl => !string.IsNullOrWhiteSpace(pl)).Select(pl => pl.Trim().ToUpperInvariant()).Distinct().OrderBy(pl => pl).ToList();
         if (clean.Count > 0) DataList.SyncValues("VehiclePlateList", clean);
@@ -232,16 +239,10 @@ internal static class ServerSyncCommands
 
     private static void SyncProjectList()
     {
-        List<string> codes;
-        try
-        {
-            codes = new PostgreSqlService().Query<string>("SELECT project_id FROM project_master ORDER BY project_id;").ToList();
-        }
-        catch (Exception ex)
-        {
-            AppLogger.Warn($"[{Module}] project_master not reachable, using local snapshot: {ex.Message}");
-            codes = (OfflineSnapshot.Load<List<ProjectRecord>>() ?? new List<ProjectRecord>()).Select(p => p.ProjectCode).ToList();
-        }
+        var codes = LookupFromServerOrSnapshot(
+            "project_master",
+            db => db.Query<string>("SELECT project_id FROM project_master ORDER BY project_id;").ToList(),
+            () => (OfflineSnapshot.Load<List<ProjectRecord>>() ?? new List<ProjectRecord>()).Select(p => p.ProjectCode).ToList());
 
         var clean = codes.Where(c => !string.IsNullOrWhiteSpace(c)).Select(c => c.Trim().ToUpperInvariant()).Distinct().ToList();
         if (clean.Count > 0) DataList.SyncValues("ProjectIDList", clean);

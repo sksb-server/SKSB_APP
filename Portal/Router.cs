@@ -1,6 +1,7 @@
 ﻿namespace SKSB_App.Portal;
 
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.InteropServices;
@@ -42,7 +43,23 @@ public static class PortalRouter
     [DllImport("user32.dll", SetLastError = true, CharSet = CharSet.Auto)]
     private static extern int GetWindowTextLength(IntPtr hWnd);
 
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsWindowVisible(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsIconic(IntPtr hWnd);
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
     private const int SW_RESTORE = 9;
+    private static readonly TimeSpan LaunchGracePeriod = TimeSpan.FromSeconds(15);
+
+    private static readonly object _launchLock = new();
+    private static readonly Dictionary<string, (Process Process, DateTime LaunchedAtUtc)> _activeLaunches
+        = new(StringComparer.OrdinalIgnoreCase);
 
     public static void Launch(TemplateAddInPair pair)
     {
@@ -56,6 +73,8 @@ public static class PortalRouter
 
         try
         {
+            lock (_launchLock)
+            {
             string templateFileName = pair.Template();
             string templateBaseName = Path.GetFileNameWithoutExtension(templateFileName);
 
@@ -63,6 +82,29 @@ public static class PortalRouter
             if (TryFocusExistingWorkbook(templateBaseName))
             {
                 return; // Module already active and brought to front
+            }
+
+            // 1b. Guard against a launch still booting (workbook window not yet visible)
+            if (_activeLaunches.TryGetValue(templateBaseName, out var entry))
+            {
+                bool exited;
+                try { exited = entry.Process.HasExited; }
+                catch { exited = true; }
+
+                if (!exited && (DateTime.UtcNow - entry.LaunchedAtUtc) < LaunchGracePeriod)
+                {
+                    try
+                    {
+                        entry.Process.Refresh();
+                        if (entry.Process.MainWindowHandle != IntPtr.Zero)
+                            FocusWindow(entry.Process.MainWindowHandle);
+                    }
+                    catch { }
+                    return;
+                }
+
+                try { entry.Process.Dispose(); } catch { }
+                _activeLaunches.Remove(templateBaseName);
             }
 
             // 2. Resolve Template & Target Add-In paths
@@ -90,7 +132,10 @@ public static class PortalRouter
                 UseShellExecute = true
             };
 
-            Process.Start(startInfo);
+            Process? started = Process.Start(startInfo);
+            if (started != null)
+                _activeLaunches[templateBaseName] = (started, DateTime.UtcNow);
+            }
         }
         catch (FileNotFoundException fnf)
         {
@@ -146,8 +191,7 @@ public static class PortalRouter
                         IntPtr hwnd = new IntPtr((int)xlApp.Hwnd);
                         if (hwnd != IntPtr.Zero)
                         {
-                            ShowWindow(hwnd, SW_RESTORE);
-                            SetForegroundWindow(hwnd);
+                            FocusWindow(hwnd);
                             return true;
                         }
                     }
@@ -159,6 +203,7 @@ public static class PortalRouter
         IntPtr foundHwnd = IntPtr.Zero;
         EnumWindows((hWnd, lParam) =>
         {
+            if (!IsWindowVisible(hWnd)) return true;
             int length = GetWindowTextLength(hWnd);
             if (length > 0)
             {
@@ -166,11 +211,22 @@ public static class PortalRouter
                 GetWindowText(hWnd, sb, sb.Capacity);
                 string title = sb.ToString();
 
-                if (title.IndexOf("Excel", StringComparison.OrdinalIgnoreCase) >= 0 &&
-                    title.IndexOf(targetWorkbookName, StringComparison.OrdinalIgnoreCase) >= 0)
+                if (title.IndexOf(targetWorkbookName, StringComparison.OrdinalIgnoreCase) >= 0)
                 {
-                    foundHwnd = hWnd;
-                    return false;
+                    bool isExcel = false;
+                    try
+                    {
+                        GetWindowThreadProcessId(hWnd, out uint pid);
+                        isExcel = Process.GetProcessById((int)pid).ProcessName
+                            .Equals("EXCEL", StringComparison.OrdinalIgnoreCase);
+                    }
+                    catch { }
+
+                    if (isExcel)
+                    {
+                        foundHwnd = hWnd;
+                        return false;
+                    }
                 }
             }
             return true;
@@ -178,12 +234,18 @@ public static class PortalRouter
 
         if (foundHwnd != IntPtr.Zero)
         {
-            ShowWindow(foundHwnd, SW_RESTORE);
-            SetForegroundWindow(foundHwnd);
+            FocusWindow(foundHwnd);
             return true;
         }
 
         return false;
+    }
+
+    private static void FocusWindow(IntPtr hWnd)
+    {
+        if (hWnd == IntPtr.Zero) return;
+        if (IsIconic(hWnd)) ShowWindow(hWnd, SW_RESTORE);
+        SetForegroundWindow(hWnd);
     }
 
     private static object? GetActiveObjectHelper(string progId)

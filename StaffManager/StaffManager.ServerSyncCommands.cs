@@ -1,4 +1,4 @@
-﻿namespace SKSB_App.StaffManager;
+namespace SKSB_App.StaffManager;
 
 using System;
 using System.Collections.Generic;
@@ -35,28 +35,45 @@ public static class ServerSyncCommands
         {
             DeriveShortNames(staffList);
 
-            // 1. Persist auxiliary SkillLicenseTypesTable
+            // 1. Auxiliary SkillLicenseTypesTable. Startup pending-upload commit runs before the sheets are populated:
+            //    fall back to the offline snapshot so the lookup table is never wiped.
             var skillTypes = SheetMapper.ExtractSkillLicenseTypes();
+            if (skillTypes.Count == 0 && OfflineSnapshot.HasPendingSnapshot<List<StaffRecord>>())
+                skillTypes = OfflineSnapshot.Load<List<SkillLicenseType>>() ?? skillTypes;
+
+            // 2. PostgreSQL first; local snapshots only after the server accepted the data.
             if (skillTypes.Count > 0)
             {
-                OfflineSnapshot.Save(skillTypes, writeToDatabase: true);
+                ServerDispatcher.Dispatch(skillTypes);
             }
 
             if (staffList == null || staffList.Count == 0)
             {
+                if (skillTypes.Count > 0) OfflineSnapshot.Save(skillTypes, writeToDatabase: false);
                 return true;
             }
 
-            // 2. Persist validated staff records to JSON cache & PostgreSQL
-            string snapshotPath = OfflineSnapshot.Save(staffList, writeToDatabase: true);
-            return !string.IsNullOrEmpty(snapshotPath);
+            ServerDispatcher.Dispatch(staffList);
+
+            if (skillTypes.Count > 0) OfflineSnapshot.Save(skillTypes, writeToDatabase: false);
+            OfflineSnapshot.Save(staffList, writeToDatabase: false);
+            return true;
         }
         catch (Exception ex)
         {
             errorMessage = ex.Message;
-            System.Diagnostics.Debug.WriteLine($"[ServerSyncCommands] Silent Save Error: {ex.Message}");
+            AppLogger.Error("[StaffManager] SaveStaffSilent failed", ex);
             return false;
         }
+    }
+
+    /// <summary>Offline save: snapshots the staff list AND the skill license types, and queues the pending upload.</summary>
+    public static void SaveStaffOffline(List<StaffRecord> staffList)
+    {
+        DeriveShortNames(staffList);
+        var skillTypes = SheetMapper.ExtractSkillLicenseTypes();
+        if (skillTypes.Count > 0) OfflineSnapshot.Save(skillTypes, writeToDatabase: false);
+        OfflineSnapshot.SaveOfflineSnapshot(staffList);
     }
 
     public static List<SkillLicenseType> FetchSkillLicenseTypesFromDb() =>
@@ -94,9 +111,6 @@ public static class ServerSyncCommands
     /// <summary>Assembles every staff profile (master + licenses) from PostgreSQL. An empty server returns an empty list.</summary>
     private static List<StaffRecord> QueryStaffRecords(PostgreSqlService db)
     {
-        // Pre-fetch and cache SkillLicenseTypes locally
-        FetchSkillLicenseTypesFromDb();
-
         const string sqlStaffs = "SELECT * FROM staff_master ORDER BY staff_id;";
         const string sqlVehicleLicenses = "SELECT * FROM staff_vehicle_licenses ORDER BY vehicle_license_id;";
         const string sqlSkillLicenses = "SELECT * FROM staff_skill_licenses ORDER BY skill_license_id;";

@@ -502,16 +502,7 @@ public static partial class TableRowManager
 
             if (rule != null && rule.HasDropdown)
             {
-                newCell.Style = Commands.DropDownStyleName;
                 try { newCell.Validation.Delete(); } catch { }
-            }
-            else
-            {
-                string styleName = archetypeCell.Style?.Name?.ToString() ?? string.Empty;
-                if (!string.IsNullOrEmpty(styleName))
-                {
-                    try { newCell.Style = styleName; } catch { }
-                }
             }
 
             // Explicitly mirror NumberFormat

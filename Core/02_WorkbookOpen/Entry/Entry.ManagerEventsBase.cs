@@ -210,7 +210,7 @@ public abstract class ManagerEventsBase<T> : IExcelAddIn
                 !SheetOperations.IsMasterTemplateFile() &&
                 !string.IsNullOrWhiteSpace(contract.WindowCaption))
             {
-                xlApp.ActiveWindow.Caption = contract.WindowCaption;
+                contract.UpdateWindowCaption();
             }
         }
         catch { }

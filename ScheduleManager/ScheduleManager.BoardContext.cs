@@ -22,9 +22,11 @@ internal static class BoardContext
     private static readonly Dictionary<string, string> DefaultIcons = new(StringComparer.OrdinalIgnoreCase)
     {
         ["Driver"] = "🚗", ["Excavator Operator"] = "🚜", ["Pipe Fitter"] = "🔧", ["Foreman"] = "👷", ["General Worker"] = "🧰",
-        ["Car"] = "🚗", ["Hilux"] = "🛻", ["Van"] = "🚐", ["Lorry"] = "🚚", ["Tipper_Lorry"] = "🚛", ["Roro_Lorry"] = "🚛",
+        ["Car"] = "🚗", ["Hilux"] = "🚙", ["Van"] = "🚐", ["Lorry"] = "🚚", ["Tipper_Lorry"] = "🚛", ["Roro_Lorry"] = "🚛",
         ["Crane_Lorry"] = "🏗", ["Skylift"] = "🏗", ["Backhoe"] = "🚜", ["Excavator"] = "🚜", ["Roller"] = "🚧",
-        ["Compressor"] = "🔨", ["Generator"] = "⚡", ["Motorcycle"] = "🏍", ["Machinery"] = "⚙"
+        ["Compressor"] = "🔨", ["Generator"] = "⚡", ["Motorcycle"] = "🏍", ["Machinery"] = "⚙",
+        ["Pipe_Repair"] = "🔧", ["Pipe_Laying"] = "🚰", ["Comm_Pipe_Meter"] = "💧", ["Valve_Hydrant"] = "🚒", ["Tapping_Connection"] = "🔗",
+        ["Road_Reinstatement"] = "🛣", ["Civil_Earthworks"] = "⛏", ["Machinery_Rental"] = "⚙", ["General_Maintenance"] = "🧰", ["Other"] = "📋"
     };
 
     private static readonly Dictionary<ProjectType, (string[] Skills, VehicleType[] Vehicles)> DefaultRequirements = new()
@@ -47,7 +49,11 @@ internal static class BoardContext
     private static List<TeamRecord> _teams = new();
     private static Dictionary<ProjectType, ProjectTypeRequirement> _requirements = new();
     private static Dictionary<string, string> _icons = new(DefaultIcons, StringComparer.OrdinalIgnoreCase);
-    private static TimeOnly _lateCutOff = new(8, 15);
+    public static readonly TimeOnly DefaultLateCutOff = new(11, 0);
+    public static readonly TimeOnly DefaultOtStartTime = new(18, 0);
+
+    private static TimeOnly _lateCutOff = DefaultLateCutOff;
+    private static TimeOnly _otStartTime = DefaultOtStartTime;
 
     private static DateOnly _weekKey;
     private static DateTime _weekLoadedAt = DateTime.MinValue;
@@ -56,6 +62,7 @@ internal static class BoardContext
     public static IReadOnlyList<WorkerPreference> Preferences => _prefs;
     public static IReadOnlyList<TeamRecord> Teams => _teams;
     public static TimeOnly LateCutOff => _lateCutOff;
+    public static TimeOnly OTStartTime => _otStartTime;
 
     public static WorkerPreference? PreferenceFor(long staffId) => _prefs.FirstOrDefault(p => p.StaffID == staffId);
 
@@ -92,7 +99,11 @@ internal static class BoardContext
             }
 
             dynamic? attSheet = SheetMapperHelper.ResolveSheetSafely(wbObj, SheetMapper.MasterSheetAliases, "Daily Attendances");
-            if (attSheet != null) _lateCutOff = ReadLateCutOff(attSheet);
+            if (attSheet != null)
+            {
+                _lateCutOff = ReadTimeCell(attSheet, SheetMapper.LateCutOffCell, DefaultLateCutOff);
+                _otStartTime = ReadTimeCell(attSheet, SheetMapper.OtStartCell, DefaultOtStartTime);
+            }
         }
         catch (Exception ex)
         {
@@ -100,17 +111,18 @@ internal static class BoardContext
         }
     }
 
-    private static TimeOnly ReadLateCutOff(dynamic attendanceSheet)
+    /// <summary>Reads a time-of-day cell (Excel serial fraction or text); blank / unreadable => <paramref name="fallback"/>.</summary>
+    public static TimeOnly ReadTimeCell(dynamic attendanceSheet, string cellAddress, TimeOnly fallback)
     {
         try
         {
-            object? raw = attendanceSheet.Range[SheetMapper.LateCutOffCell].Value2;
+            object? raw = attendanceSheet.Range[cellAddress].Value2;
             if (raw is double d && d >= 0)
                 return TimeOnly.FromTimeSpan(TimeSpan.FromSeconds(Math.Round((d - Math.Floor(d)) * 86400.0) % 86400));
             if (raw != null && TimeOnly.TryParse(raw.ToString(), CultureInfo.InvariantCulture, DateTimeStyles.None, out var t)) return t;
         }
         catch { }
-        return new TimeOnly(8, 15);
+        return fallback;
     }
 
     // =========================================================================
@@ -148,6 +160,8 @@ internal static class BoardContext
 
     public static string IconFor(VehicleType type) => type == VehicleType.None ? string.Empty : IconFor(type.ToString());
 
+    public static string IconFor(ProjectType type) => type == ProjectType.None ? string.Empty : IconFor(type.ToString());
+
     // =========================================================================
     // 5. WEEKLY LOAD (database, cached; offline => unknown => treated as 0)
     // =========================================================================
@@ -163,7 +177,7 @@ internal static class BoardContext
             _daysWorkedBefore = new Dictionary<long, int>();
             try
             {
-                if (!ServerEnvironment.SimulateOffline && date > weekStart)
+                if (ServerEnvironment.IsOnline && date > weekStart)
                 {
                     ServerDispatcher.EnsureScheduleSchema();
                     var rows = new PostgreSqlService().Query<dynamic>(

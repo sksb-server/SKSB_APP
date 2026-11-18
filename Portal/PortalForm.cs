@@ -167,7 +167,22 @@ public class PortalForm : Form
                 e.Graphics.DrawString(subtitle, subFont, subBrush, 14, 32);
             }
         };
-        btn.Click += (s, e) => onClick();
+        btn.Click += (s, e) =>
+        {
+            if (!btn.Enabled) return;
+            btn.Enabled = false;
+
+            var reenableTimer = new System.Windows.Forms.Timer { Interval = 1500 };
+            reenableTimer.Tick += (ts, te) =>
+            {
+                reenableTimer.Stop();
+                reenableTimer.Dispose();
+                if (!btn.IsDisposed) btn.Enabled = true;
+            };
+            reenableTimer.Start();
+
+            onClick();
+        };
         return btn;
     }
 
