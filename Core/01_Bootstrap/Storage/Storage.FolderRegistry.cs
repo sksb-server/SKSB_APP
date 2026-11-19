@@ -55,6 +55,26 @@ public static class FolderRegistry
 #if DEBUG
     private static string ResolveDebugSolutionRoot()
     {
+        string? envRoot = Environment.GetEnvironmentVariable("SKSB_SOLUTION_ROOT");
+        if (!string.IsNullOrWhiteSpace(envRoot) && Directory.Exists(envRoot))
+        {
+            return envRoot;
+        }
+
+        try
+        {
+            string markerPath = Path.Combine(AppContext.BaseDirectory, ".sksb_solution_root");
+            if (File.Exists(markerPath))
+            {
+                string? markerRoot = File.ReadLines(markerPath).FirstOrDefault()?.Trim();
+                if (!string.IsNullOrWhiteSpace(markerRoot) && Directory.Exists(markerRoot))
+                {
+                    return markerRoot;
+                }
+            }
+        }
+        catch { }
+
         var startDirs = new List<string?>();
         try { startDirs.Add(Path.GetDirectoryName(ExcelDna.Integration.ExcelDnaUtil.XllPath)); } catch { }
         startDirs.Add(AppContext.BaseDirectory);
