@@ -168,14 +168,7 @@ public static class PortalRouter
             EnsureDebugTrustedLocations(shadowRoot, solutionRoot);
 
             // Best-effort sweep: folders in use by running Excel/Portal are locked and skipped.
-            try
-            {
-                foreach (string dir in Directory.GetDirectories(shadowRoot))
-                {
-                    try { Directory.Delete(dir, recursive: true); } catch { }
-                }
-            }
-            catch { }
+            CleanupUnusedShadowDirectories(shadowRoot);
 
             string sessionDir = Path.Combine(shadowRoot,
                 $"{moduleBaseName}_{DateTime.UtcNow:yyyyMMdd_HHmmss_fff}_{Guid.NewGuid().ToString("N")[..6]}");
@@ -197,6 +190,32 @@ public static class PortalRouter
         catch
         {
             return (coreAddInPath, moduleAddInPath);
+        }
+    }
+
+    internal static void CleanupUnusedShadowDirectories(string shadowRoot, string searchPattern = "*")
+    {
+        if (!Directory.Exists(shadowRoot)) return;
+
+        string[] dirs;
+        try { dirs = Directory.GetDirectories(shadowRoot, searchPattern); }
+        catch { return; }
+
+        foreach (string dir in dirs)
+        {
+            try
+            {
+                // Deletion is not atomic: skip the whole directory if any file is in use.
+                foreach (string file in Directory.EnumerateFiles(dir, "*", SearchOption.AllDirectories))
+                {
+                    using (File.Open(file, FileMode.Open, FileAccess.Read, FileShare.None)) { }
+                }
+
+                string trashDir = dir.EndsWith(".deleting", StringComparison.OrdinalIgnoreCase) ? dir : $"{dir}.deleting";
+                if (!string.Equals(dir, trashDir, StringComparison.OrdinalIgnoreCase)) Directory.Move(dir, trashDir);
+                Directory.Delete(trashDir, recursive: true);
+            }
+            catch { }
         }
     }
 

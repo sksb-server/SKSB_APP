@@ -10,6 +10,7 @@ using SKSB_App.Core.WorkbookSave.SheetMapper;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using System.Windows.Forms;
 
@@ -697,6 +698,14 @@ public static partial class TableRowManager
     /// High-speed bulk deduplication: reads the table body in 1 COM call into a 2D memory array,
     /// detects duplicates in RAM, and deletes redundant rows with calculation and screen updating suspended.
     /// </summary>
+    private static bool TryGetSeconds(object? raw, out double seconds)
+    {
+        seconds = 0;
+        if (raw is double d) { seconds = Math.Round((d - Math.Floor(d)) * 86400.0) % 86400; return true; }
+        if (raw != null && TimeSpan.TryParse(raw.ToString(), CultureInfo.InvariantCulture, out var ts)) { seconds = ts.TotalSeconds; return true; }
+        return false;
+    }
+
     public static int CleanTableDuplicateRows(dynamic table, List<string> warnings, int[]? keyColumnIndices = null)
     {
         if (table == null) return 0;
@@ -737,6 +746,55 @@ public static partial class TableRowManager
             // 3. Bulk-read entire table body in 1 COM call
             object[,] dataGrid = TableMapper.GetRange2DValues(currentBody, curRowCount, colCount);
 
+            // Header row in 1 COM call: calculated columns are ignored, time columns are normalized to HH:mm.
+            object[,] headerGrid = TableMapper.GetRange2DValues(table.HeaderRowRange, 1, colCount);
+            var headers = new string[colCount + 1];
+            var ignoreCol = new bool[colCount + 1];
+            var isTimeCol = new bool[colCount + 1];
+            for (int c = 1; c <= colCount; c++)
+            {
+                headers[c] = headerGrid[1, c]?.ToString()?.Trim() ?? string.Empty;
+                var colRule = RuleRegistry.GetRule(tableName, headers[c]);
+                ignoreCol[c] = colRule?.IsStrictlyCalculated == true;
+                isTimeCol[c] = colRule?.EffectiveFormatKind == ColumnFormatKind.Time
+                    || headers[c].Equals("Time", StringComparison.OrdinalIgnoreCase)
+                    || headers[c].Equals("Clock-In Time", StringComparison.OrdinalIgnoreCase)
+                    || headers[c].Equals("Clock-Out Time", StringComparison.OrdinalIgnoreCase);
+            }
+
+            string CellText(int r, int c)
+            {
+                object? raw = dataGrid[r, c];
+                if (isTimeCol[c] && raw is double d)
+                    return TimeOnly.FromTimeSpan(TimeSpan.FromSeconds(Math.Round((d - Math.Floor(d)) * 86400.0) % 86400))
+                        .ToString("HH:mm", CultureInfo.InvariantCulture);
+                return SheetMapperHelper.CleanCellText(raw);
+            }
+
+            int ColOf(string header)
+            {
+                for (int c = 1; c <= colCount; c++)
+                    if (headers[c].Equals(header, StringComparison.OrdinalIgnoreCase)) return c;
+                return -1;
+            }
+
+            // AttendanceEntriesTable: natural key + Thumbprint double-scan detection (even if Entry Type was flipped).
+            bool isEntries = tableName.Equals("AttendanceEntriesTable", StringComparison.OrdinalIgnoreCase);
+            int[]? effectiveKeys = keyColumnIndices;
+            int sourceCol = -1, staffCol = -1, dateCol = -1, timeCol = -1;
+            if (isEntries)
+            {
+                dateCol = ColOf("Date"); timeCol = ColOf("Time"); staffCol = ColOf("Staff ID");
+                int typeCol = ColOf("Entry Type"); sourceCol = ColOf("Source");
+                if (keyColumnIndices == null)
+                {
+                    var natural = new[] { dateCol, timeCol, staffCol, typeCol, sourceCol }.Where(i => i > 0).ToArray();
+                    if (natural.Length > 0) effectiveKeys = natural;
+                }
+            }
+            bool detectDoubleScan = isEntries && keyColumnIndices == null && sourceCol > 0 && staffCol > 0 && dateCol > 0 && timeCol > 0;
+            var keptThumbprint = new Dictionary<string, List<double>>(StringComparer.OrdinalIgnoreCase);
+
             var seenSignatures = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             var duplicateIndices = new List<int>();
 
@@ -764,11 +822,10 @@ public static partial class TableRowManager
                 var sigParts = new List<string>(colCount);
                 for (int c = 1; c <= colCount; c++)
                 {
-                    if (keyColumnIndices != null && !keyColumnIndices.Contains(c)) continue;
-                    if (isFormulaCol[c]) continue; // Skip calculated columns
+                    if (effectiveKeys != null && !effectiveKeys.Contains(c)) continue;
+                    if (isFormulaCol[c] || ignoreCol[c]) continue; // Skip calculated columns
 
-                    string cleanVal = SheetMapperHelper.CleanCellText(dataGrid[r, c]);
-                    sigParts.Add(cleanVal);
+                    sigParts.Add(CellText(r, c));
                 }
 
                 string signature = string.Join("|", sigParts);
@@ -778,7 +835,18 @@ public static partial class TableRowManager
                 }
 
                 int absRow = curBodyStartRow + r - 1;
-                if (!seenSignatures.Add(signature))
+                bool isDoubleScan = false;
+                if (detectDoubleScan &&
+                    CellText(r, sourceCol).Equals("Thumbprint", StringComparison.OrdinalIgnoreCase) &&
+                    TryGetSeconds(dataGrid[r, timeCol], out double totalSeconds))
+                {
+                    string staffDay = CellText(r, staffCol) + "|" + CellText(r, dateCol);
+                    if (!keptThumbprint.TryGetValue(staffDay, out var kept)) keptThumbprint[staffDay] = kept = new List<double>();
+                    if (kept.Any(prevSeconds => Math.Abs(totalSeconds - prevSeconds) < 60)) isDoubleScan = true;
+                    else kept.Add(totalSeconds);
+                }
+
+                if (isDoubleScan || !seenSignatures.Add(signature))
                 {
                     duplicateIndices.Add(r);
                     warnings.Add($"Table '{tableName}' Row {absRow}: Duplicate entry removed ({signature.Trim('|')}).");

@@ -594,12 +594,13 @@ ALTER TABLE vehicle_maintenance ADD COLUMN IF NOT EXISTS workshop_address TEXT D
     // =========================================================================
     // 3. STAFF MANAGER PERSISTENCE
     // =========================================================================
-    public static void PersistStaff(IList<StaffRecord> staffList, bool isFullBatch)
+    public static void PersistStaff(IList<StaffRecord> staffList, bool isFullBatch, IEnumerable<SkillLicenseType>? skillLicenseTypes = null)
     {
         var staffItems = staffList.Where(s => s.StaffID > 0).ToList();
         if (!staffItems.Any()) return;
 
         var activeIds = staffItems.Select(s => s.StaffID).ToArray();
+        var typeItems = NormalizeSkillLicenseTypes(skillLicenseTypes);
 
         var masterRecords = staffItems.Select(s => new
         {
@@ -634,8 +635,15 @@ ALTER TABLE vehicle_maintenance ADD COLUMN IF NOT EXISTS workshop_address TEXT D
             contract_status = EXCLUDED.contract_status,
             updated_at      = CURRENT_TIMESTAMP;";
 
+        var allVLicenses = staffItems.SelectMany(s => s.VehicleLicenses.Select(l => { if (l.StaffID == 0) l.StaffID = s.StaffID; return l; })).ToList();
+        var allSLicenses = staffItems.SelectMany(s => s.SkillLicenses.Select(l => { if (l.StaffID == 0) l.StaffID = s.StaffID; return l; })).ToList();
+
         Db.ExecuteInTransaction((conn, trans) =>
         {
+            // a. Upsert lookup types first (no deletes yet, so existing FK references stay valid).
+            if (typeItems.Count > 0) UpsertSkillLicenseTypes(conn, trans, typeItems);
+
+            // b. Remove staff no longer present, then upsert masters.
             if (isFullBatch)
             {
                 conn.Execute("DELETE FROM staff_vehicle_licenses WHERE staff_id != ALL(@ActiveIds);", new { ActiveIds = activeIds }, trans);
@@ -644,17 +652,17 @@ ALTER TABLE vehicle_maintenance ADD COLUMN IF NOT EXISTS workshop_address TEXT D
             }
 
             conn.Execute(sqlMasterUpsert, masterRecords, trans);
+
+            // c. Child licenses.
+            PersistStaffVehicleLicenses(conn, trans, allVLicenses, isFullBatch);
+            PersistStaffSkillLicenses(conn, trans, allSLicenses, isFullBatch);
+
+            // d. Prune obsolete lookup types only after licenses reference the final set.
+            if (typeItems.Count > 0) PruneSkillLicenseTypes(conn, trans, typeItems);
         });
-
-        // Child Licenses
-        var allVLicenses = staffItems.SelectMany(s => s.VehicleLicenses.Select(l => { if (l.StaffID == 0) l.StaffID = s.StaffID; return l; })).ToList();
-        PersistStaffVehicleLicenses(allVLicenses);
-
-        var allSLicenses = staffItems.SelectMany(s => s.SkillLicenses.Select(l => { if (l.StaffID == 0) l.StaffID = s.StaffID; return l; })).ToList();
-        PersistStaffSkillLicenses(allSLicenses);
     }
 
-    private static void PersistStaffVehicleLicenses(IEnumerable<VehicleLicense> licenses)
+    private static void PersistStaffVehicleLicenses(System.Data.IDbConnection conn, System.Data.IDbTransaction trans, IEnumerable<VehicleLicense> licenses, bool isFullBatch)
     {
         var items = licenses.Where(l => l.StaffID > 0 && l.VehicleLicenseClass != VehicleLicenseClass.None).Select(l => new
         {
@@ -667,23 +675,52 @@ ALTER TABLE vehicle_maintenance ADD COLUMN IF NOT EXISTS workshop_address TEXT D
             Cost = l.Cost
         }).ToList();
 
-        if (!items.Any()) return;
+        var withId = items.Where(i => i.VehicleLicenseId > 0).ToList();
+        var withoutId = items.Where(i => i.VehicleLicenseId <= 0).ToList();
 
-        Db.ExecuteTransaction(@"
-            INSERT INTO staff_vehicle_licenses (vehicle_license_id, staff_id, vehicle_license_class, renew_date, expiry_date, status, cost)
-            VALUES (
-                CASE WHEN @VehicleLicenseId > 0 THEN @VehicleLicenseId ELSE nextval('staff_vehicle_licenses_vehicle_license_id_seq') END,
-                @StaffId, @VehicleLicenseClass, @RenewDate, @ExpiryDate, @Status, @Cost
-            )
-            ON CONFLICT (staff_id, vehicle_license_class) DO UPDATE SET
-                renew_date  = EXCLUDED.renew_date,
-                expiry_date = EXCLUDED.expiry_date,
-                status      = EXCLUDED.status,
-                cost        = EXCLUDED.cost,
-                updated_at  = CURRENT_TIMESTAMP;", items);
+        if (isFullBatch)
+        {
+            if (items.Count == 0)
+                conn.Execute("DELETE FROM staff_vehicle_licenses;", transaction: trans);
+            else if (withId.Count > 0)
+                conn.Execute("DELETE FROM staff_vehicle_licenses WHERE vehicle_license_id != ALL(@ActiveIds);",
+                    new { ActiveIds = withId.Select(i => i.VehicleLicenseId).ToArray() }, trans);
+        }
+
+        if (withId.Count > 0)
+        {
+            conn.Execute(@"
+                DELETE FROM staff_vehicle_licenses
+                WHERE staff_id = @StaffId AND vehicle_license_class = @VehicleLicenseClass AND vehicle_license_id != @VehicleLicenseId;", withId, trans);
+
+            conn.Execute(@"
+                INSERT INTO staff_vehicle_licenses (vehicle_license_id, staff_id, vehicle_license_class, renew_date, expiry_date, status, cost)
+                VALUES (@VehicleLicenseId, @StaffId, @VehicleLicenseClass, @RenewDate, @ExpiryDate, @Status, @Cost)
+                ON CONFLICT (vehicle_license_id) DO UPDATE SET
+                    staff_id              = EXCLUDED.staff_id,
+                    vehicle_license_class = EXCLUDED.vehicle_license_class,
+                    renew_date            = EXCLUDED.renew_date,
+                    expiry_date           = EXCLUDED.expiry_date,
+                    status                = EXCLUDED.status,
+                    cost                  = EXCLUDED.cost,
+                    updated_at            = CURRENT_TIMESTAMP;", withId, trans);
+        }
+
+        if (withoutId.Count > 0)
+        {
+            conn.Execute(@"
+                INSERT INTO staff_vehicle_licenses (vehicle_license_id, staff_id, vehicle_license_class, renew_date, expiry_date, status, cost)
+                VALUES (nextval('staff_vehicle_licenses_vehicle_license_id_seq'), @StaffId, @VehicleLicenseClass, @RenewDate, @ExpiryDate, @Status, @Cost)
+                ON CONFLICT (staff_id, vehicle_license_class) DO UPDATE SET
+                    renew_date  = EXCLUDED.renew_date,
+                    expiry_date = EXCLUDED.expiry_date,
+                    status      = EXCLUDED.status,
+                    cost        = EXCLUDED.cost,
+                    updated_at  = CURRENT_TIMESTAMP;", withoutId, trans);
+        }
     }
 
-    private static void PersistStaffSkillLicenses(IEnumerable<SkillLicense> licenses)
+    private static void PersistStaffSkillLicenses(System.Data.IDbConnection conn, System.Data.IDbTransaction trans, IEnumerable<SkillLicense> licenses, bool isFullBatch)
     {
         var items = licenses.Where(s => s.StaffID > 0 && !string.IsNullOrWhiteSpace(s.SkillLicenseType)).Select(s => new
         {
@@ -696,46 +733,103 @@ ALTER TABLE vehicle_maintenance ADD COLUMN IF NOT EXISTS workshop_address TEXT D
             Cost = s.Cost
         }).ToList();
 
-        if (!items.Any()) return;
+        var withId = items.Where(i => i.SkillLicenseId > 0).ToList();
+        var withoutId = items.Where(i => i.SkillLicenseId <= 0).ToList();
 
-        Db.ExecuteTransaction(@"
-            INSERT INTO staff_skill_licenses (skill_license_id, staff_id, skill_license_type, renew_date, expiry_date, status, cost)
-            VALUES (
-                CASE WHEN @SkillLicenseId > 0 THEN @SkillLicenseId ELSE nextval('staff_skill_licenses_skill_license_id_seq') END,
-                @StaffId, @SkillLicenseType, @RenewDate, @ExpiryDate, @Status, @Cost
-            )
-            ON CONFLICT (staff_id, skill_license_type) DO UPDATE SET
-                renew_date  = EXCLUDED.renew_date,
-                expiry_date = EXCLUDED.expiry_date,
-                status      = EXCLUDED.status,
-                cost        = EXCLUDED.cost,
-                updated_at  = CURRENT_TIMESTAMP;", items);
+        if (isFullBatch)
+        {
+            if (items.Count == 0)
+                conn.Execute("DELETE FROM staff_skill_licenses;", transaction: trans);
+            else if (withId.Count > 0)
+                conn.Execute("DELETE FROM staff_skill_licenses WHERE skill_license_id != ALL(@ActiveIds);",
+                    new { ActiveIds = withId.Select(i => i.SkillLicenseId).ToArray() }, trans);
+        }
+
+        if (withId.Count > 0)
+        {
+            conn.Execute(@"
+                DELETE FROM staff_skill_licenses
+                WHERE staff_id = @StaffId AND skill_license_type = @SkillLicenseType AND skill_license_id != @SkillLicenseId;", withId, trans);
+
+            conn.Execute(@"
+                INSERT INTO staff_skill_licenses (skill_license_id, staff_id, skill_license_type, renew_date, expiry_date, status, cost)
+                VALUES (@SkillLicenseId, @StaffId, @SkillLicenseType, @RenewDate, @ExpiryDate, @Status, @Cost)
+                ON CONFLICT (skill_license_id) DO UPDATE SET
+                    staff_id           = EXCLUDED.staff_id,
+                    skill_license_type = EXCLUDED.skill_license_type,
+                    renew_date         = EXCLUDED.renew_date,
+                    expiry_date        = EXCLUDED.expiry_date,
+                    status             = EXCLUDED.status,
+                    cost               = EXCLUDED.cost,
+                    updated_at         = CURRENT_TIMESTAMP;", withId, trans);
+        }
+
+        if (withoutId.Count > 0)
+        {
+            conn.Execute(@"
+                INSERT INTO staff_skill_licenses (skill_license_id, staff_id, skill_license_type, renew_date, expiry_date, status, cost)
+                VALUES (nextval('staff_skill_licenses_skill_license_id_seq'), @StaffId, @SkillLicenseType, @RenewDate, @ExpiryDate, @Status, @Cost)
+                ON CONFLICT (staff_id, skill_license_type) DO UPDATE SET
+                    renew_date  = EXCLUDED.renew_date,
+                    expiry_date = EXCLUDED.expiry_date,
+                    status      = EXCLUDED.status,
+                    cost        = EXCLUDED.cost,
+                    updated_at  = CURRENT_TIMESTAMP;", withoutId, trans);
+        }
     }
 
-    private static void PersistSkillLicenseTypes(IEnumerable<SkillLicenseType> types)
+    private static List<SkillTypeRow> NormalizeSkillLicenseTypes(IEnumerable<SkillLicenseType>? types)
     {
-        var items = types
+        if (types == null) return new();
+        return types
             .Where(t => !string.IsNullOrWhiteSpace(t.SkillLicenseName))
             .GroupBy(t => t.SkillLicenseName.Trim(), StringComparer.OrdinalIgnoreCase)
-            .Select(g => new
+            .Select(g => new SkillTypeRow
             {
                 SkillLicenseName = g.Key,
                 DisplayIcon = g.Select(x => (x.DisplayIcon ?? string.Empty).Trim()).FirstOrDefault(i => i.Length > 0) ?? string.Empty
             })
             .ToList();
-        var names = items.Select(i => i.SkillLicenseName).ToArray();
+    }
+
+    private sealed class SkillTypeRow
+    {
+        public string SkillLicenseName { get; init; } = string.Empty;
+        public string DisplayIcon { get; init; } = string.Empty;
+    }
+
+    private static void UpsertSkillLicenseTypes(System.Data.IDbConnection conn, System.Data.IDbTransaction trans, List<SkillTypeRow> items)
+    {
+        conn.Execute("ALTER TABLE lookup_skill_license_types ADD COLUMN IF NOT EXISTS display_icon VARCHAR(32) NOT NULL DEFAULT '';", transaction: trans);
+        conn.Execute(@"
+            INSERT INTO lookup_skill_license_types (skill_license_type, description, display_icon)
+            VALUES (@SkillLicenseName, '', @DisplayIcon)
+            ON CONFLICT (skill_license_type) DO UPDATE SET
+                display_icon = EXCLUDED.display_icon;", items, trans);
+    }
+
+    private static void PruneSkillLicenseTypes(System.Data.IDbConnection conn, System.Data.IDbTransaction trans, List<SkillTypeRow> items)
+    {
+        conn.Execute(@"
+            DELETE FROM lookup_skill_license_types
+            WHERE skill_license_type != ALL(@Names)
+              AND NOT EXISTS (
+                  SELECT 1 FROM staff_skill_licenses ssl
+                  WHERE ssl.skill_license_type = lookup_skill_license_types.skill_license_type
+              );", new { Names = items.Select(i => i.SkillLicenseName).ToArray() }, trans);
+    }
+
+    private static void PersistSkillLicenseTypes(IEnumerable<SkillLicenseType> types)
+    {
+        var items = NormalizeSkillLicenseTypes(types);
 
         Db.ExecuteInTransaction((conn, trans) =>
         {
             conn.Execute("ALTER TABLE lookup_skill_license_types ADD COLUMN IF NOT EXISTS display_icon VARCHAR(32) NOT NULL DEFAULT '';", transaction: trans);
             if (items.Count == 0) return;
 
-            conn.Execute("DELETE FROM lookup_skill_license_types WHERE skill_license_type != ALL(@Names);", new { Names = names }, trans);
-            conn.Execute(@"
-                INSERT INTO lookup_skill_license_types (skill_license_type, description, display_icon)
-                VALUES (@SkillLicenseName, '', @DisplayIcon)
-                ON CONFLICT (skill_license_type) DO UPDATE SET
-                    display_icon = EXCLUDED.display_icon;", items, trans);
+            UpsertSkillLicenseTypes(conn, trans, items);
+            PruneSkillLicenseTypes(conn, trans, items);
         });
     }
 

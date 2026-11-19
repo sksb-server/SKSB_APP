@@ -787,7 +787,7 @@ public static class RuleEvaluator
             }
 
             // A) Check if a partner column on this row already has a value that constrains this dropdown
-            HashSet<string>? allowedByPartner = null;
+            var allowedByPartnerCol = new Dictionary<int, HashSet<string>>();
             foreach (var sync in rule.SyncRules)
             {
                 int partnerCol = FindColumnByHeader(colHeaders, sync.TargetHeader);
@@ -798,13 +798,18 @@ public static class RuleEvaluator
                     var keys = RuleDataCache.GetSourceItems(wb, sync.LookupSource, preserveDuplicates: true);
                     var vals = RuleDataCache.GetSourceItems(wb, sync.ResultSource, preserveDuplicates: true);
                     int len = Math.Min(keys.Count, vals.Count);
-                    allowedByPartner ??= new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                    if (len == 0) continue;
+                    if (!allowedByPartnerCol.TryGetValue(partnerCol, out var colAllowed))
+                    {
+                        colAllowed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                        allowedByPartnerCol[partnerCol] = colAllowed;
+                    }
 
                     for (int i = 0; i < len; i++)
                     {
                         if (RuleDataCache.ValuesMatch(vals[i], partnerVal))
                         {
-                            allowedByPartner.Add(keys[i]);
+                            colAllowed.Add(keys[i]);
                         }
                     }
                 }
@@ -834,9 +839,10 @@ public static class RuleEvaluator
             {
                 bool valid = true;
 
-                if (allowedByPartner != null && allowedByPartner.Count > 0)
+                if (allowedByPartnerCol.Count > 0)
                 {
-                    valid = allowedByPartner.Any(a => RuleDataCache.ValuesMatch(a, opt.Raw) || RuleDataCache.ValuesMatch(a, opt.Display));
+                    valid = allowedByPartnerCol.Values.All(allowed =>
+                        allowed.Any(a => RuleDataCache.ValuesMatch(a, opt.Raw) || RuleDataCache.ValuesMatch(a, opt.Display)));
                 }
 
                 if (valid && forcedState != null)

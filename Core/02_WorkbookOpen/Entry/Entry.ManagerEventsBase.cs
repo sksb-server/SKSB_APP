@@ -65,7 +65,6 @@ public abstract class ManagerEventsBase<T> : IExcelAddIn
             _coreEvents.AutoOpen();
 
             HookApplicationEvents();
-            Arrow.EnsureExcelEventsHooked();
 
             double nowSerial = Convert.ToDouble(XlCall.Excel(XlCall.xlfNow));
             XlCall.Excel(XlCall.xlcOnTime, nowSerial + (1.0 / 86400.0), DelayedAutoLoadMacroName);
@@ -80,7 +79,6 @@ public abstract class ManagerEventsBase<T> : IExcelAddIn
         ExcelAsyncUtil.QueueAsMacro(() =>
         {
             _coreEvents.AutoClose();
-            Arrow.Teardown();
             UnhookApplicationEvents();
             XlCall.Excel(XlCall.xlcOnKey, "^s");
             XlCall.Excel(XlCall.xlcOnKey, "^+s");

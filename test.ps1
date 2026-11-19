@@ -160,7 +160,21 @@ $suffix = if ($machine -eq 0x8664) { '-AddIn64.xll' } else { '-AddIn.xll' }
 $shadowRoot = Join-Path $env:TEMP 'SKSB_Debug_Shadow'
 New-Item -ItemType Directory -Force -Path $shadowRoot | Out-Null
 Get-ChildItem $shadowRoot -Directory -ErrorAction SilentlyContinue | ForEach-Object {
-    try { Remove-Item $_.FullName -Recurse -Force -ErrorAction Stop } catch { }
+    $dirPath = $_.FullName
+    $locked = $false
+    foreach ($f in Get-ChildItem $dirPath -File -Recurse -Force -ErrorAction SilentlyContinue) {
+        $s = $null
+        try { $s = [System.IO.File]::Open($f.FullName, 'Open', 'Read', 'None') }
+        catch { $locked = $true; break }
+        finally { if ($s) { $s.Dispose() } }
+    }
+    if (-not $locked) {
+        try {
+            $trash = if ($dirPath.EndsWith('.deleting', [StringComparison]::OrdinalIgnoreCase)) { $dirPath } else { "$dirPath.deleting" }
+            if ($trash -ne $dirPath) { Move-Item -LiteralPath $dirPath -Destination $trash -ErrorAction Stop }
+            Remove-Item -LiteralPath $trash -Recurse -Force -ErrorAction Stop
+        } catch { }
+    }
 }
 
 $sessionDir = Join-Path $shadowRoot "${projectName}_$(Get-Date -Format 'yyyyMMdd_HHmmss_fff')_$([Guid]::NewGuid().ToString('N').Substring(0,6))"

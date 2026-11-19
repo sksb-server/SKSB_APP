@@ -129,6 +129,22 @@ public static partial class ServerDispatcher
             }).ToList();
         string[] activeSkillNames = skills.Select(s => s.SkillName).ToArray();
 
+        var projSkillReqs = (schedule.ProjectSkillRequirements ?? new List<ProjectSkillRequirement>())
+            .Where(r => r.ProjectType != ProjectType.None)
+            .GroupBy(r => r.ProjectType)
+            .Select(g => g.First())
+            .Select(r => new
+            {
+                ProjectType = r.ProjectType.ToString(),
+                RequiredSkills = CleanList(r.Skills),
+                RequiredVehicles = (r.Vehicles ?? new List<VehicleType>())
+                    .Where(v => v != VehicleType.None)
+                    .Distinct()
+                    .Select(v => v.ToString())
+                    .ToArray()
+            }).ToList();
+        string[] activeProjectTypes = projSkillReqs.Select(r => r.ProjectType).ToArray();
+
         const string sqlSlotUpsert = @"
         INSERT INTO daily_project_schedules (schedule_date, shift, slot_index, project_id, premix_holes, workers, vehicles, remarks)
         VALUES (@ScheduleDate, @Shift, @SlotIndex, @ProjectId, @PremixHoles, @Workers, @Vehicles, @Remarks)
@@ -197,6 +213,14 @@ public static partial class ServerDispatcher
             display_icon = EXCLUDED.display_icon,
             updated_at   = CURRENT_TIMESTAMP;";
 
+        const string sqlProjectSkillReqUpsert = @"
+        INSERT INTO project_skill_requirements (project_type, required_skills, required_vehicles)
+        VALUES (@ProjectType, @RequiredSkills, @RequiredVehicles)
+        ON CONFLICT (project_type) DO UPDATE SET
+            required_skills   = EXCLUDED.required_skills,
+            required_vehicles = EXCLUDED.required_vehicles,
+            updated_at        = CURRENT_TIMESTAMP;";
+
         const string sqlSettingsUpsert = @"
         INSERT INTO daily_schedule_settings (schedule_date, late_cut_off_time, ot_start_time)
         VALUES (@ScheduleDate, @LateCutOffTime, @OtStartTime)
@@ -234,6 +258,11 @@ public static partial class ServerDispatcher
                 conn.Execute("DELETE FROM lookup_schedule_skills WHERE skill_name != ALL(@ActiveNames);", new { ActiveNames = activeSkillNames }, trans);
                 conn.Execute(sqlSkillUpsert, skills, trans);
             }
+            if (activeProjectTypes.Length > 0)
+            {
+                conn.Execute("DELETE FROM project_skill_requirements WHERE project_type != ALL(@ActiveTypes);", new { ActiveTypes = activeProjectTypes }, trans);
+                conn.Execute(sqlProjectSkillReqUpsert, projSkillReqs, trans);
+            }
 
             if (teams.Count > 0) conn.Execute(sqlTeamUpsert, teams, trans);
             if (prefs.Count > 0) conn.Execute(sqlPrefUpsert, prefs, trans);
@@ -245,7 +274,7 @@ public static partial class ServerDispatcher
         AppLogger.Info(
             $"[PostgreSQL Upload - Schedule {schedule.DailyScheduleDate:yyyy-MM-dd}] " +
             $"lateCutOff={schedule.LateCutOffTime:HH:mm}, otStart={schedule.OTStartTime:HH:mm}, " +
-            $"slots={slots.Count}, attendances={attendances.Count}, entries={entries.Count}, prefs={prefs.Count}, teams={teams.Count}, skills={skills.Count}");
+            $"slots={slots.Count}, attendances={attendances.Count}, entries={entries.Count}, prefs={prefs.Count}, teams={teams.Count}, skills={skills.Count}, projSkillReqs={projSkillReqs.Count}");
     }
 
     // =========================================================================

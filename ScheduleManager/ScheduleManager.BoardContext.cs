@@ -29,25 +29,12 @@ internal static class BoardContext
         ["Road_Reinstatement"] = "🛣", ["Civil_Earthworks"] = "⛏", ["Machinery_Rental"] = "⚙", ["General_Maintenance"] = "🧰", ["Other"] = "📋"
     };
 
-    private static readonly Dictionary<ProjectType, (string[] Skills, VehicleType[] Vehicles)> DefaultRequirements = new()
-    {
-        [ProjectType.Pipe_Repair] = (Array.Empty<string>(), new[] { VehicleType.Hilux, VehicleType.Backhoe }),
-        [ProjectType.Pipe_Laying] = (Array.Empty<string>(), new[] { VehicleType.Excavator, VehicleType.Tipper_Lorry }),
-        [ProjectType.Comm_Pipe_Meter] = (Array.Empty<string>(), new[] { VehicleType.Hilux }),
-        [ProjectType.Valve_Hydrant] = (Array.Empty<string>(), new[] { VehicleType.Hilux }),
-        [ProjectType.Tapping_Connection] = (Array.Empty<string>(), new[] { VehicleType.Hilux }),
-        [ProjectType.Road_Reinstatement] = (Array.Empty<string>(), new[] { VehicleType.Roller, VehicleType.Tipper_Lorry }),
-        [ProjectType.Civil_Earthworks] = (Array.Empty<string>(), new[] { VehicleType.Excavator, VehicleType.Tipper_Lorry }),
-        [ProjectType.Machinery_Rental] = (Array.Empty<string>(), new[] { VehicleType.Machinery }),
-        [ProjectType.General_Maintenance] = (Array.Empty<string>(), new[] { VehicleType.Hilux })
-    };
-
     // =========================================================================
     // 2. CACHED STATE
     // =========================================================================
     private static List<WorkerPreference> _prefs = new();
     private static List<TeamRecord> _teams = new();
-    private static Dictionary<ProjectType, ProjectTypeRequirement> _requirements = new();
+    private static Dictionary<ProjectType, (List<string> Skills, List<VehicleType> Vehicles)> _projectSkillRequirements = new();
     private static Dictionary<string, string> _icons = BuildBaseIcons();
     private static List<ScheduleSkillRecord> _skills = new();
     private static List<SkillLicenseType> _skillLicenseTypes = new();
@@ -70,6 +57,22 @@ internal static class BoardContext
     public static TimeOnly LateCutOff => _lateCutOff;
     public static TimeOnly OTStartTime => _otStartTime;
 
+    private static List<VehicleLicense> _vehicleLicenses = new();
+    private static List<SkillLicense> _skillLicenses = new();
+    private static bool _licensesLoaded;
+
+    public static IReadOnlyList<VehicleLicense> VehicleLicenses => _vehicleLicenses;
+    public static IReadOnlyList<SkillLicense> SkillLicenses => _skillLicenses;
+    public static bool HasLicensesLoaded => _licensesLoaded;
+
+    /// <summary>StaffManager licences cached so Preference[Licensed Skills] can be re-evaluated live.</summary>
+    public static void SetLicenses(IEnumerable<VehicleLicense>? vehicleLicenses, IEnumerable<SkillLicense>? skillLicenses)
+    {
+        _vehicleLicenses = (vehicleLicenses ?? Enumerable.Empty<VehicleLicense>()).ToList();
+        _skillLicenses = (skillLicenses ?? Enumerable.Empty<SkillLicense>()).ToList();
+        _licensesLoaded = true;
+    }
+
     public static WorkerPreference? PreferenceFor(long staffId) => _prefs.FirstOrDefault(p => p.StaffID == staffId);
 
     public static void SetPreferences(IEnumerable<WorkerPreference> prefs, IEnumerable<TeamRecord> teams)
@@ -83,6 +86,26 @@ internal static class BoardContext
     {
         _skills = (skills ?? Enumerable.Empty<ScheduleSkillRecord>()).ToList();
         RebuildIcons();
+    }
+
+    /// <summary>Preference[ProjectRequirementsTable] rows.</summary>
+    public static void SetProjectSkillRequirements(IEnumerable<ProjectSkillRequirement>? reqs)
+    {
+        _projectSkillRequirements = (reqs ?? Enumerable.Empty<ProjectSkillRequirement>())
+            .Where(r => r.ProjectType != ProjectType.None)
+            .GroupBy(r => r.ProjectType)
+            .ToDictionary(
+                g => g.Key,
+                g => (
+                    g.First().Skills
+                        .Where(s => !string.IsNullOrWhiteSpace(s))
+                        .Select(s => s.Trim())
+                        .Distinct(StringComparer.OrdinalIgnoreCase)
+                        .ToList(),
+                    (g.First().Vehicles ?? new List<VehicleType>())
+                        .Where(v => v != VehicleType.None)
+                        .Distinct()
+                        .ToList()));
     }
 
     /// <summary>StaffManager's lookup_skill_license_types rows (source 1). Rebuilds the icon map.</summary>
@@ -114,6 +137,90 @@ internal static class BoardContext
         return result;
     }
 
+    /// <summary>Every licensed skill name: SkillLicenseTypes plus vehicle-license role skills (case-insensitive).</summary>
+    public static HashSet<string> LicensedSkillNames()
+    {
+        var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var t in _skillLicenseTypes)
+            if (!string.IsNullOrWhiteSpace(t.SkillLicenseName)) set.Add(t.SkillLicenseName.Trim());
+        foreach (var r in SkillCatalog.VehicleLicenseRoleSkills) set.Add(r);
+        return set;
+    }
+
+    /// <summary>True when the skill is licensed (known licence skill, or a "License {class}" entry from ApplyLicensedSkills).</summary>
+    public static bool IsLicensedSkill(string? skill)
+    {
+        if (string.IsNullOrWhiteSpace(skill)) return false;
+        string s = skill.Trim();
+        return LicensedSkillNames().Contains(s) || s.StartsWith("License ", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// The worker's Primary Skill when it counts: unlicensed skills always count; a licensed Primary Skill only counts
+    /// while it is among the worker's active LicensedSkills. Otherwise null.
+    /// </summary>
+    public static string? EffectivePrimarySkill(WorkerPreference? pref)
+    {
+        if (pref == null || string.IsNullOrWhiteSpace(pref.PrimarySkill)) return null;
+        string primary = pref.PrimarySkill.Trim();
+        if (!IsLicensedSkill(primary)) return primary;
+        return pref.LicensedSkills.Any(s => s.Trim().Equals(primary, StringComparison.OrdinalIgnoreCase)) ? primary : null;
+    }
+
+    /// <summary>
+    /// When the worker's licensed Primary Skill is inactive on <paramref name="scheduleDate"/> but a historical /
+    /// suspended / future license record exists, returns a short dropdown note and a detailed comment text.
+    /// </summary>
+    public static (string ShortNote, string Detail)? DescribeInactivePrimarySkillLicense(WorkerPreference? pref, DateOnly scheduleDate)
+    {
+        if (pref == null || pref.StaffID <= 0 || string.IsNullOrWhiteSpace(pref.PrimarySkill)) return null;
+        string primary = pref.PrimarySkill.Trim();
+        if (!IsLicensedSkill(primary) || EffectivePrimarySkill(pref) != null) return null;
+
+        var records = new List<(bool Suspended, DateOnly RenewDate, DateOnly ExpiryDate)>();
+        records.AddRange(_vehicleLicenses
+            .Where(l => l.StaffID == pref.StaffID && l.VehicleLicenseClass != VehicleLicenseClass.None &&
+                        (SkillCatalog.RoleSkillFor(l.VehicleLicenseClass) ?? SkillCatalog.Driver).Equals(primary, StringComparison.OrdinalIgnoreCase))
+            .Select(l => (l.VehicleLicenseStatus == VehicleLicenseStatus.Suspended, l.RenewDate, l.ExpiryDate)));
+        records.AddRange(_skillLicenses
+            .Where(l => l.StaffID == pref.StaffID && !string.IsNullOrWhiteSpace(l.SkillLicenseType) &&
+                        l.SkillLicenseType.Trim().Equals(primary, StringComparison.OrdinalIgnoreCase))
+            .Select(l => (l.SkillLicenseStatus == SkillLicenseStatus.Suspended, l.RenewDate, l.ExpiryDate)));
+        if (records.Count == 0) return null;
+
+        if (records.All(r => r.Suspended))
+            return ($"{primary} license suspended", $"{primary} license is suspended");
+
+        var live = records.Where(r => !r.Suspended).ToList();
+        var expired = live.Where(r => r.ExpiryDate < scheduleDate).OrderByDescending(r => r.ExpiryDate).Cast<(bool Suspended, DateOnly RenewDate, DateOnly ExpiryDate)?>().FirstOrDefault();
+        if (expired != null)
+            return ($"{primary} license expired", $"{primary} license expired on {expired.Value.ExpiryDate:dd/MM/yyyy}");
+
+        var future = live.Where(r => r.RenewDate > scheduleDate).OrderBy(r => r.RenewDate).Cast<(bool Suspended, DateOnly RenewDate, DateOnly ExpiryDate)?>().FirstOrDefault();
+        if (future != null)
+            return ($"{primary} license not yet valid", $"{primary} license not valid until {future.Value.RenewDate:dd/MM/yyyy}");
+
+        return ($"{primary} license inactive", $"{primary} license is not valid on {scheduleDate:dd/MM/yyyy}");
+    }
+
+    /// <summary>Distinct (first spelling wins) union of SkillsTable and General Worker, excluding licensed skills.</summary>
+    public static List<string> UnlicensedSkills()
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var result = new List<string>();
+        void Add(string? name)
+        {
+            if (string.IsNullOrWhiteSpace(name)) return;
+            string n = name.Trim();
+            if (IsLicensedSkill(n)) return;
+            if (seen.Add(n)) result.Add(n);
+        }
+
+        foreach (var s in _skills) Add(s.SkillName);
+        Add(SkillCatalog.GeneralWorker);
+        return result;
+    }
+
     // =========================================================================
     // 3. WORKBOOK RELOAD (Excel macro thread only)
     // =========================================================================
@@ -127,14 +234,10 @@ internal static class BoardContext
                 _prefs = TableMapper.ExtractFromTable<WorkerPreference>((object)prefSheet, "WorkerPreferencesTable");
                 _teams = TableMapper.ExtractFromTable<TeamRecord>((object)prefSheet, "TeamTable");
                 _skills = TableMapper.ExtractFromTable<ScheduleSkillRecord>((object)prefSheet, "SkillsTable");
+                SetProjectSkillRequirements(TableMapper.ExtractFromTable<ProjectSkillRequirement>((object)prefSheet, "ProjectRequirementsTable"));
             }
 
             dynamic? lookups = SheetMapperHelper.ResolveSheetSafely(wbObj, new[] { "Lookups" }, "Lookups");
-            if (lookups != null)
-            {
-                var reqs = TableMapper.ExtractFromTable<ProjectTypeRequirement>((object)lookups, "ProjectTypeRequirementsTable");
-                _requirements = reqs.Where(r => r.ProjectType != ProjectType.None).GroupBy(r => r.ProjectType).ToDictionary(g => g.Key, g => g.First());
-            }
             RebuildIcons((object?)lookups);
 
             dynamic? attSheet = SheetMapperHelper.ResolveSheetSafely(wbObj, SheetMapper.MasterSheetAliases, "Daily Attendances");
@@ -211,15 +314,11 @@ internal static class BoardContext
         var vehicles = new List<VehicleType>();
         foreach (var type in types)
         {
-            if (_requirements.TryGetValue(type, out var r))
+            // Skills and vehicles come exclusively from Preference[ProjectRequirementsTable].
+            if (_projectSkillRequirements.TryGetValue(type, out var req))
             {
-                skills.AddRange(r.RequiredSkills);
-                vehicles.AddRange(r.RequiredVehicleTypes);
-            }
-            else if (DefaultRequirements.TryGetValue(type, out var d))
-            {
-                skills.AddRange(d.Skills);
-                vehicles.AddRange(d.Vehicles);
+                skills.AddRange(req.Skills);
+                vehicles.AddRange(req.Vehicles);
             }
         }
         return (skills.Where(s => !string.IsNullOrWhiteSpace(s)).Distinct(StringComparer.OrdinalIgnoreCase).ToList(),

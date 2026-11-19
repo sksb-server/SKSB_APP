@@ -302,8 +302,21 @@ public static class SkillCatalog
 
     public static readonly string[] DisplayIcons =
     {
+        // Existing / core
         "🚗", "🚜", "🔧", "👷", "🧰", "🚚", "🚛", "🏗", "🏍", "🚐", "🚙", "⛏", "🛠",
-        "⚡", "🔥", "🦺", "🚧", "🔨", "⚙", "🚰", "💧", "🚒", "🔗", "🛣", "📋"
+        "⚡", "🔥", "🦺", "🚧", "🔨", "⚙", "🚰", "💧", "🚒", "🔗", "🛣", "📋",
+        // Welding & metalwork
+        "🧑‍🏭", "🥽", "🎇", "🔩", "🧲", "⛓",
+        // Tools & hardware
+        "🪛", "🪚", "🪜", "🪝", "🪣", "🔦", "🔌", "🔋", "📐", "📏",
+        // Vehicles & traffic
+        "🛻", "🚌", "⛽", "🚦", "🛑",
+        // Safety & inspection
+        "🧯", "🩹", "⚠", "🛡", "🔍", "✅", "🪪",
+        // Site, utilities & materials
+        "🧱", "🪨", "🪵", "🌲", "🌊", "📦", "🗑", "🏭", "📡",
+        // Admin & general
+        "📝", "📅", "🗺", "📞", "⭐"
     };
 
     public const string Driver = "Driver";

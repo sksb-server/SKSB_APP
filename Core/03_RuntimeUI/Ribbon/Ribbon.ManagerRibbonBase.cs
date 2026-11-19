@@ -442,6 +442,9 @@ public abstract class ManagerRibbonBase : ExcelRibbon
         });
     }
 
+    /// <summary>Called on the macro thread after duplicate rows were removed (COM flags already restored).</summary>
+    protected virtual void OnAfterDuplicateRowsCleaned(int removedCount) { }
+
     public void OnCleanDuplicateRowsClicked(IRibbonControl control)
     {
         ExcelAsyncUtil.QueueAsMacro(() =>
@@ -482,6 +485,8 @@ public abstract class ManagerRibbonBase : ExcelRibbon
 
                 if (totalDuplicatesRemoved > 0)
                 {
+                    try { OnAfterDuplicateRowsCleaned(totalDuplicatesRemoved); }
+                    catch (Exception hookEx) { AppLogger.Warn($"[ManagerRibbonBase] OnAfterDuplicateRowsCleaned failed: {hookEx.Message}"); }
                     SheetOperations.ShowStatusConfirmation($"Removed {totalDuplicatesRemoved} duplicate row(s).");
                     MessageBox.Show(
                         $"Successfully removed {totalDuplicatesRemoved} duplicate row(s) from the active sheet.\n\n" +

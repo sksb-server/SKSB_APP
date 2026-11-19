@@ -14,7 +14,8 @@ internal sealed record SlotContext(
     IReadOnlyList<VehicleType> RequiredVehicleTypes,
     IReadOnlyList<string> SlotVehiclePlates,
     IReadOnlyList<VehicleType> SlotVehicleTypes,
-    IReadOnlySet<long> AssignedElsewhereInBand);
+    IReadOnlyDictionary<long, int> SameShiftAssignmentCounts,
+    IReadOnlyDictionary<long, int> OtherShiftAssignmentCounts);
 
 /// <summary>Everything the engine knows about one worker for scoring.</summary>
 internal sealed record WorkerProfile(
@@ -28,6 +29,8 @@ internal sealed record MatchResult(int Percent, bool Blocked, string Reason);
 /// <summary>
 /// Scores workers (and whole teams) against a slot. Weights add up to 100:
 /// primary skill 30, licensed/other skills 20, vehicle fit 15, shift 10, rest day 10, weekly cap 10, availability 5.
+/// Workers already on other project slots the same day are penalized by inverse-proportion decay:
+/// load = sameShift + 0.5 * otherShift, and the positive score is divided by 1 + 0.25 * load + 0.25 * load^2.
 /// A blacklisted required skill subtracts 40 and blocks the worker (listed last, flagged).
 /// </summary>
 internal static class ScheduleMatchEngine
@@ -42,9 +45,10 @@ internal static class ScheduleMatchEngine
         var pref = worker.Preference;
         var required = slot.RequiredSkills.Where(s => !string.IsNullOrWhiteSpace(s)).ToList();
         var has = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        string? effectivePrimary = BoardContext.EffectivePrimarySkill(pref);
         if (pref != null)
         {
-            if (!string.IsNullOrWhiteSpace(pref.PrimarySkill)) has.Add(pref.PrimarySkill.Trim());
+            if (effectivePrimary != null) has.Add(effectivePrimary);
             foreach (var s in pref.LicensedSkills.Concat(pref.OtherSkills)) if (!string.IsNullOrWhiteSpace(s)) has.Add(s.Trim());
         }
 
@@ -53,8 +57,10 @@ internal static class ScheduleMatchEngine
 
         // Primary skill (30)
         if (required.Count == 0) score += 15;
-        else if (pref != null && !string.IsNullOrWhiteSpace(pref.PrimarySkill) &&
-                 required.Contains(pref.PrimarySkill.Trim(), StringComparer.OrdinalIgnoreCase)) score += 30;
+        else if (!string.IsNullOrEmpty(effectivePrimary) &&
+                 required.Contains(effectivePrimary, StringComparer.OrdinalIgnoreCase)) score += 30;
+        if (BoardContext.DescribeInactivePrimarySkillLicense(pref, slot.Date) is { } inactive)
+            notes.Add(inactive.ShortNote);
 
         // Licensed + other skills coverage (20)
         if (required.Count == 0) score += 10;
@@ -87,9 +93,19 @@ internal static class ScheduleMatchEngine
         else score += 10;
 
         // Availability (5)
+        slot.SameShiftAssignmentCounts.TryGetValue(worker.Staff.Id, out int sameShiftCount);
+        slot.OtherShiftAssignmentCounts.TryGetValue(worker.Staff.Id, out int otherShiftCount);
         if (worker.IsUnavailableToday) notes.Add("unavailable");
-        else if (slot.AssignedElsewhereInBand.Contains(worker.Staff.Id)) notes.Add("already on this shift");
+        else if (sameShiftCount > 0)
+            notes.Add(sameShiftCount == 1 ? "already on 1 project this shift" : $"already on {sameShiftCount} projects this shift");
         else score += 5;
+        if (otherShiftCount > 0)
+            notes.Add(otherShiftCount == 1 ? "already on 1 project other shift" : $"already on {otherShiftCount} projects other shift");
+
+        // Multi-project decay
+        double load = sameShiftCount + (0.5 * otherShiftCount);
+        if (load > 0)
+            score /= 1.0 + (0.25 * load) + (0.25 * load * load);
 
         // Blacklist
         bool blacklisted = pref != null && required.Any(r => pref.BlacklistedSkills.Contains(r, StringComparer.OrdinalIgnoreCase));

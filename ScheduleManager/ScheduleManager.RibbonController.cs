@@ -2,6 +2,9 @@
 
 using System;
 using System.IO;
+using System.Linq;
+using SKSB_App.Core.WorkbookOpen.Sheet;
+using SKSB_App.Core.WorkbookSave.Validation;
 using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using System.Windows.Forms;
@@ -85,6 +88,8 @@ public class RibbonController : ManagerRibbonBase
     // =========================================================================
     // 5. ATTENDANCE
     // =========================================================================
+    protected override void OnAfterDuplicateRowsCleaned(int removedCount) => SheetMapper.OnDuplicateRowsCleaned();
+
     public void OnRollupClicked(IRibbonControl control) =>
         ExcelAsyncUtil.QueueAsMacro(() => SheetMapper.RefreshDerived(reloadContext: true, rollup: true));
 
@@ -94,10 +99,16 @@ public class RibbonController : ManagerRibbonBase
         ExcelAsyncUtil.QueueAsMacro(() =>
         {
             DateOnly date = Events.CurrentDate();
-            AppLogger.Info($"[ScheduleManager] Syncing thumbprint terminal ({DeviceSyncManager.DefaultIp})...");
+            if (date < DateOnly.FromDateTime(DateTime.Today) &&
+                !PastRecordGuard.ConfirmPastRecordEdit(SheetMapper.GuardSession, date, "Schedule Manager"))
+            {
+                SheetOperations.ShowStatusConfirmation("Terminal sync cancelled.");
+                return;
+            }
+            AppLogger.Info($"[ScheduleManager] Syncing thumbprint terminal ({DeviceSyncManager.DefaultIp}) for {date:yyyy-MM-dd}...");
             string? addinDir = null;
             try { addinDir = Path.GetDirectoryName(ExcelDnaUtil.XllPath); } catch { }
-            try { ((dynamic)ExcelDnaUtil.Application).StatusBar = $"Syncing thumbprint terminal ({DeviceSyncManager.DefaultIp})..."; } catch { }
+            try { ((dynamic)ExcelDnaUtil.Application).StatusBar = $"Syncing thumbprint terminal ({DeviceSyncManager.DefaultIp}) for {date:dd MMM yyyy}..."; } catch { }
             Task.Run(async () =>
             {
                 try
@@ -107,9 +118,11 @@ public class RibbonController : ManagerRibbonBase
                     {
                         try
                         {
-                        var (added, duplicates, unknown) = SheetMapper.AppendTerminalPunches(punches);
+                        var forDate = punches.Where(p => DateOnly.FromDateTime(p.Timestamp) == date).ToList();
+                        var (added, duplicates, unknown) = SheetMapper.AppendTerminalPunches(forDate, date);
+                        try { ((dynamic)ExcelDnaUtil.Application).StatusBar = false; } catch { }
                         MessageBox.Show(
-                            $"Terminal {DeviceSyncManager.DefaultIp}: {punches.Count} punch(es) read.\n\n" +
+                            $"Terminal {DeviceSyncManager.DefaultIp} ({date:dd MMM yyyy}): {forDate.Count} punch(es) read for this date.\n\n" +
                             $"  Added to Attendance Entries : {added}\n" +
                             $"  Already present / double scans : {duplicates}\n" +
                             $"  Unknown staff / other dates : {unknown}\n\n" +

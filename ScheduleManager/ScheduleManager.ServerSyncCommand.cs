@@ -45,7 +45,7 @@ internal static class ServerSyncCommands
         if (record.DailyScheduleDate != date)
         {
             AppLogger.Warn($"[{Module}] Offline snapshot is for {record.DailyScheduleDate:yyyy-MM-dd}; showing {date:yyyy-MM-dd} without date-scoped rows.");
-            record = new ScheduleRecord { DailyScheduleDate = date, Preferences = record.Preferences, Teams = record.Teams, Skills = record.Skills };
+            record = new ScheduleRecord { DailyScheduleDate = date, Preferences = record.Preferences, Teams = record.Teams, Skills = record.Skills, ProjectSkillRequirements = record.ProjectSkillRequirements };
         }
 
         // Offline Mode only: Online Mode already got LicensedSkills from staff_vehicle_licenses / staff_skill_licenses
@@ -56,6 +56,7 @@ internal static class ServerSyncCommands
             BoardContext.SetSkillLicenseTypes(LoadOfflineSkillLicenseTypes());
         }
         BoardContext.SetSkills(record.Skills);
+        BoardContext.SetProjectSkillRequirements(record.ProjectSkillRequirements);
         Hydrate(record);
         return record;
     }
@@ -186,8 +187,34 @@ internal static class ServerSyncCommands
         BoardContext.SetSkillLicenseTypes(QuerySkillLicenseTypes(db));
         BoardContext.SetSkills(record.Skills);
 
+        foreach (var r in db.Query<dynamic>("SELECT project_type, required_skills, required_vehicles FROM project_skill_requirements ORDER BY project_type;"))
+        {
+            var pt = Parse(r.project_type, ProjectType.None);
+            if (pt == ProjectType.None) continue;
+            record.ProjectSkillRequirements.Add(new ProjectSkillRequirement
+            {
+                ProjectType = pt,
+                Skills = Arr(r.required_skills),
+                Vehicles = Arr((object?)r.required_vehicles)
+                    .Select(v => Parse(v, VehicleType.None))
+                    .Where(v => v != VehicleType.None)
+                    .Distinct()
+                    .ToList()
+            });
+        }
+        BoardContext.SetProjectSkillRequirements(record.ProjectSkillRequirements);
+
         // Licensed skills are derived from StaffManager data, never stored with the preference.
-        var vehicleLicenses = db.Query<dynamic>("SELECT staff_id, vehicle_license_class, renew_date, expiry_date, status FROM staff_vehicle_licenses;")
+        var vehicleLicenses = QueryVehicleLicenses(db);
+        var skillLicenses = QuerySkillLicenses(db);
+        BoardContext.SetLicenses(vehicleLicenses, skillLicenses);
+        ApplyLicensedSkills(record.Preferences, vehicleLicenses, skillLicenses, date);
+
+        return record;
+    }
+
+    private static List<VehicleLicense> QueryVehicleLicenses(PostgreSqlService db) =>
+        db.Query<dynamic>("SELECT staff_id, vehicle_license_class, renew_date, expiry_date, status FROM staff_vehicle_licenses;")
             .Select(r => new VehicleLicense
             {
                 StaffID = Convert.ToInt64(r.staff_id),
@@ -196,7 +223,9 @@ internal static class ServerSyncCommands
                 ExpiryDate = DateOnly.FromDateTime(Convert.ToDateTime(r.expiry_date)),
                 VehicleLicenseStatus = Parse(r.status, VehicleLicenseStatus.Invalid)
             }).ToList();
-        var skillLicenses = db.Query<dynamic>("SELECT staff_id, skill_license_type, renew_date, expiry_date, status FROM staff_skill_licenses;")
+
+    private static List<SkillLicense> QuerySkillLicenses(PostgreSqlService db) =>
+        db.Query<dynamic>("SELECT staff_id, skill_license_type, renew_date, expiry_date, status FROM staff_skill_licenses;")
             .Select(r => new SkillLicense
             {
                 StaffID = Convert.ToInt64(r.staff_id),
@@ -205,10 +234,6 @@ internal static class ServerSyncCommands
                 ExpiryDate = DateOnly.FromDateTime(Convert.ToDateTime(r.expiry_date)),
                 SkillLicenseStatus = Parse(r.status, SkillLicenseStatus.Invalid)
             }).ToList();
-        ApplyLicensedSkills(record.Preferences, vehicleLicenses, skillLicenses, date);
-
-        return record;
-    }
 
     /// <summary>StaffManager's skill licence types (source 1), tolerating a database without the display_icon column.</summary>
     private static List<SkillLicenseType> QuerySkillLicenseTypes(PostgreSqlService db)
@@ -246,25 +271,65 @@ internal static class ServerSyncCommands
     /// <summary>Offline path: re-derives LicensedSkills from the local StaffRecord snapshot.</summary>
     private static void DeriveLicensedSkills(List<WorkerPreference> prefs, DateOnly scheduleDate)
     {
+        var (veh, skl) = LoadOfflineLicenses();
+        BoardContext.SetLicenses(veh, skl);
         if (prefs.Count == 0) return;
-        var staff = OfflineSnapshot.Load<List<StaffRecord>>();
-        if (staff == null || staff.Count == 0) return;
 
-        ApplyLicensedSkills(
-            prefs,
-            staff.SelectMany(s => s.VehicleLicenses.Select(l => { if (l.StaffID == 0) l.StaffID = s.StaffID; return l; })),
-            staff.SelectMany(s => s.SkillLicenses.Select(l => { if (l.StaffID == 0) l.StaffID = s.StaffID; return l; })),
-            scheduleDate);
+        ApplyLicensedSkills(prefs, veh, skl, scheduleDate);
+    }
+
+    private static (List<VehicleLicense> Vehicle, List<SkillLicense> Skill) LoadOfflineLicenses()
+    {
+        var staff = OfflineSnapshot.Load<List<StaffRecord>>();
+        if (staff == null || staff.Count == 0) return (new List<VehicleLicense>(), new List<SkillLicense>());
+
+        return (
+            staff.SelectMany(s => s.VehicleLicenses.Select(l => { if (l.StaffID == 0) l.StaffID = s.StaffID; return l; })).ToList(),
+            staff.SelectMany(s => s.SkillLicenses.Select(l => { if (l.StaffID == 0) l.StaffID = s.StaffID; return l; })).ToList());
+    }
+
+    /// <summary>Makes sure the licence cache is populated (server when online, local snapshot otherwise).</summary>
+    internal static void EnsureLicensesLoaded()
+    {
+        if (BoardContext.HasLicensesLoaded) return;
+        if (ServerEnvironment.IsOnline)
+        {
+            try
+            {
+                var db = new PostgreSqlService();
+                BoardContext.SetLicenses(QueryVehicleLicenses(db), QuerySkillLicenses(db));
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Warn($"[{Module}] Licence cache load failed: {ex.Message}");
+            }
+        }
+        else
+        {
+            var (veh, skl) = LoadOfflineLicenses();
+            BoardContext.SetLicenses(veh, skl);
+        }
     }
 
     /// <summary>
     /// A licence counts for <c>scheduleDate</c> when it is not Suspended and RenewDate &lt;= scheduleDate &lt;= ExpiryDate
     /// (so a licence that has since expired still counts for past dates, and a future renewal does not apply early).
     /// Any qualifying vehicle licence class grants its role skill (<see cref="SkillCatalog.RoleSkillFor"/>, falling back
-    /// to "Driver") plus "License &lt;class&gt;"; a valid skill licence grants its type name.
+    /// to "Driver"); a valid skill licence grants its type name.
     /// </summary>
     internal static void ApplyLicensedSkills(
         IEnumerable<WorkerPreference> prefs,
+        IEnumerable<VehicleLicense> vehicleLicenses,
+        IEnumerable<SkillLicense> skillLicenses,
+        DateOnly scheduleDate)
+    {
+        var skillsByStaff = BuildLicensedSkillsMap(vehicleLicenses, skillLicenses, scheduleDate);
+        foreach (var p in prefs)
+            p.LicensedSkills = skillsByStaff.TryGetValue(p.StaffID, out var s) ? s : new List<string>();
+    }
+
+    /// <summary>Single source of truth: staffId -> licensed skills valid on <paramref name="scheduleDate"/>.</summary>
+    internal static Dictionary<long, List<string>> BuildLicensedSkillsMap(
         IEnumerable<VehicleLicense> vehicleLicenses,
         IEnumerable<SkillLicense> skillLicenses,
         DateOnly scheduleDate)
@@ -278,15 +343,11 @@ internal static class ServerSyncCommands
         }
 
         foreach (var l in vehicleLicenses.Where(l => l.VehicleLicenseStatus != VehicleLicenseStatus.Suspended && l.RenewDate <= scheduleDate && scheduleDate <= l.ExpiryDate && l.VehicleLicenseClass != VehicleLicenseClass.None))
-        {
             Add(l.StaffID, SkillCatalog.RoleSkillFor(l.VehicleLicenseClass) ?? SkillCatalog.Driver);
-            Add(l.StaffID, $"License {l.VehicleLicenseClass.ToString().Replace('_', ' ')}");
-        }
         foreach (var l in skillLicenses.Where(l => l.SkillLicenseStatus != SkillLicenseStatus.Suspended && l.RenewDate <= scheduleDate && scheduleDate <= l.ExpiryDate && !string.IsNullOrWhiteSpace(l.SkillLicenseType)))
             Add(l.StaffID, l.SkillLicenseType.Trim());
 
-        foreach (var p in prefs)
-            p.LicensedSkills = skillsByStaff.TryGetValue(p.StaffID, out var s) ? s : new List<string>();
+        return skillsByStaff;
     }
 
     // =========================================================================
@@ -339,11 +400,16 @@ internal static class ServerSyncCommands
         SyncSkillList();
     }
 
-    /// <summary>Pushes <see cref="BoardContext.AllConfiguredSkills"/> into the 'Data' sheet's StaffSkillList.</summary>
+    /// <summary>
+    /// Pushes <see cref="BoardContext.AllConfiguredSkills"/> into the 'Data' sheet's StaffSkillList and
+    /// <see cref="BoardContext.UnlicensedSkills"/> (no licensed skills) into OtherSkillList.
+    /// </summary>
     internal static void SyncSkillList()
     {
         var allSkills = BoardContext.AllConfiguredSkills();
         if (allSkills.Count > 0) DataList.SyncValues("StaffSkillList", allSkills);
+        var unlicensedSkills = BoardContext.UnlicensedSkills();
+        if (unlicensedSkills.Count > 0) DataList.SyncValues("OtherSkillList", unlicensedSkills);
     }
 
     // =========================================================================

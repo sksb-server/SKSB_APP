@@ -89,3 +89,12 @@ CREATE TABLE IF NOT EXISTS teams_master (
     created_at           TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at           TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+
+CREATE TABLE IF NOT EXISTS project_skill_requirements (
+    project_type      VARCHAR(50)  PRIMARY KEY,
+    required_skills   TEXT[]       NOT NULL DEFAULT '{}',
+    required_vehicles TEXT[]       NOT NULL DEFAULT '{}',
+    updated_at        TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+ALTER TABLE project_skill_requirements
+    ADD COLUMN IF NOT EXISTS required_vehicles TEXT[] NOT NULL DEFAULT '{}';

@@ -42,18 +42,18 @@ public static class ServerSyncCommands
                 skillTypes = OfflineSnapshot.Load<List<SkillLicenseType>>() ?? skillTypes;
 
             // 2. PostgreSQL first; local snapshots only after the server accepted the data.
-            if (skillTypes.Count > 0)
-            {
-                ServerDispatcher.Dispatch(skillTypes);
-            }
-
             if (staffList == null || staffList.Count == 0)
             {
-                if (skillTypes.Count > 0) OfflineSnapshot.Save(skillTypes, writeToDatabase: false);
+                if (skillTypes.Count > 0)
+                {
+                    ServerDispatcher.Dispatch(skillTypes);
+                    OfflineSnapshot.Save(skillTypes, writeToDatabase: false);
+                }
                 return true;
             }
 
-            ServerDispatcher.Dispatch(staffList);
+            // Single FK-safe transaction: lookup types + staff_master + child licenses.
+            ServerDispatcher.PersistStaff(staffList, isFullBatch: true, skillTypes);
 
             if (skillTypes.Count > 0) OfflineSnapshot.Save(skillTypes, writeToDatabase: false);
             OfflineSnapshot.Save(staffList, writeToDatabase: false);

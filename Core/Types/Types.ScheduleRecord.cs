@@ -80,6 +80,7 @@ public record ScheduleRecord
     public List<WorkerPreference> Preferences { get; set; } = new();
     public List<TeamRecord> Teams { get; set; } = new();
     public List<ScheduleSkillRecord> Skills { get; set; } = new();
+    public List<ProjectSkillRequirement> ProjectSkillRequirements { get; set; } = new();
 }
 
 // =========================================================================
@@ -270,7 +271,7 @@ public record WorkerPreference
 
     /// <summary>Single dedicated role, e.g. Driver, Excavator Operator, Pipe Fitter, Foreman, General Worker.</summary>
     [ExcelColumn("Primary Skill")]
-    [ColumnRule("StaffSkillList", "SkillsTable[Skills]", IsRequired = false, IsWarningOnly = true)]
+    [ColumnRule(IsRequired = false)]
     public string PrimarySkill { get; set; } = string.Empty;
 
     /// <summary>Read-only: derived from StaffManager's valid vehicle / skill licenses on every load.</summary>
@@ -279,7 +280,7 @@ public record WorkerPreference
     public List<string> LicensedSkills { get; set; } = new();
 
     [ExcelColumn("Other Skills")]
-    [ColumnRule("StaffSkillList", "SkillsTable[Skills]", IsRequired = false, IsWarningOnly = true, IsMultiSelect = true)]
+    [ColumnRule("OtherSkillList", IsRequired = false, IsWarningOnly = true, IsMultiSelect = true)]
     public List<string> OtherSkills { get; set; } = new();
 
     [ExcelColumn("Blacklisted Skills")]
@@ -346,6 +347,26 @@ public record ScheduleSkillRecord
     [ExcelColumn("Display Icon")]
     [ColumnRule("DisplayIconList", IsRequired = false, IsWarningOnly = true)]
     public string DisplayIcon { get; set; } = string.Empty;
+}
+
+// =========================================================================
+// 7c. PROJECT SKILL REQUIREMENTS TABLE ("ProjectRequirementsTable" on Preference)
+// =========================================================================
+
+[ExcelTable("ProjectRequirementsTable")]
+public record ProjectSkillRequirement
+{
+    [ExcelColumn("Project Type", isRequired: true)]
+    [ColumnRule("ProjectTypeList", IsRequired = true)]
+    public ProjectType ProjectType { get; set; } = ProjectType.None;
+
+    [ExcelColumn("Required Skills")]
+    [ColumnRule("StaffSkillList", "SkillsTable[Skills]", IsRequired = false, IsWarningOnly = true, IsMultiSelect = true)]
+    public List<string> Skills { get; set; } = new();
+
+    [ExcelColumn("Required Vehicles")]
+    [ColumnRule("VehicleTypeList", IsRequired = false, IsWarningOnly = true, IsMultiSelect = true)]
+    public List<VehicleType> Vehicles { get; set; } = new();
 }
 
 // =========================================================================

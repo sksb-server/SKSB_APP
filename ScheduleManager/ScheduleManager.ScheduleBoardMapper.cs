@@ -461,6 +461,7 @@ internal static class ScheduleBoardMapper
             var workers = new object?[WorkerRowsPerBand, cols];
             var vehicles = new object?[VehicleRowsPerBand, cols];
             var comments = new string?[slotCount];
+            var workerComments = new string?[WorkerRowsPerBand, slotCount];
 
             for (int slot = 0; slot < slotCount; slot++)
             {
@@ -476,6 +477,9 @@ internal static class ScheduleBoardMapper
 
                     var skills = SkillsFor(staff, pref);
                     assignedSkills.AddRange(skills);
+
+                    if (pref != null && BoardContext.DescribeInactivePrimarySkillLicense(pref, date) is { } inactive)
+                        workerComments[i, slot] = $"⚠ {inactive.Detail}\nNot counted as a qualified {pref.PrimarySkill.Trim()} on {date:dd/MM/yyyy}.";
 
                     workers[i, c0] = name;
                     workers[i, c0 + 1] = string.Join(" ", skills.Select(BoardContext.IconFor).Where(s => s.Length > 0));
@@ -537,6 +541,14 @@ internal static class ScheduleBoardMapper
             WriteBlock(ws, band.HeaderRow, band.HeaderRow, header);
             WriteBlock(ws, band.FirstWorkerRow, band.LastWorkerRow, workers);
             WriteBlock(ws, band.FirstVehicleRow, band.LastVehicleRow, vehicles);
+
+            try { ws.Range[ws.Cells[band.FirstWorkerRow, FirstSlotColumn], ws.Cells[band.LastWorkerRow, FirstSlotColumn + cols - 1]].ClearComments(); } catch { }
+            for (int slot = 0; slot < slotCount; slot++)
+                for (int i = 0; i < WorkerRowsPerBand; i++)
+                {
+                    if (string.IsNullOrEmpty(workerComments[i, slot])) continue;
+                    try { ApplySizedComment(ws.Cells[band.FirstWorkerRow + i, SlotColumn(slot)], workerComments[i, slot]!); } catch { }
+                }
 
             for (int slot = 0; slot < slotCount; slot++)
             {
@@ -696,7 +708,8 @@ internal static class ScheduleBoardMapper
     {
         if (pref == null) return new List<string>();
         var list = new List<string>();
-        if (!string.IsNullOrWhiteSpace(pref.PrimarySkill)) list.Add(pref.PrimarySkill.Trim());
+        string? primary = BoardContext.EffectivePrimarySkill(pref);
+        if (primary != null) list.Add(primary);
         list.AddRange(pref.LicensedSkills);
         list.AddRange(pref.OtherSkills);
         return list.Where(s => !string.IsNullOrWhiteSpace(s)).Select(s => s.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
@@ -962,7 +975,7 @@ internal static class ScheduleBoardMapper
             .Select(v => (Vehicle: v, IsMismatch: typeFilter != null && !MatchesTypeFilter(v.Type, typeFilter)))
             .OrderBy(x => x.IsMismatch ? 1 : 0)
             .ThenBy(x => slot.RequiredVehicleTypes.Contains(x.Vehicle.Type) ? 0 : 1)
-            .ThenBy(x => x.Vehicle.Plate, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(x => x.Vehicle.Plate, NaturalStringComparer.Instance)
             .Select((x, i) => new DropdownOption { Display = x.Vehicle.Plate, Raw = x.Vehicle.Plate, Section = i, IsValid = !x.IsMismatch })
             .ToList();
         return new CustomDropdownResult(ranked, (c, opt) => c.Value2 = opt.Raw);
@@ -994,7 +1007,9 @@ internal static class ScheduleBoardMapper
             profiles[s.Id] = new WorkerProfile(s, BoardContext.PreferenceFor(s.Id), BoardContext.DaysWorkedEarlierThisWeek(s.Id, date), false);
             var r = ScheduleMatchEngine.Score(profiles[s.Id], slot);
             bool blocked = r.Blocked || (skillFilter != null && !MatchesSkillFilter(s, skillFilter));
-            scored.Add((ScheduleMatchEngine.WithPercent(s.ShortName, r.Percent), StaffPrefix + s.ShortName, r.Percent, blocked));
+            var inactive = BoardContext.DescribeInactivePrimarySkillLicense(profiles[s.Id].Preference, date);
+            string display = ScheduleMatchEngine.WithPercent(s.ShortName, r.Percent) + (inactive != null ? $" ({inactive.Value.ShortNote})" : string.Empty);
+            scored.Add((display, StaffPrefix + s.ShortName, r.Percent, blocked));
         }
 
         foreach (var team in BoardContext.Teams.Where(t => !string.IsNullOrWhiteSpace(t.TeamName)))
@@ -1155,13 +1170,20 @@ internal static class ScheduleBoardMapper
         var info = Roster.FindProject(mine.ProjectID);
         var (skills, vehicleTypes) = BoardContext.RequirementsFor(info?.Types ?? Array.Empty<ProjectType>());
 
-        var elsewhere = new HashSet<long>();
-        foreach (var other in slots.Where(s => s.Shift == loc.Shift && s.SlotIndex != loc.Slot))
+        var sameShiftCounts = new Dictionary<long, int>();
+        var otherShiftCounts = new Dictionary<long, int>();
+        foreach (var other in slots)
+        {
+            if (other.Shift == loc.Shift && other.SlotIndex == loc.Slot) continue;
+            var target = other.Shift == loc.Shift ? sameShiftCounts : otherShiftCounts;
+            var seenInSlot = new HashSet<long>();
             foreach (var w in other.Workers)
-                if (Roster.FindStaff(w) is { } st) elsewhere.Add(st.Id);
+                if (Roster.FindStaff(w) is { } st && seenInSlot.Add(st.Id))
+                    target[st.Id] = target.GetValueOrDefault(st.Id) + 1;
+        }
 
         var plates = mine.Vehicles;
         var types = plates.Select(p => Roster.FindVehicle(p)?.Type ?? VehicleType.None).Where(t => t != VehicleType.None).ToList();
-        return new SlotContext(date, loc.Shift, skills, vehicleTypes, plates, types, elsewhere);
+        return new SlotContext(date, loc.Shift, skills, vehicleTypes, plates, types, sameShiftCounts, otherShiftCounts);
     }
 }

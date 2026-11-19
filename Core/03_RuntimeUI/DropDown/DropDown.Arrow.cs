@@ -11,6 +11,7 @@ using ExcelDna.Integration;
 using SKSB_App.Core.Bootstrap.Environment;
 using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.RuntimeUI.RuleEngine;
+using SKSB_App.Core.RuntimeUI.TableRowManager;
 
 public static class Arrow
 {
@@ -24,6 +25,7 @@ public static class Arrow
 
     // Multi-select session state: the popup stays open while items are toggled, and checked items are drawn with a tick.
     private static bool _isMultiSelectSession = false;
+    private static Action? _pendingMultiSelectRowCheck;
     private static HashSet<string> _checkedTokens = new(StringComparer.OrdinalIgnoreCase);
 
     [DllImport("user32.dll")]
@@ -90,8 +92,50 @@ public static class Arrow
 
     private const int GWL_HWNDPARENT = -8;
     private static readonly IntPtr HWND_TOP = new(0);
+    private const uint SWP_NOSIZE = 0x0001;
+    private const uint SWP_NOMOVE = 0x0002;
+    private const uint SWP_NOZORDER = 0x0004;
     private const uint SWP_NOACTIVATE = 0x0010;
     private const uint SWP_SHOWWINDOW = 0x0040;
+    private const uint SWP_HIDEWINDOW = 0x0080;
+    private const int WM_MOUSEACTIVATE = 0x0021;
+    private const int MA_NOACTIVATE = 3;
+    private const int SW_HIDE = 0;
+    private const int SW_SHOWNOACTIVATE = 4;
+    private const int VK_LBUTTON = 0x01;
+    private const int VK_RBUTTON = 0x02;
+    private const int VK_MBUTTON = 0x04;
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool ShowWindow(IntPtr hWnd, int nCmdShow);
+
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr hWnd, out uint lpdwProcessId);
+
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsWindowVisible(IntPtr hWnd);
+
+    [DllImport("user32.dll")]
+    private static extern short GetAsyncKeyState(int vKey);
+
+    private delegate void WindowDeactivateDelegate(dynamic wb, dynamic wn);
+    private delegate void SheetDeactivateDelegate(dynamic sh);
+    private static WindowDeactivateDelegate? _windowDeactivateHandler;
+    private static SheetDeactivateDelegate? _sheetDeactivateHandler;
+
+    private static bool _isArrowVisible;
+    private static bool _isPopupVisible;
+    private static bool _wasMouseDown;
+    private static Rectangle _arrowBounds;
+    private static Rectangle _popupBounds;
+    private static System.Windows.Forms.Timer? _visibilityTimer;
+    private static readonly PopupMessageFilter _messageFilter = new();
+    private static bool _isMessageFilterAdded;
 
     /// <summary>Borderless, non-activating, tool-window overlay shared by the arrow button and the popup list.</summary>
     private sealed class NoActivateOverlayForm : Form
@@ -114,6 +158,16 @@ public static class Arrow
             }
         }
         protected override bool ShowWithoutActivation => true;
+
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == WM_MOUSEACTIVATE)
+            {
+                m.Result = new IntPtr(MA_NOACTIVATE);
+                return;
+            }
+            base.WndProc(ref m);
+        }
     }
 
     static Arrow()
@@ -174,38 +228,17 @@ public static class Arrow
             IntegralHeight = false
         };
         _listBox.DrawItem += OnListBoxDrawItem;
-        _listBox.Click += (s, e) =>
+        _listBox.MouseDown += (s, e) =>
         {
-            if (e is MouseEventArgs me)
+            if (e.Button != MouseButtons.Left) return;
+            int index = _listBox.IndexFromPoint(e.Location);
+            if (index != ListBox.NoMatches && index >= 0)
             {
-                int index = _listBox.IndexFromPoint(me.Location);
-                if (index != ListBox.NoMatches && index >= 0)
-                {
-                    CommitSelection();
-                }
-            }
-            else
-            {
+                _listBox.SelectedIndex = index;
                 CommitSelection();
             }
-        };
-        _listBox.KeyDown += (s, e) =>
-        {
-            if (e.KeyCode == Keys.Enter)
-            {
-                // Multi-select: items are toggled on click / Space, Enter simply closes the popup.
-                if (_isMultiSelectSession) DismissAndReturnFocus();
-                else CommitSelection();
-            }
-            else if (e.KeyCode == Keys.Space && _isMultiSelectSession)
-            {
-                CommitSelection();
-                e.Handled = true;
-            }
-            else if (e.KeyCode == Keys.Escape) DismissAndReturnFocus();
         };
         _popupHost.Controls.Add(_listBox);
-        _popupHost.Deactivate += (_, _) => DismissAndReturnFocus();
     }
 
     public static void EnsureExcelEventsHooked()
@@ -215,10 +248,12 @@ public static class Arrow
         {
             dynamic xlApp = ExcelDnaUtil.Application;
             if (xlApp == null) return;
-            xlApp.WindowDeactivate += new Action<dynamic, dynamic>((wb, wn) => HideAll());
-            xlApp.SheetDeactivate += new Action<dynamic>(ws => HideAll());
+            _windowDeactivateHandler = new WindowDeactivateDelegate((wb, wn) => HideAll());
+            _sheetDeactivateHandler = new SheetDeactivateDelegate(ws => HideAll());
+            xlApp.WindowDeactivate += _windowDeactivateHandler;
+            xlApp.SheetDeactivate += _sheetDeactivateHandler;
             _isEventsHooked = true;
-            if (_activeCell != null && _arrowHost != null && _arrowHost!.Visible)
+            if (_activeCell != null && _isArrowVisible)
             {
                 ShowArrowForCell(_activeCell);
             }
@@ -289,12 +324,6 @@ public static class Arrow
             _activeCell = cell.Cells[1, 1];
             dynamic window = xlApp.ActiveWindow;
             IntPtr excelHwnd = GetExcelHwnd(xlApp);
-            if (excelHwnd != IntPtr.Zero)
-            {
-                SetWindowLongPtr(_arrowHost!.Handle, GWL_HWNDPARENT, excelHwnd);
-                SetWindowLongPtr(_popupHost!.Handle, GWL_HWNDPARENT, excelHwnd);
-            }
-
             int targetRow = (int)_activeCell.Row;
             int targetCol = (int)_activeCell.Column;
             dynamic targetPane = ResolveTargetPane(window, targetRow, targetCol);
@@ -324,9 +353,13 @@ public static class Arrow
             int arrowYPx = cellTopPx;
 
             if (!_arrowHost!.Visible) _arrowHost.Show();
+            EnsureOwner(_arrowHost, excelHwnd);
             SetWindowPos(_arrowHost.Handle, HWND_TOP, arrowXPx, arrowYPx, arrowWidthPx, arrowHeightPx, SWP_SHOWWINDOW | SWP_NOACTIVATE);
+            _arrowBounds = new Rectangle(arrowXPx, arrowYPx, arrowWidthPx, arrowHeightPx);
+            _isArrowVisible = true;
             _arrowButton?.Invalidate();
             HidePopup();
+            EnsureVisibilityMonitor();
         }
         catch (Exception ex)
         {
@@ -335,37 +368,60 @@ public static class Arrow
         }
     }
 
+    private static void HideNoActivate(Form? form)
+    {
+        if (form == null || form.IsDisposed || !form.IsHandleCreated) return;
+        // Clear the owner first so hiding never triggers owned-window activation changes on Excel.
+        SetWindowLongPtr(form.Handle, GWL_HWNDPARENT, IntPtr.Zero);
+        SetWindowPos(form.Handle, IntPtr.Zero, 0, 0, 0, 0,
+            SWP_HIDEWINDOW | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+        form.Visible = false;
+    }
+
+    /// <summary>Attaches the overlay to Excel as its owner; re-applied on every show.</summary>
+    private static void EnsureOwner(Form? form, IntPtr excelHwnd)
+    {
+        if (form == null || excelHwnd == IntPtr.Zero) return;
+        SetWindowLongPtr(form.Handle, GWL_HWNDPARENT, excelHwnd);
+    }
+
     public static void HideAll()
     {
         HidePopup();
-        if (_arrowHost != null && _arrowHost.Visible) _arrowHost.Hide();
+        if (_isArrowVisible)
+        {
+            HideNoActivate(_arrowHost);
+            _isArrowVisible = false;
+        }
         _activeCell = null;
+        _visibilityTimer?.Stop();
     }
 
     public static void HidePopup()
     {
-        if (_popupHost != null && _popupHost.Visible) _popupHost.Hide();
+        _isMultiSelectSession = false;
+        var pending = _pendingMultiSelectRowCheck;
+        _pendingMultiSelectRowCheck = null;
+        if (_isPopupVisible)
+        {
+            HideNoActivate(_popupHost);
+            _isPopupVisible = false;
+        }
+        pending?.Invoke();
     }
 
-    public static void DismissAndReturnFocus()
+    /// <summary>Hides the popup without touching foreground/activation (Excel stays active).</summary>
+    public static void DismissPopup()
     {
-        ReleaseCapture();
-        _isMultiSelectSession = false;
+        try { ReleaseCapture(); } catch { }
         HidePopup();
-        try
-        {
-            dynamic xlApp = ExcelDnaUtil.Application;
-            IntPtr excelHwnd = GetExcelHwnd(xlApp);
-            if (excelHwnd != IntPtr.Zero) SetForegroundWindow(excelHwnd);
-        }
-        catch { }
     }
 
     public static void ToggleDropdown()
     {
-        if (_popupHost!.Visible)
+        if (_isPopupVisible)
         {
-            DismissAndReturnFocus();
+            DismissPopup();
             return;
         }
         if (_activeCell == null) return;
@@ -397,7 +453,8 @@ public static class Arrow
             PropertyRuleDescriptor? rule = RuleRegistry.GetRuleForCell(singleCell);
             var processedItems = new List<DropdownOption>();
 
-            _isMultiSelectSession = rule != null && rule.HasDropdown && rule.IsMultiSelect;
+            CustomDropdownResult? custom = CustomDropdowns.TryBuild(singleCell);
+            _isMultiSelectSession = custom == null && rule != null && rule.HasDropdown && rule.IsMultiSelect;
             _checkedTokens = _isMultiSelectSession
                 ? new HashSet<string>(RuleEvaluator.SplitMultiSelectTokens(inCellText), StringComparer.OrdinalIgnoreCase)
                 : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -405,7 +462,6 @@ public static class Arrow
             // =========================================================================
             // PATH C: Module-supplied dropdown (e.g. Schedule board match-% ranking)
             // =========================================================================
-            CustomDropdownResult? custom = rule == null ? CustomDropdowns.TryBuild(singleCell) : null;
             if (custom != null)
             {
                 processedItems.AddRange(custom.Options);
@@ -415,15 +471,20 @@ public static class Arrow
                     var targetItem = processedItems.FirstOrDefault(i => i.Display.Equals(chosenDisplay, StringComparison.OrdinalIgnoreCase));
                     if (targetItem == null) return;
 
-                    bool origEvents = true;
-                    try { origEvents = (bool)xlApp.EnableEvents; xlApp.EnableEvents = false; } catch { }
-                    try { custom.Commit(singleCell, targetItem); }
-                    finally
+                    ExcelAsyncUtil.QueueAsMacro(() =>
                     {
-                        try { xlApp.EnableEvents = origEvents; } catch { }
-                    }
+                        bool origEvents = true;
+                        try { origEvents = (bool)xlApp.EnableEvents; xlApp.EnableEvents = false; } catch { }
+                        try { custom.Commit(singleCell, targetItem); }
+                        finally
+                        {
+                            try { xlApp.EnableEvents = origEvents; } catch { }
+                        }
 
-                    ParameterCells.NotifyChanged(sheet, singleCell);
+                        ParameterCells.NotifyChanged(sheet, singleCell);
+
+                        if (table != null) TableRowManager.HandleSheetChange(singleCell);
+                    });
                 };
             }
             // =========================================================================
@@ -439,36 +500,48 @@ public static class Arrow
                     var targetItem = processedItems.FirstOrDefault(i => i.Display.Equals(chosenDisplay, StringComparison.OrdinalIgnoreCase));
                     if (targetItem == null) return;
 
-                    bool origEvents = true;
-                    try { origEvents = (bool)xlApp.EnableEvents; xlApp.EnableEvents = false; } catch { }
-                    try
-                    {
-                        WriteSelectedValueToCell(singleCell, targetItem, rule, inCellText);
-                    }
-                    finally
-                    {
-                        try { xlApp.EnableEvents = origEvents; } catch { }
-                    }
-
-                    // Immediately run self-healing row pass (executes [ColumnSync], [ColumnDefault], [ColumnStateGuard])
-                    if (table != null)
-                    {
-                        RuleEvaluator.EvaluateAndHealRow(sheet, table, row, col);
-                    }
-
+                    string prevText = inCellText;
                     if (rule.IsMultiSelect)
                     {
-                        // Keep the popup in step with the cell so the next toggle starts from the new text.
-                        try
-                        {
-                            inCellText = singleCell.Value2?.ToString()?.Trim() ?? string.Empty;
-                            _checkedTokens = new HashSet<string>(RuleEvaluator.SplitMultiSelectTokens(inCellText), StringComparer.OrdinalIgnoreCase);
-                        }
-                        catch { }
+                        // Update in-memory state immediately so the tick shows without waiting for the COM write.
+                        var tokens = RuleEvaluator.SplitMultiSelectTokens(prevText);
+                        int idx = tokens.FindIndex(t => t.Equals(targetItem.Display, StringComparison.OrdinalIgnoreCase));
+                        if (idx >= 0) tokens.RemoveAt(idx);
+                        else tokens.Add(targetItem.Display);
+                        _checkedTokens = new HashSet<string>(tokens, StringComparer.OrdinalIgnoreCase);
+                        inCellText = string.Join(", ", tokens);
                     }
 
-                    // Events were suppressed for the write: let module observers (rollups etc.) know.
-                    ParameterCells.NotifyChanged(sheet, singleCell);
+                    ExcelAsyncUtil.QueueAsMacro(() =>
+                    {
+                        bool origEvents = true;
+                        try { origEvents = (bool)xlApp.EnableEvents; xlApp.EnableEvents = false; } catch { }
+                        try
+                        {
+                            WriteSelectedValueToCell(singleCell, targetItem, rule, prevText);
+                        }
+                        finally
+                        {
+                            try { xlApp.EnableEvents = origEvents; } catch { }
+                        }
+
+                        // Immediately run self-healing row pass (executes [ColumnSync], [ColumnDefault], [ColumnStateGuard])
+                        if (table != null)
+                        {
+                            RuleEvaluator.EvaluateAndHealRow(sheet, table, row, col);
+                        }
+
+                        // Events were suppressed for the write: let module observers (rollups etc.) know.
+                        ParameterCells.NotifyChanged(sheet, singleCell);
+
+                        if (table != null)
+                        {
+                            if (rule.IsMultiSelect)
+                                _pendingMultiSelectRowCheck = () => ExcelAsyncUtil.QueueAsMacro(() => TableRowManager.HandleSheetChange(singleCell));
+                            else
+                                TableRowManager.HandleSheetChange(singleCell);
+                        }
+                    });
                 };
             }
             // =========================================================================
@@ -492,23 +565,28 @@ public static class Arrow
                     var targetItem = processedItems.FirstOrDefault(i => i.Display.Equals(chosenDisplay, StringComparison.OrdinalIgnoreCase));
                     if (targetItem == null) return;
 
-                    bool origEvents = true;
-                    try { origEvents = (bool)xlApp.EnableEvents; xlApp.EnableEvents = false; } catch { }
-                    try
+                    ExcelAsyncUtil.QueueAsMacro(() =>
                     {
-                        singleCell.Value2 = targetItem.Display;
-                    }
-                    finally
-                    {
-                        try { xlApp.EnableEvents = origEvents; } catch { }
-                    }
+                        bool origEvents = true;
+                        try { origEvents = (bool)xlApp.EnableEvents; xlApp.EnableEvents = false; } catch { }
+                        try
+                        {
+                            singleCell.Value2 = targetItem.Display;
+                        }
+                        finally
+                        {
+                            try { xlApp.EnableEvents = origEvents; } catch { }
+                        }
 
-                    if (!string.IsNullOrWhiteSpace(config.SyncLeft) && !string.IsNullOrEmpty(targetItem.Raw))
-                    {
-                        SyncEngine.ExecuteSync(singleCell, config.SyncLeft, targetItem.Raw, targetItem.Display);
-                    }
+                        if (!string.IsNullOrWhiteSpace(config.SyncLeft) && !string.IsNullOrEmpty(targetItem.Raw))
+                        {
+                            SyncEngine.ExecuteSync(singleCell, config.SyncLeft, targetItem.Raw, targetItem.Display);
+                        }
 
-                    ParameterCells.NotifyChanged(sheet, singleCell);
+                        ParameterCells.NotifyChanged(sheet, singleCell);
+
+                        if (table != null) TableRowManager.HandleSheetChange(singleCell);
+                    });
                 };
             }
 
@@ -521,13 +599,14 @@ public static class Arrow
                 var validItems = processedItems.Where(i => i.IsValid);
                 var invalidItems = processedItems.Where(i => !i.IsValid);
 
-                var sortedValid = validItems.OrderBy(i => i.Section).ThenBy(i => i.Display);
-                var sortedInvalid = invalidItems.OrderBy(i => i.Section).ThenBy(i => i.Display);
+                var sortedValid = validItems.OrderBy(i => i.Section).ThenBy(i => i.Display, NaturalStringComparer.Instance);
+                var sortedInvalid = invalidItems.OrderBy(i => i.Section).ThenBy(i => i.Display, NaturalStringComparer.Instance);
 
                 if (custom != null)
                 {
                     // Provider order (e.g. match-% rank) is authoritative.
                     sortedValid = validItems.OrderBy(i => i.Section);
+                    sortedInvalid = invalidItems.OrderBy(i => i.Section);
                 }
                 else if (!string.IsNullOrWhiteSpace(inCellText) && (rule == null || !rule.IsMultiSelect))
                 {
@@ -539,8 +618,8 @@ public static class Arrow
                         if (i.Display.IndexOf(q, StringComparison.OrdinalIgnoreCase) >= 0) return 2;
                         return 3;
                     };
-                    sortedValid = validItems.OrderBy(ranker).ThenBy(i => i.Section).ThenBy(i => i.Display);
-                    sortedInvalid = invalidItems.OrderBy(ranker).ThenBy(i => i.Section).ThenBy(i => i.Display);
+                    sortedValid = validItems.OrderBy(ranker).ThenBy(i => i.Section).ThenBy(i => i.Display, NaturalStringComparer.Instance);
+                    sortedInvalid = invalidItems.OrderBy(ranker).ThenBy(i => i.Section).ThenBy(i => i.Display, NaturalStringComparer.Instance);
                 }
 
                 foreach (var item in sortedValid) _listBox.Items.Add(item);
@@ -613,7 +692,13 @@ public static class Arrow
             popupYPx = Math.Max(workArea.Top, Math.Min(popupYPx, workArea.Bottom - calculatedHeightPx));
 
             if (!_popupHost!.Visible) _popupHost.Show();
+            EnsureOwner(_popupHost, excelHwnd);
             SetWindowPos(_popupHost.Handle, HWND_TOP, popupXPx, popupYPx, popupWidthPx, calculatedHeightPx, SWP_SHOWWINDOW | SWP_NOACTIVATE);
+            _popupBounds = new Rectangle(popupXPx, popupYPx, popupWidthPx, calculatedHeightPx);
+            _isPopupVisible = true;
+            _wasMouseDown = true;
+            _listBox.Invalidate();
+            EnsureVisibilityMonitor();
         }
         catch (Exception ex)
         {
@@ -713,26 +798,185 @@ public static class Arrow
 
     private static void CommitSelection()
     {
-        if (_listBox!.SelectedItem is DropdownOption item && _onItemSelected != null)
-        {
-            _onItemSelected(item.Display);
-        }
+        if (_listBox!.SelectedItem is not DropdownOption item || _onItemSelected == null) return;
+        var handler = _onItemSelected;
 
         // Multi-select keeps the popup open so several items can be toggled in one session.
         if (_isMultiSelectSession)
         {
+            handler(item.Display);
             _listBox.Invalidate();
             return;
         }
 
-        DismissAndReturnFocus();
+        // Single-select: hide the popup first so it is gone before the queued COM write runs.
+        DismissPopup();
+        handler(item.Display);
+    }
+
+    // =========================================================================
+    // 8. CLICK-AWAY / KEYBOARD DISMISSAL
+    // =========================================================================
+    private sealed class PopupMessageFilter : IMessageFilter
+    {
+        private const int WM_KEYDOWN = 0x0100;
+        private const int WM_LBUTTONDOWN = 0x0201;
+        private const int WM_RBUTTONDOWN = 0x0204;
+        private const int WM_MBUTTONDOWN = 0x0207;
+        private const int WM_MOUSEWHEEL = 0x020A;
+        private const int WM_NCLBUTTONDOWN = 0x00A1;
+        private const int WM_NCRBUTTONDOWN = 0x00A4;
+        private const int WM_NCMBUTTONDOWN = 0x00A7;
+
+        public bool PreFilterMessage(ref Message m)
+        {
+            if (!_isPopupVisible || _popupHost == null || _listBox == null) return false;
+
+            switch (m.Msg)
+            {
+                case WM_MOUSEWHEEL:
+                {
+                    if (_popupBounds.Contains(Cursor.Position))
+                    {
+                        int delta = (short)((m.WParam.ToInt64() >> 16) & 0xFFFF);
+                        int step = delta > 0 ? -1 : 1;
+                        int top = Math.Max(0, Math.Min(_listBox.Items.Count - 1, _listBox.TopIndex + step));
+                        if (_listBox.Items.Count > 0) _listBox.TopIndex = top;
+                        return true;
+                    }
+                    DismissPopup();
+                    return false;
+                }
+                case WM_LBUTTONDOWN:
+                case WM_RBUTTONDOWN:
+                case WM_MBUTTONDOWN:
+                case WM_NCLBUTTONDOWN:
+                case WM_NCRBUTTONDOWN:
+                case WM_NCMBUTTONDOWN:
+                {
+                    if (!IsInsideDropdownUi(Cursor.Position)) DismissPopup();
+                    return false;
+                }
+                case WM_KEYDOWN:
+                {
+                    var key = (Keys)(m.WParam.ToInt64() & 0xFFFF);
+                    switch (key)
+                    {
+                        case Keys.Escape:
+                            DismissPopup();
+                            return true;
+                        case Keys.Up:
+                            if (_listBox.SelectedIndex > 0) _listBox.SelectedIndex--;
+                            return true;
+                        case Keys.Down:
+                            if (_listBox.SelectedIndex < _listBox.Items.Count - 1) _listBox.SelectedIndex++;
+                            return true;
+                        case Keys.Enter:
+                            if (_isMultiSelectSession) DismissPopup();
+                            else CommitSelection();
+                            return true;
+                        case Keys.Space when _isMultiSelectSession:
+                            CommitSelection();
+                            return true;
+                        case Keys.ShiftKey:
+                        case Keys.ControlKey:
+                        case Keys.Menu:
+                            return false;
+                        default:
+                            DismissPopup();
+                            return false;
+                    }
+                }
+            }
+            return false;
+        }
+    }
+
+    private static bool IsInsideDropdownUi(Point pt)
+    {
+        if (_popupHost != null && _isPopupVisible && _popupBounds.Contains(pt)) return true;
+        if (_arrowHost != null && _isArrowVisible && _arrowBounds.Contains(pt)) return true;
+        return false;
+    }
+
+    private static void EnsureVisibilityMonitor()
+    {
+        if (!_isMessageFilterAdded)
+        {
+            try { Application.AddMessageFilter(_messageFilter); _isMessageFilterAdded = true; } catch { }
+        }
+        if (_visibilityTimer == null)
+        {
+            _visibilityTimer = new System.Windows.Forms.Timer { Interval = 100 };
+            _visibilityTimer.Tick += (_, _) => OnVisibilityTimerTick();
+        }
+        if (!_visibilityTimer.Enabled) _visibilityTimer.Start();
+    }
+
+    private static void OnVisibilityTimerTick()
+    {
+        try
+        {
+            if (!_isArrowVisible && !_isPopupVisible)
+            {
+                _visibilityTimer?.Stop();
+                return;
+            }
+
+            IntPtr fg = GetForegroundWindow();
+            bool foreignForeground = fg == IntPtr.Zero;
+            if (!foreignForeground)
+            {
+                GetWindowThreadProcessId(fg, out uint pid);
+                foreignForeground = pid != (uint)Environment.ProcessId;
+            }
+            if (foreignForeground)
+            {
+                HideAll();
+                return;
+            }
+
+            // The host message loop may not route mouse messages through Application filters,
+            // so also poll the physical buttons for a click outside the open popup.
+            bool down = (GetAsyncKeyState(VK_LBUTTON) & 0x8000) != 0
+                        || (GetAsyncKeyState(VK_RBUTTON) & 0x8000) != 0
+                        || (GetAsyncKeyState(VK_MBUTTON) & 0x8000) != 0;
+            if (down && !_wasMouseDown && _isPopupVisible && !IsInsideDropdownUi(Cursor.Position))
+                DismissPopup();
+            _wasMouseDown = down;
+        }
+        catch { }
     }
 
     public static void Teardown()
     {
         try
         {
+            _pendingMultiSelectRowCheck = null;
             HideAll();
+            _visibilityTimer?.Stop();
+            _visibilityTimer?.Dispose();
+            _visibilityTimer = null;
+            if (_isMessageFilterAdded)
+            {
+                try { Application.RemoveMessageFilter(_messageFilter); } catch { }
+                _isMessageFilterAdded = false;
+            }
+
+            if (_isEventsHooked)
+            {
+                try
+                {
+                    dynamic xlApp = ExcelDnaUtil.Application;
+                    if (_windowDeactivateHandler != null) xlApp.WindowDeactivate -= _windowDeactivateHandler;
+                    if (_sheetDeactivateHandler != null) xlApp.SheetDeactivate -= _sheetDeactivateHandler;
+                }
+                catch { }
+                _windowDeactivateHandler = null;
+                _sheetDeactivateHandler = null;
+                _isEventsHooked = false;
+            }
+
             _arrowHost?.Dispose();
             _arrowHost = null;
             _popupHost?.Dispose();

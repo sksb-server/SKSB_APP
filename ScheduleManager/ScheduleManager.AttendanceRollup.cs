@@ -98,7 +98,7 @@ internal static class AttendanceRollupService
     /// Builds the daily attendance rows. Unapproved entries (pending WhatsApp confirmations) are ignored.
     /// Every field worker active on <paramref name="date"/> (<see cref="Roster.ActiveOn(DateOnly)"/>) always gets a row,
     /// even when unscheduled or unpunched. A worker no longer active on that date is kept only when
-    /// <paramref name="existing"/> already has a row for them and they have an approved punch or are scheduled on the board.
+    /// they have an approved punch or are scheduled on the board (any known worker qualifies).
     /// Day-band overtime is the time clocked after <paramref name="otStartTime"/> (floored to 0.5 h).
     /// </summary>
     internal static List<DailyWorkerAttendance> Run(
@@ -113,9 +113,9 @@ internal static class AttendanceRollupService
         var byStaff = approved.GroupBy(e => e.StaffID).ToDictionary(g => g.Key, g => g.ToList());
         var existingById = existing.Where(a => a.StaffID > 0).GroupBy(a => a.StaffID).ToDictionary(g => g.Key, g => g.First());
 
-        // Date-effective: a worker is rolled up when employed on this date. Someone who had already left by this date is
-        // only kept when the date already carries a row for them, so history is preserved but nobody new is added.
-        bool Eligible(long id) => Roster.IsActiveOn(id, date) || (existingById.ContainsKey(id) && Roster.FindStaff(id) != null);
+        // Any known worker who punched (approved) or is scheduled is rolled up, even when not employed/active on this
+        // date, so a terminal check-in is always paid.
+        bool Eligible(long id) => Roster.FindStaff(id) != null;
 
         // Board assignments: staff id -> slots they are listed in.
         var scheduled = new Dictionary<long, List<DailyProjectSchedule>>();

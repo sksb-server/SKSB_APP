@@ -20,6 +20,9 @@ public class EventsAutoOpen : IExcelAddIn
     private delegate void SheetChangeDelegate(dynamic sh, dynamic target);
     private delegate void SheetActivateDelegate(dynamic sh);
 
+    private delegate void WindowActivateDelegate(dynamic wb, dynamic wn);
+    private static WindowActivateDelegate? _windowActivateHandler;
+
     private static SheetDoubleClickDelegate? _doubleClickHandler;
     private static SheetSelectionChangeDelegate? _selectionHandler;
     private static SheetChangeDelegate? _changeHandler;
@@ -49,11 +52,13 @@ public class EventsAutoOpen : IExcelAddIn
         {
             using var _ = AppLogger.Scope("AutoOpen Queued Macro");
             EventHooks();
+            Arrow.EnsureExcelEventsHooked();
 
             try
             {
                 dynamic xlApp = ExcelDnaUtil.Application;
-                xlApp.WindowActivate += new Action<dynamic, dynamic>((wb, wn) => OnWindowActivatedMacro());
+                _windowActivateHandler = new WindowActivateDelegate((wb, wn) => OnWindowActivatedMacro());
+                xlApp.WindowActivate += _windowActivateHandler;
             }
             catch (Exception ex)
             {
@@ -222,6 +227,7 @@ public class EventsAutoOpen : IExcelAddIn
         {
             if (_xlAppRoot != null)
             {
+                if (_windowActivateHandler != null) { _xlAppRoot.WindowActivate -= _windowActivateHandler; _windowActivateHandler = null; }
                 if (_activateHandler != null) { _xlAppRoot.SheetActivate -= _activateHandler; _activateHandler = null; }
                 if (_doubleClickHandler != null) { _xlAppRoot.SheetBeforeDoubleClick -= _doubleClickHandler; _doubleClickHandler = null; }
                 if (_selectionHandler != null) { _xlAppRoot.SheetSelectionChange -= _selectionHandler; _selectionHandler = null; }

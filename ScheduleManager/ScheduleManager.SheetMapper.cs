@@ -9,6 +9,7 @@ using ExcelDna.Integration;
 using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.RuntimeUI.DropDown;
 using SKSB_App.Core.RuntimeUI.Progress;
+using SKSB_App.Core.RuntimeUI.RuleEngine;
 using SKSB_App.Core.ThumbprintSync;
 using SKSB_App.Core.Types;
 using SKSB_App.Core.WorkbookOpen.Sheet;
@@ -95,6 +96,7 @@ internal static partial class SheetMapper
                 record.Preferences = TableMapper.ExtractFromTable<WorkerPreference>((object)prefSheet!, "WorkerPreferencesTable");
                 record.Teams = TableMapper.ExtractFromTable<TeamRecord>((object)prefSheet!, "TeamTable");
                 record.Skills = TableMapper.ExtractFromTable<ScheduleSkillRecord>((object)prefSheet!, "SkillsTable");
+                record.ProjectSkillRequirements = TableMapper.ExtractFromTable<ProjectSkillRequirement>((object)prefSheet!, "ProjectRequirementsTable");
                 record.AttendanceEntries = TableMapper.ExtractFromTable<AttendanceEntry>((object)entriesSheet!, EntriesTableName);
                 var existing = TableMapper.ExtractFromTable<DailyWorkerAttendance>((object)attendanceSheet!, MasterTableName);
                 foreach (var e in existing) e.DailyScheduleDate = date.Value;
@@ -105,6 +107,7 @@ internal static partial class SheetMapper
 
             BoardContext.SetPreferences(record.Preferences, record.Teams);
             BoardContext.SetSkills(record.Skills);
+            BoardContext.SetProjectSkillRequirements(record.ProjectSkillRequirements);
             foreach (var t in record.Teams) t.TeamLeaderStaffID = Roster.FindStaff(t.TeamLeader)?.Id ?? 0;
 
             // ---- table rule validation (required cells, dropdown sources, formats) ----
@@ -162,10 +165,32 @@ internal static partial class SheetMapper
         DateOnly today = DateOnly.FromDateTime(DateTime.Today);
         foreach (var p in record.Preferences.Where(p => p.StaffID > 0 && !Roster.IsActiveOn(p.StaffID, today)))
             errors.Add($"  [Preference]: Staff ID '{p.StaffID}' is not a currently employed field worker (office / admin / resigned staff cannot be scheduled).");
+        ServerSyncCommands.EnsureLicensesLoaded();
+        foreach (var p in record.Preferences)
+        {
+            var illegal = p.OtherSkills.Where(s => BoardContext.IsLicensedSkill(s))
+                .Select(s => s.Trim()).Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+            if (illegal.Count > 0)
+                errors.Add($"  [Preference]: Staff ID '{p.StaffID}' has licensed skill(s) in 'Other Skills' ({string.Join(", ", illegal)}) — licensed skills are populated automatically in 'Licensed Skills' from Staff Manager.");
+
+            if (!string.IsNullOrWhiteSpace(p.PrimarySkill))
+            {
+                string primary = p.PrimarySkill.Trim();
+                bool held = p.LicensedSkills
+                    .Where(s => !s.StartsWith("License ", StringComparison.OrdinalIgnoreCase))
+                    .Concat(p.OtherSkills)
+                    .Any(s => s.Trim().Equals(primary, StringComparison.OrdinalIgnoreCase));
+                var inactive = held ? null : BoardContext.DescribeInactivePrimarySkillLicense(p, scheduleDate);
+                if (!held && inactive != null)
+                    warnings.Add($"  [Preference]: Staff ID '{p.StaffID}' has Primary Skill '{primary}', but their {inactive.Value.Detail} — they will not count as a qualified {primary} on {scheduleDate:dd/MM/yyyy}.");
+                else if (!held)
+                    errors.Add($"  [Preference]: Staff ID '{p.StaffID}' has Primary Skill '{primary}', which is not in their 'Licensed Skills' or 'Other Skills'.");
+            }
+        }
         foreach (var id in record.AttendanceEntries
-                     .Where(e => e.StaffID > 0 && !Roster.IsActiveOn(e.StaffID, e.Date))
+                     .Where(e => e.StaffID > 0 && Roster.FindStaff(e.StaffID) == null)
                      .Select(e => e.StaffID).Distinct())
-            warnings.Add($"  [Attendance Entries]: Staff ID '{id}' was not an employed field worker on the punch date; those punches are excluded from the attendance rollup.");
+            warnings.Add($"  [Attendance Entries]: Staff ID '{id}' is not a known field worker; those punches are excluded from the attendance rollup.");
 
         foreach (var g in record.Preferences.Where(p => p.StaffID > 0).GroupBy(p => p.StaffID).Where(g => g.Count() > 1))
             errors.Add($"  [Preference]: Duplicate Staff ID '{g.Key}' in 'WorkerPreferencesTable'.");
@@ -173,6 +198,8 @@ internal static partial class SheetMapper
             errors.Add($"  [Preference]: Duplicate team '{g.Key}' in 'TeamTable'.");
         foreach (var g in record.Skills.Where(s => !string.IsNullOrWhiteSpace(s.SkillName)).GroupBy(s => s.SkillName.Trim(), StringComparer.OrdinalIgnoreCase).Where(g => g.Count() > 1))
             errors.Add($"  [Preference]: Duplicate skill '{g.Key}' in 'SkillsTable'.");
+        foreach (var g in record.ProjectSkillRequirements.Where(r => r.ProjectType != ProjectType.None).GroupBy(r => r.ProjectType).Where(g => g.Count() > 1))
+            errors.Add($"  [Preference]: Duplicate project type '{g.Key}' in 'ProjectRequirementsTable'.");
 
         foreach (var g in record.AttendanceEntries.GroupBy(e => (e.Date, e.Time, e.StaffID, e.EntryType, e.Source)).Where(g => g.Count() > 1))
             errors.Add($"  [Attendance Entries]: Staff {g.Key.StaffID} has {g.Count()} identical {g.Key.Source} {g.Key.EntryType} punches at {g.Key.Date:dd/MM/yyyy} {g.Key.Time:HH:mm}.");
@@ -187,6 +214,79 @@ internal static partial class SheetMapper
         int pending = record.AttendanceEntries.Count(e => !e.IsApproved);
         if (pending > 0)
             warnings.Add($"  [Attendance Entries]: {pending} unapproved entr{(pending == 1 ? "y is" : "ies are")} excluded from the attendance rollup until 'Is Approved' is TRUE.");
+    }
+
+    // =========================================================================
+    // 2b. PRIMARY SKILL DROPDOWN (per-row: Licensed Skills + Other Skills)
+    // =========================================================================
+    internal static void RegisterPreferenceDropdowns() =>
+        CustomDropdowns.Register(IsPrimarySkillCell, BuildPrimarySkillDropdown);
+
+    private static bool IsPrimarySkillCell(dynamic cell)
+    {
+        try
+        {
+            string sheetName = cell.Worksheet.Name?.ToString() ?? string.Empty;
+            if (!PreferenceAliases.Any(a => a.Equals(sheetName, StringComparison.OrdinalIgnoreCase))) return false;
+
+            dynamic? table = cell.ListObject;
+            if (table == null) return false;
+            if (!string.Equals((string?)table.Name, "WorkerPreferencesTable", StringComparison.OrdinalIgnoreCase)) return false;
+            dynamic? body = table.DataBodyRange;
+            if (body == null) return false;
+
+            int row = (int)cell.Row;
+            int bodyRow = (int)body.Row;
+            int bodyRows = (int)body.Rows.Count;
+            if (row < bodyRow || row >= bodyRow + bodyRows) return false;
+
+            int colIndex = (int)cell.Column - (int)table.Range.Column + 1;
+            string header = ((string?)table.ListColumns[colIndex].Name ?? string.Empty).Trim();
+            return header.Equals("Primary Skill", StringComparison.OrdinalIgnoreCase);
+        }
+        catch { return false; }
+    }
+
+    private static CustomDropdownResult? BuildPrimarySkillDropdown(dynamic cell)
+    {
+        try
+        {
+            dynamic table = cell.ListObject;
+            dynamic sheet = cell.Worksheet;
+            int row = (int)cell.Row;
+            int licCol = -1, otherCol = -1;
+            foreach (dynamic col in table.ListColumns)
+            {
+                string name = ((string?)col.Name ?? string.Empty).Trim();
+                int abs = (int)col.Range.Column;
+                if (name.Equals("Licensed Skills", StringComparison.OrdinalIgnoreCase)) licCol = abs;
+                else if (name.Equals("Other Skills", StringComparison.OrdinalIgnoreCase)) otherCol = abs;
+            }
+
+            string licensed = licCol > 0 ? sheet.Cells[row, licCol].Value2?.ToString() ?? string.Empty : string.Empty;
+            string other = otherCol > 0 ? sheet.Cells[row, otherCol].Value2?.ToString() ?? string.Empty : string.Empty;
+
+            var options = new List<DropdownOption>();
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            void Add(string s, int sec)
+            {
+                if (!seen.Add(s)) return;
+                options.Add(new DropdownOption { Display = s, Raw = s, Section = sec, IsValid = true });
+            }
+
+            foreach (var s in RuleEvaluator.SplitMultiSelectTokens(licensed)
+                         .Where(s => !s.StartsWith("License ", StringComparison.OrdinalIgnoreCase)))
+                Add(s, 0);
+            foreach (var s in RuleEvaluator.SplitMultiSelectTokens(other))
+                Add(s, 1);
+
+            return new CustomDropdownResult(options, (c, opt) => c.Value2 = opt.Raw);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn($"[ScheduleManager] Primary Skill dropdown failed: {ex.Message}");
+            return null;
+        }
     }
 
     // =========================================================================
@@ -284,6 +384,10 @@ internal static partial class SheetMapper
                 if (!writeSkills && prefSheet != null)
                     record.Skills = TableMapper.ExtractFromTable<ScheduleSkillRecord>((object)prefSheet!, "SkillsTable");
                 BoardContext.SetSkills(record.Skills);   // StaffSkillList below includes these
+                bool writeProjectSkillReqs = record.ProjectSkillRequirements.Count > 0;
+                if (!writeProjectSkillReqs && prefSheet != null)
+                    record.ProjectSkillRequirements = TableMapper.ExtractFromTable<ProjectSkillRequirement>((object)prefSheet!, "ProjectRequirementsTable");
+                BoardContext.SetProjectSkillRequirements(record.ProjectSkillRequirements);
                 ServerSyncCommands.SyncLookupLists(date, referenced);
 
                 // Preferences & teams (names are UI-only helpers resolved from the roster)
@@ -299,6 +403,8 @@ internal static partial class SheetMapper
                 {
                     if (writeSkills)
                         TableMapper.PopulateTableSafe<ScheduleSkillRecord>((object)prefSheet!, "SkillsTable", record.Skills);
+                    if (writeProjectSkillReqs)
+                        TableMapper.PopulateTableSafe<ProjectSkillRequirement>((object)prefSheet!, "ProjectRequirementsTable", record.ProjectSkillRequirements);
                     TableMapper.PopulateTableSafe<TeamRecord>((object)prefSheet!, "TeamTable", record.Teams);
                     TableMapper.PopulateTableSafe<WorkerPreference>((object)prefSheet!, "WorkerPreferencesTable", record.Preferences);
                 }
@@ -352,6 +458,70 @@ internal static partial class SheetMapper
         catch (Exception ex) { AppLogger.Warn($"[ScheduleManager] Writing {OtStartCell} failed: {ex.Message}"); }
     }
 
+    /// <summary>Re-evaluates WorkerPreferencesTable[Licensed Skills] from the cached StaffManager licences (bulk read/write).</summary>
+    private static void RefreshLicensedSkills(object wbObj, DateOnly scheduleDate)
+    {
+        try
+        {
+            ServerSyncCommands.EnsureLicensesLoaded();
+
+            dynamic? prefSheet = SheetMapperHelper.ResolveSheetSafely(wbObj, PreferenceAliases, "Preference");
+            if (prefSheet == null) return;
+
+            dynamic? table = null;
+            try { table = prefSheet.ListObjects["WorkerPreferencesTable"]; } catch { }
+            if (table == null || table.DataBodyRange == null) return;
+
+            dynamic? idCol = null, nameCol = null, licCol = null;
+            foreach (dynamic col in table.ListColumns)
+            {
+                string header = ((string?)col.Name ?? string.Empty).Trim();
+                if (header.Equals("Staff ID", StringComparison.OrdinalIgnoreCase)) idCol = col;
+                else if (header.Equals("Staff Name", StringComparison.OrdinalIgnoreCase)) nameCol = col;
+                else if (header.Equals("Licensed Skills", StringComparison.OrdinalIgnoreCase)) licCol = col;
+            }
+            if (idCol == null || licCol == null || idCol.DataBodyRange == null || licCol.DataBodyRange == null) return;
+
+            int rowCount = (int)table.DataBodyRange.Rows.Count;
+            if (rowCount <= 0) return;
+
+            object[,] ids = TableMapper.GetRange2DValues(idCol.DataBodyRange, rowCount, 1);
+            object[,] lics = TableMapper.GetRange2DValues(licCol.DataBodyRange, rowCount, 1);
+            object[,]? names = nameCol != null && nameCol.DataBodyRange != null
+                ? TableMapper.GetRange2DValues(nameCol.DataBodyRange, rowCount, 1)
+                : null;
+
+            var skillsByStaff = ServerSyncCommands.BuildLicensedSkillsMap(BoardContext.VehicleLicenses, BoardContext.SkillLicenses, scheduleDate);
+            var grid = new object[rowCount, 1];
+            bool anyChanged = false;
+
+            for (int r = 1; r <= rowCount; r++)
+            {
+                object? rawId = ids[r, 1];
+                long staffId = 0;
+                if (rawId is double d) staffId = (long)d;
+                else if (rawId != null) long.TryParse(rawId.ToString()?.Trim(), out staffId);
+
+                if (staffId <= 0 && names != null)
+                {
+                    string staffName = (names[r, 1]?.ToString() ?? string.Empty).Trim();
+                    if (staffName.Length > 0) staffId = Roster.FindStaff(staffName)?.Id ?? 0;
+                }
+
+                string expected = staffId > 0 && skillsByStaff.TryGetValue(staffId, out var list) ? string.Join(", ", list) : string.Empty;
+                string current = (lics[r, 1]?.ToString() ?? string.Empty).Trim();
+                grid[r - 1, 0] = expected;
+                if (!string.Equals(current, expected, StringComparison.Ordinal)) anyChanged = true;
+            }
+
+            if (anyChanged) licCol.DataBodyRange.Value2 = grid;
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn($"[ScheduleManager] RefreshLicensedSkills failed: {ex.Message}");
+        }
+    }
+
     private static void WriteAttendanceRows(dynamic attendanceSheet, List<DailyWorkerAttendance> rows)
     {
         foreach (var r in rows) r.StaffName = Roster.NameOf(r.StaffID, r.StaffName);
@@ -391,6 +561,7 @@ internal static partial class SheetMapper
             {
                 if (reloadContext)
                 {
+                    RefreshLicensedSkills(wbObj, date.Value);
                     BoardContext.Reload(wbObj);
                     // A SkillsTable edit must show up in the StaffSkillList dropdowns straight away.
                     ServerSyncCommands.SyncSkillList();
@@ -739,7 +910,7 @@ internal static partial class SheetMapper
     /// Appends terminal punches for the board date to the entries table (Source = Thumbprint), skipping punches
     /// already present. Must run on the macro thread. Returns (added, duplicates, unknown or other-date).
     /// </summary>
-    internal static (int Added, int Duplicates, int Unknown) AppendTerminalPunches(IReadOnlyList<TerminalPunch> punches)
+    internal static (int Added, int Duplicates, int Unknown) AppendTerminalPunches(IReadOnlyList<TerminalPunch> punches, DateOnly? targetDate = null)
     {
         dynamic xlApp = ExcelDnaUtil.Application;
         dynamic? wb = xlApp.ActiveWorkbook;
@@ -748,30 +919,45 @@ internal static partial class SheetMapper
 
         dynamic? board = SheetMapperHelper.ResolveSheetSafely(wbObj, ScheduleBoardMapper.SheetAliases, ScheduleBoardMapper.DefaultSheetName);
         dynamic? entriesSheet = SheetMapperHelper.ResolveSheetSafely(wbObj, EntriesAliases, "Attendance Entries");
-        DateOnly? date = board != null ? ScheduleBoardMapper.ReadDate((object)board!) : null;
+        DateOnly? date = targetDate ?? (board != null ? ScheduleBoardMapper.ReadDate((object)board!) : null);
         if (entriesSheet == null || date == null) return (0, 0, punches.Count);
 
         DateOnly day = date!.Value;
         var forDate = punches.Where(p => DateOnly.FromDateTime(p.Timestamp) == day).ToList();
         int added = 0, duplicates = 0, unknown = punches.Count - forDate.Count;
+        bool wrote = false;
 
         NormalizeApprovals(entriesSheet);
         RunFrozen(() =>
         {
             var existing = TableMapper.ExtractFromTable<AttendanceEntry>((object)entriesSheet!, EntriesTableName);
-            var result = DeviceSyncManager.BuildEntries(forDate, existing, id => Roster.IsActiveOn(id, day));
+            var (clean, removedExistingDuplicates) = DeviceSyncManager.DeduplicateExisting(existing);
+            var result = DeviceSyncManager.BuildEntries(forDate, clean, id => Roster.FindStaff(id) != null);
             added = result.NewEntries.Count;
-            duplicates = result.Duplicates;
+            duplicates = result.Duplicates + removedExistingDuplicates;
             unknown += result.UnknownStaff;
-            if (added == 0) return;
+            if (added == 0 && removedExistingDuplicates == 0) return;
 
-            var all = existing.Concat(result.NewEntries).OrderBy(e => e.Date).ThenBy(e => e.Time).ToList();
+            var all = clean.Concat(result.NewEntries).OrderBy(e => e.Date).ThenBy(e => e.Time).ToList();
+            ServerSyncCommands.SyncLookupLists(day, all.Select(e => e.StaffID));
             foreach (var e in all) e.StaffName = Roster.NameOf(e.StaffID, e.StaffName);
             TableMapper.PopulateTableSafe<AttendanceEntry>((object)entriesSheet!, EntriesTableName, all);
+            wrote = true;
         });
 
-        if (added > 0) RefreshDerived(reloadContext: false, rollup: true);
+        if (wrote)
+        {
+            RegisterRecordEdit();
+            RefreshDerived(reloadContext: false, rollup: true);
+        }
         return (added, duplicates, unknown);
+    }
+
+    /// <summary>Called after the ribbon's "Remove Duplicates" deleted rows: mark the record edited and rebuild the derived views.</summary>
+    internal static void OnDuplicateRowsCleaned()
+    {
+        RegisterRecordEdit();
+        RefreshDerived(reloadContext: true, rollup: true);
     }
 
     // =========================================================================

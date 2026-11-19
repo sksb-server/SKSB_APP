@@ -97,7 +97,16 @@ public static class DeviceSyncManager
 
         string? bridgePath = null;
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        foreach (string? dir in new[] { addinDirectory, parentDirectory, rootDirectory, AppDomain.CurrentDomain.BaseDirectory })
+        var searchDirs = new List<string?> { addinDirectory, parentDirectory, rootDirectory };
+        if (!string.IsNullOrWhiteSpace(rootDirectory))
+        {
+            searchDirs.Add(Path.Combine(rootDirectory, "AddIns"));
+#if DEBUG
+            searchDirs.Add(Path.Combine(rootDirectory, "ZkBridge", "bin", "Debug", "net8.0-windows"));
+#endif
+        }
+        searchDirs.Add(AppDomain.CurrentDomain.BaseDirectory);
+        foreach (string? dir in searchDirs)
         {
             if (string.IsNullOrWhiteSpace(dir) || !seen.Add(dir)) continue;
             string candidate = Path.Combine(dir, "ZkBridge.exe");
@@ -146,6 +155,40 @@ public static class DeviceSyncManager
     // =========================================================================
     // 2. PUNCH -> ATTENDANCE ENTRY CONVERSION (pure, de-duplicating)
     // =========================================================================
+
+    /// <summary>
+    /// Removes duplicate rows already present (order preserved). Thumbprint rows within <see cref="DoubleScanWindow"/> of the
+    /// previous kept row for the same (staff, date) are dropped and the kept timeline's in/out alternation is normalized;
+    /// other sources drop rows repeating an earlier (date, staff, type, source, hh:mm).
+    /// </summary>
+    public static (List<AttendanceEntry> CleanEntries, int RemovedDuplicates) DeduplicateExisting(IReadOnlyCollection<AttendanceEntry> existing)
+    {
+        var drop = new HashSet<AttendanceEntry>(ReferenceEqualityComparer.Instance);
+
+        foreach (var g in existing.Where(e => e.Source == AttendanceSource.Thumbprint).GroupBy(e => (e.StaffID, e.Date)))
+        {
+            var kept = new List<AttendanceEntry>();
+            foreach (var e in g.OrderBy(e => e.Time))   // stable sort
+            {
+                if (kept.Count > 0 && Math.Abs((e.Time.ToTimeSpan() - kept[^1].Time.ToTimeSpan()).TotalSeconds) < DoubleScanWindow.TotalSeconds)
+                    drop.Add(e);
+                else
+                    kept.Add(e);
+            }
+            for (int i = 0; i < kept.Count; i++)
+                kept[i].EntryType = i % 2 == 0 ? AttendanceEntryType.CheckIn : AttendanceEntryType.CheckOut;
+        }
+
+        var seen = new HashSet<(DateOnly, long, AttendanceEntryType, AttendanceSource, int, int)>();
+        var clean = new List<AttendanceEntry>();
+        foreach (var e in existing)
+        {
+            if (drop.Contains(e)) continue;
+            if (e.Source != AttendanceSource.Thumbprint && !seen.Add((e.Date, e.StaffID, e.EntryType, e.Source, e.Time.Hour, e.Time.Minute))) continue;
+            clean.Add(e);
+        }
+        return (clean, existing.Count - clean.Count);
+    }
 
     /// <summary>
     /// Converts raw punches into new <see cref="AttendanceSource.Thumbprint"/> entries.

@@ -72,14 +72,7 @@ static class Program
 
             string solutionRoot = SKSB_App.Core.Bootstrap.Storage.FolderRegistry.SKSB_App.GetPath();
 
-            try
-            {
-                foreach (var d in Directory.GetDirectories(shadowRoot, "Portal_*"))
-                {
-                    try { Directory.Delete(d, true); } catch { }
-                }
-            }
-            catch { }
+            PortalRouter.CleanupUnusedShadowDirectories(shadowRoot, "Portal_*");
 
             string targetDir = Path.Combine(shadowRoot, $"Portal_{DateTime.UtcNow:yyyyMMdd_HHmmss_fff}_{Environment.ProcessId}");
             Directory.CreateDirectory(targetDir);
