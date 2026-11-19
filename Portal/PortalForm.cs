@@ -21,7 +21,10 @@ public class PortalForm : Form
         _currentVersion = ResolveAppVersion();
 
 #if DEBUG
-        Text = $"SKSB Operations Portal (Debug) - v{_currentVersion}";
+        string branchLabel = ResolveDebugBranchLabel();
+        Text = string.IsNullOrWhiteSpace(branchLabel)
+            ? $"SKSB Operations Portal (Debug) - v{_currentVersion}"
+            : $"SKSB Operations Portal (Debug • {branchLabel}) - v{_currentVersion}";
 #else
         Text = $"SKSB Operations Portal - v{_currentVersion}";
 #endif
@@ -41,6 +44,44 @@ public class PortalForm : Form
         ResumeLayout(false);
         PerformLayout();
     }
+
+#if DEBUG
+    private static string ResolveDebugBranchLabel()
+    {
+        string root = FolderRegistry.SKSB_App.GetPath();
+        try
+        {
+            string dotGit = Path.Combine(root, ".git");
+            string? headPath = null;
+            if (Directory.Exists(dotGit))
+            {
+                headPath = Path.Combine(dotGit, "HEAD");
+            }
+            else if (File.Exists(dotGit))
+            {
+                string firstLine = File.ReadLines(dotGit).FirstOrDefault() ?? string.Empty;
+                string gitDir = firstLine.Replace("gitdir:", string.Empty, StringComparison.OrdinalIgnoreCase).Trim();
+                if (gitDir.Length > 0)
+                {
+                    string resolved = Path.IsPathRooted(gitDir) ? gitDir : Path.GetFullPath(Path.Combine(root, gitDir));
+                    headPath = Path.Combine(resolved, "HEAD");
+                }
+            }
+
+            if (headPath != null && File.Exists(headPath))
+            {
+                string head = (File.ReadLines(headPath).FirstOrDefault() ?? string.Empty).Trim();
+                const string prefix = "ref: refs/heads/";
+                if (head.StartsWith(prefix, StringComparison.Ordinal)) return head[prefix.Length..];
+                if (head.Length > 0) return head.Length > 7 ? head[..7] : head;
+            }
+        }
+        catch { }
+
+        string name = Path.GetFileName(root.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+        return string.IsNullOrEmpty(name) ? "Debug" : name;
+    }
+#endif
 
     protected override void OnLoad(EventArgs e)
     {

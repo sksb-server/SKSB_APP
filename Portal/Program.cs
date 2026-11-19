@@ -25,7 +25,12 @@ static class Program
 #if DEBUG
         if (TryRelaunchFromShadow()) return;
 #endif
-        using var mutex = new Mutex(true, PortalMutexName, out bool isInitialInstance);
+#if DEBUG
+        string mutexName = GetPortalMutexName();
+#else
+        string mutexName = PortalMutexName;
+#endif
+        using var mutex = new Mutex(true, mutexName, out bool isInitialInstance);
         if (!isInitialInstance)
         {
             FocusExistingPortal();
@@ -39,6 +44,22 @@ static class Program
     }
 
 #if DEBUG
+    private static string GetPortalMutexName()
+    {
+        try
+        {
+            string root = SKSB_App.Core.Bootstrap.Storage.FolderRegistry.SKSB_App.GetPath();
+            string normalized = Path.GetFullPath(root).TrimEnd('\\', '/').ToLowerInvariant();
+            byte[] hash = System.Security.Cryptography.SHA256.HashData(System.Text.Encoding.UTF8.GetBytes(normalized));
+            string shortHash = Convert.ToHexString(hash)[..12];
+            return $"Global\\SKSB_App_Portal_Debug_{shortHash}_Mutex";
+        }
+        catch
+        {
+            return PortalMutexName;
+        }
+    }
+
     private static bool TryRelaunchFromShadow()
     {
         try
