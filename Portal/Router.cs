@@ -7,6 +7,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows.Forms;
+using Microsoft.Win32;
 using SKSB_App.Core.Bootstrap.Environment;
 using SKSB_App.Core.Bootstrap.Storage;
 
@@ -124,6 +125,10 @@ public static class PortalRouter
             if (!File.Exists(coreAddInPath))
                 throw new FileNotFoundException($"Core Add-in not found at:\n{coreAddInPath}", coreAddInPath);
 
+#if DEBUG
+            (coreAddInPath, addInPath) = StageDebugShadowAddIns(coreAddInPath, addInPath, templateBaseName);
+#endif
+
             // 4. Use /x to force an isolated Excel process, preventing add-in cross-contamination
             var startInfo = new ProcessStartInfo
             {
@@ -148,6 +153,81 @@ public static class PortalRouter
                             "Execution Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
+
+#if DEBUG
+    private static (string CoreAddInPath, string ModuleAddInPath) StageDebugShadowAddIns(
+        string coreAddInPath, string moduleAddInPath, string moduleBaseName)
+    {
+        try
+        {
+            string shadowRoot = Path.Combine(Path.GetTempPath(), "SKSB_Debug_Shadow");
+            string solutionRoot = FolderRegistry.SKSB_App.GetPath();
+            Environment.SetEnvironmentVariable("SKSB_SOLUTION_ROOT", solutionRoot);
+            Directory.CreateDirectory(shadowRoot);
+
+            EnsureDebugTrustedLocations(shadowRoot, solutionRoot);
+
+            // Best-effort sweep: folders in use by running Excel/Portal are locked and skipped.
+            try
+            {
+                foreach (string dir in Directory.GetDirectories(shadowRoot))
+                {
+                    try { Directory.Delete(dir, recursive: true); } catch { }
+                }
+            }
+            catch { }
+
+            string sessionDir = Path.Combine(shadowRoot,
+                $"{moduleBaseName}_{DateTime.UtcNow:yyyyMMdd_HHmmss_fff}_{Guid.NewGuid().ToString("N")[..6]}");
+            Directory.CreateDirectory(sessionDir);
+
+            foreach (string srcDir in new[] { Path.GetDirectoryName(coreAddInPath)!, Path.GetDirectoryName(moduleAddInPath)! })
+            {
+                foreach (string file in Directory.GetFiles(srcDir))
+                {
+                    File.Copy(file, Path.Combine(sessionDir, Path.GetFileName(file)), overwrite: true);
+                }
+            }
+
+            File.WriteAllText(Path.Combine(sessionDir, ".sksb_solution_root"), solutionRoot);
+
+            return (Path.Combine(sessionDir, Path.GetFileName(coreAddInPath)),
+                    Path.Combine(sessionDir, Path.GetFileName(moduleAddInPath)));
+        }
+        catch
+        {
+            return (coreAddInPath, moduleAddInPath);
+        }
+    }
+
+    private static void EnsureDebugTrustedLocations(string shadowRoot, string solutionRoot)
+    {
+        foreach (string ver in new[] { "16.0", "15.0" })
+        {
+            try
+            {
+                if (ver == "15.0")
+                {
+                    using var probe = Registry.CurrentUser.OpenSubKey($@"Software\Microsoft\Office\{ver}\Excel");
+                    if (probe == null) continue;
+                }
+
+                string basePath = $@"Software\Microsoft\Office\{ver}\Excel\Security\Trusted Locations";
+                RegisterTrustedLocation(basePath, "SKSB_App_DebugShadow", shadowRoot, "SKSB_App Debug Shadow");
+                RegisterTrustedLocation(basePath, "SKSB_App_DebugRepo", solutionRoot, "SKSB_App Debug Repo");
+            }
+            catch { }
+        }
+    }
+
+    private static void RegisterTrustedLocation(string basePath, string name, string path, string description)
+    {
+        using var key = Registry.CurrentUser.CreateSubKey($@"{basePath}\{name}");
+        key?.SetValue("Path", path, RegistryValueKind.String);
+        key?.SetValue("AllowSubfolders", 1, RegistryValueKind.DWord);
+        key?.SetValue("Description", description, RegistryValueKind.String);
+    }
+#endif
 
     private static string ResolveTemplatePath(string templateFileName)
     {

@@ -57,13 +57,30 @@ public static class FolderRegistry
     {
         try
         {
+            string? envRoot = Environment.GetEnvironmentVariable("SKSB_SOLUTION_ROOT");
+            if (!string.IsNullOrWhiteSpace(envRoot) && Directory.Exists(envRoot))
+            {
+                return envRoot;
+            }
+
+            string markerPath = Path.Combine(AppContext.BaseDirectory, ".sksb_solution_root");
+            if (File.Exists(markerPath))
+            {
+                string? markerRoot = File.ReadLines(markerPath).FirstOrDefault()?.Trim();
+                if (!string.IsNullOrWhiteSpace(markerRoot) && Directory.Exists(markerRoot))
+                {
+                    return markerRoot;
+                }
+            }
+
             string? startDir = AppContext.BaseDirectory;
             if (!string.IsNullOrWhiteSpace(startDir))
             {
                 var dir = new DirectoryInfo(startDir);
                 while (dir != null)
                 {
-                    if (dir.GetFiles("*.sln").Length > 0 || dir.GetDirectories(".git").Length > 0)
+                    if (dir.GetFiles("*.slnx").Length > 0 || dir.GetFiles("*.sln").Length > 0
+                        || dir.GetDirectories(".git").Length > 0 || dir.GetFiles(".git").Length > 0)
                     {
                         return dir.FullName;
                     }

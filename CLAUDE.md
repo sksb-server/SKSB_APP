@@ -8,7 +8,7 @@ Authoritative implementation rules for `SKSB_App`. Follow all stack, build, data
 
 ## 2. Build, Clean & Publish (PowerShell)
 **MSBuild Hooks (`Directory.Build.props`, `Portal.csproj`):**
-- Building `Portal` or `SKSB_App.slnx` runs `KillExistingExcelAndPortalOnBuild` (`taskkill /f` on `excel.exe` and `Portal.exe`).
+- Portal and Excel add-ins run from `%TEMP%\SKSB_Debug_Shadow` in Debug mode; `KillExistingExcelAndPortalOnBuild` only runs when `-p:KillOnBuild=true` is explicitly passed, so `dotnet build` is safe while Excel/Portal are open.
 - Every build copies binaries/`*-AddIn*.xll` to `./AddIns/`.
 - `Clean` wipes `./AddIns/`; `dotnet clean -c Release` also wipes non-`Data` files in `%USERPROFILE%\Documents\SKSB_App`.
 

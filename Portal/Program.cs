@@ -2,6 +2,7 @@
 
 using System;
 using System.Diagnostics;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
@@ -21,6 +22,9 @@ static class Program
     [STAThread]
     static void Main()
     {
+#if DEBUG
+        if (TryRelaunchFromShadow()) return;
+#endif
         using var mutex = new Mutex(true, PortalMutexName, out bool isInitialInstance);
         if (!isInitialInstance)
         {
@@ -33,6 +37,54 @@ static class Program
         Application.SetCompatibleTextRenderingDefault(false);
         Application.Run(new PortalForm());
     }
+
+#if DEBUG
+    private static bool TryRelaunchFromShadow()
+    {
+        try
+        {
+            if (Debugger.IsAttached) return false;
+
+            string shadowRoot = Path.Combine(Path.GetTempPath(), "SKSB_Debug_Shadow");
+            string baseDir = AppContext.BaseDirectory;
+            if (baseDir.StartsWith(shadowRoot, StringComparison.OrdinalIgnoreCase)) return false;
+
+            string solutionRoot = SKSB_App.Core.Bootstrap.Storage.FolderRegistry.SKSB_App.GetPath();
+
+            try
+            {
+                foreach (var d in Directory.GetDirectories(shadowRoot, "Portal_*"))
+                {
+                    try { Directory.Delete(d, true); } catch { }
+                }
+            }
+            catch { }
+
+            string targetDir = Path.Combine(shadowRoot, $"Portal_{DateTime.UtcNow:yyyyMMdd_HHmmss_fff}_{Environment.ProcessId}");
+            Directory.CreateDirectory(targetDir);
+
+            foreach (string file in Directory.GetFiles(baseDir))
+            {
+                File.Copy(file, Path.Combine(targetDir, Path.GetFileName(file)), true);
+            }
+
+            File.WriteAllText(Path.Combine(targetDir, ".sksb_solution_root"), solutionRoot);
+            Environment.SetEnvironmentVariable("SKSB_SOLUTION_ROOT", solutionRoot);
+
+            var psi = new ProcessStartInfo
+            {
+                FileName = Path.Combine(targetDir, "Portal.exe"),
+                WorkingDirectory = targetDir,
+                UseShellExecute = false
+            };
+            return Process.Start(psi) != null;
+        }
+        catch
+        {
+            return false;
+        }
+    }
+#endif
 
     private static void FocusExistingPortal()
     {

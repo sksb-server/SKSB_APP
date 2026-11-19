@@ -61,11 +61,15 @@
 
     <Copy SourceFiles="@(ModuleArtifacts)"
           DestinationFolder="$(SourceAddInsDir)"
-          SkipUnchangedFiles="false" />
+          SkipUnchangedFiles="false"
+          Retries="0"
+          ContinueOnError="WarnAndContinue" />
 
     <Copy SourceFiles="@(PackedArtifacts)"
           DestinationFolder="$(SourceAddInsDir)"
           SkipUnchangedFiles="false"
+          Retries="0"
+          ContinueOnError="WarnAndContinue"
           Condition="'@(PackedArtifacts)' != ''" />
 
     <Message Importance="high" Text="[AddIn Sync] Deployed $(MSBuildProjectName) artifacts to $(SourceAddInsDir)" />
