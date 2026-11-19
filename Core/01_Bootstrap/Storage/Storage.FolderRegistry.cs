@@ -63,7 +63,10 @@ public static class FolderRegistry
                 var dir = new DirectoryInfo(startDir);
                 while (dir != null)
                 {
-                    if (dir.GetFiles("*.sln").Length > 0 || dir.GetDirectories(".git").Length > 0)
+                    if (dir.GetFiles("*.sln").Length > 0 ||
+                        dir.GetFiles("*.slnx").Length > 0 ||
+                        dir.GetDirectories(".git").Length > 0 ||
+                        dir.GetFiles(".git").Length > 0)
                     {
                         return dir.FullName;
                     }

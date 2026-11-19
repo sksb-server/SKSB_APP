@@ -1,6 +1,7 @@
 ﻿namespace SKSB_App.Core.WorkbookSave.SheetMapper;
 
 using SKSB_App.Core.Diagnostics;
+using SKSB_App.Core.RuntimeUI.Progress;
 using SKSB_App.Core.RuntimeUI.RuleEngine;
 using SKSB_App.Core.RuntimeUI.TableRowManager;
 using SKSB_App.Core.Types.Attributes;
@@ -56,6 +57,8 @@ public static class TableMapper
         dynamic? table = ResolveTable(worksheet, candidateTableNames);
         if (table == null) return records;
 
+        string extractTableName = table.Name?.ToString() ?? "Table";
+        LoadingOverlay.Report($"Reading table: {extractTableName}...", "Evaluating rules and deduplicating rows...");
         RuleEvaluator.EvaluateAndHealTable(worksheet, table);
 
         // VALIDATION DEDUPLICATION: Clean and delete duplicate rows before reading body
@@ -163,6 +166,7 @@ public static class TableMapper
         string tName = table.Name?.ToString() ?? "Table";
         int recordCount = records!.Count;
         using var _ = AppLogger.Scope($"PopulateTableSafe<{typeof(T).Name}>({tName}, count={recordCount})");
+        LoadingOverlay.Report($"Populating table: {tName} ({recordCount} row(s))...", "Writing bulk 2D array & applying column formats...");
 
         dynamic xlApp = worksheet!.Application;
         bool origEvents = true;

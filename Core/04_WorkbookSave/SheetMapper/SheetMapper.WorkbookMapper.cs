@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Linq;
 using ExcelDna.Integration;
 using SKSB_App.Core.Diagnostics;
+using SKSB_App.Core.RuntimeUI.Progress;
 using SKSB_App.Core.RuntimeUI.RuleEngine;
 using SKSB_App.Core.WorkbookSave.Validation;
 
@@ -232,6 +233,7 @@ public static class WorkbookMapper
 
             var customErrors = new List<string>();
             List<TMaster> masters;
+            LoadingOverlay.Report("Reading master records...");
             if (map.CustomMasterExtractor != null)
             {
                 masters = map.CustomMasterExtractor(wbObj, customErrors);
@@ -268,15 +270,18 @@ public static class WorkbookMapper
             var hookWarnings = new List<string>();
             foreach (var child in map.Children)
             {
+                LoadingOverlay.Report($"Reading child table: {child.TableName}...");
                 child.ExtractInto(wbObj, masterMap, isValidKey, map.MasterSheetName, map.MasterKeyLabel, hookErrors);
             }
 
             // 3b. Child collections are attached: evaluate declarative rollups / calculations on each master
+            LoadingOverlay.Report("Evaluating calculated columns...");
             map.ApplyMasterCalculations?.Invoke(wbObj, masters);
 
             map.PreValidationHook?.Invoke(wbObj, masters, hookErrors, hookWarnings);
 
             // 4. Validate all tables across all sheets
+            LoadingOverlay.Report("Validating workbook rules...");
             var (errors, warnings) = RulesExtractor.ValidateAllWorkbookTables(wbObj);
             errors.AddRange(hookErrors);
             warnings.AddRange(hookWarnings);
@@ -529,6 +534,8 @@ public static class WorkbookMapper
 
         List<TMaster> ordered = map.OrderMasterRecords?.Invoke(records) ?? records;
 
+        using var _ = LoadingOverlay.BeginScope($"Populating {map.MasterLabel}", $"Writing {map.MasterTableName} ({ordered.Count} row(s))...");
+
         // 1. Standard COM freeze for the whole pass
         dynamic xlApp = ExcelDnaUtil.Application;
         bool origEvents = true;
@@ -562,21 +569,25 @@ public static class WorkbookMapper
             // 5. Child tables
             foreach (var child in map.Children)
             {
+                LoadingOverlay.Report($"Writing child table: {child.TableName}...");
                 child.Populate(wbObj, ordered);
             }
 
             // 6. Auxiliary / reference tables
+            LoadingOverlay.Report("Updating auxiliary & reference tables...");
             map.OnPopulateAuxiliaryTables?.Invoke(wbObj, ordered);
 
             // 7. Post-populate calculation and ordered self-healing pass
             if (map.RecalculateAfterPopulate)
             {
+                LoadingOverlay.Report("Recalculating workbook formulas...");
                 try { xlApp.CalculateFull(); }
                 catch (Exception exCalc) { AppLogger.Warn($"[WorkbookMapper] CalculateFull warning: {exCalc.Message}"); }
             }
 
             foreach (string tableName in map.HealTableOrder)
             {
+                LoadingOverlay.Report($"Synchronizing rules & formatting: {tableName}...");
                 foreach (dynamic sheet in wb.Worksheets)
                 {
                     try
@@ -611,6 +622,7 @@ public static class WorkbookMapper
             try { xlApp.ScreenUpdating = origUpdating; } catch { }
             if (auditWorkbook != null)
             {
+                LoadingOverlay.Report("Refreshing conditional formatting...");
                 RefreshConditionalFormatting(xlApp, auditWorkbook, map);
             }
             try { xlApp.EnableEvents = origEvents; } catch { }
@@ -620,7 +632,10 @@ public static class WorkbookMapper
         //    must never open while ScreenUpdating / EnableEvents are suppressed.
         if (auditWorkbook != null)
         {
-            SheetMapperHelper.ShowPopulateDiagnostics(auditWorkbook, map.AuditTitle, map.MasterLabel, ordered.Count, map.InspectTables);
+            using (LoadingOverlay.Suspend())
+            {
+                SheetMapperHelper.ShowPopulateDiagnostics(auditWorkbook, map.AuditTitle, map.MasterLabel, ordered.Count, map.InspectTables);
+            }
         }
     }
 }

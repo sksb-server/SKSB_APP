@@ -8,6 +8,7 @@ using System.Linq;
 using System.Text;
 using System.Windows.Forms;
 using SKSB_App.Core.Diagnostics;
+using SKSB_App.Core.RuntimeUI.Progress;
 
 public static partial class TableRowManager
 {
@@ -93,12 +94,15 @@ public static partial class TableRowManager
         // 4. If all records are duplicates, notify and return empty list
         if (cleanRecords.Count == 0)
         {
-            MessageBox.Show(
-                $"All {duplicateRecords.Count} {entityLabel} records in this file are duplicates that already exist in the system.\n\nNo new records to import.",
-                $"{entityLabel} Import - All Duplicates",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Information
-            );
+            using (LoadingOverlay.Suspend())
+            {
+                MessageBox.Show(
+                    $"All {duplicateRecords.Count} {entityLabel} records in this file are duplicates that already exist in the system.\n\nNo new records to import.",
+                    $"{entityLabel} Import - All Duplicates",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Information
+                );
+            }
             return cleanRecords;
         }
 
@@ -110,7 +114,11 @@ public static partial class TableRowManager
             skippedWarnings: duplicateWarnings
         );
 
-        var result = dialog.ShowDialog();
+        DialogResult result;
+        using (LoadingOverlay.Suspend())
+        {
+            result = dialog.ShowDialog();
+        }
         return result == DialogResult.OK ? cleanRecords : null;
     }
 }
