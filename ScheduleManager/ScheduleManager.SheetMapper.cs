@@ -8,6 +8,7 @@ using System.Windows.Forms;
 using ExcelDna.Integration;
 using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.RuntimeUI.DropDown;
+using SKSB_App.Core.RuntimeUI.Progress;
 using SKSB_App.Core.ThumbprintSync;
 using SKSB_App.Core.Types;
 using SKSB_App.Core.WorkbookOpen.Sheet;
@@ -51,6 +52,7 @@ internal static partial class SheetMapper
     // =========================================================================
     internal static (ScheduleRecord? Data, List<string> Errors, List<string> Warnings) ExtractScheduleRecordWithDiagnostics()
     {
+        using var _ = LoadingOverlay.BeginScope("Schedule Manager — Validating Schedule", "Reading dispatch board and attendance tables...");
         var errors = new List<string>();
         var warnings = new List<string>();
         try
@@ -87,6 +89,7 @@ internal static partial class SheetMapper
             // Entries first: default approvals (WhatsApp starts unapproved) must be on the sheet before it is read.
             NormalizeApprovals(entriesSheet);
 
+            LoadingOverlay.Report("Reading preferences, teams & attendance entries...");
             RunFrozen(() =>
             {
                 record.Preferences = TableMapper.ExtractFromTable<WorkerPreference>((object)prefSheet!, "WorkerPreferencesTable");
@@ -96,6 +99,7 @@ internal static partial class SheetMapper
                 foreach (var e in existing) e.DailyScheduleDate = date.Value;
                 record.WorkerAttendance = existing;
             });
+            LoadingOverlay.Report("Reading daily schedule board...");
             record.Projects = ScheduleBoardMapper.Read((object)board!, date.Value);
 
             BoardContext.SetPreferences(record.Preferences, record.Teams);
@@ -106,9 +110,11 @@ internal static partial class SheetMapper
             errors.AddRange(ruleErrors);
             warnings.AddRange(ruleWarnings);
 
+            LoadingOverlay.Report("Validating schedule & worker availability...");
             ValidateSchedule(record, errors, warnings);
 
             // ---- roll punches + board up into the daily attendance rows that get persisted ----
+            LoadingOverlay.Report("Rolling up daily worker attendance...");
             var punchesForDate = record.AttendanceEntries.Where(e => e.Date == date.Value).ToList();
             record.WorkerAttendance = AttendanceRollupService.Run(date.Value, punchesForDate, record.Projects, record.WorkerAttendance, record.LateCutOffTime, record.OTStartTime);
 
@@ -239,6 +245,7 @@ internal static partial class SheetMapper
     // =========================================================================
     internal static void PopulateWorksheet(ScheduleRecord record)
     {
+        using var _ = LoadingOverlay.BeginScope($"Schedule Manager — Loading {record.DailyScheduleDate:dd MMM yyyy}", "Synchronizing staff & vehicle lookup lists...");
         try
         {
             dynamic xlApp = ExcelDnaUtil.Application;
@@ -276,6 +283,7 @@ internal static partial class SheetMapper
                 foreach (var t in record.Teams)
                     if (t.TeamLeaderStaffID > 0) t.TeamLeader = Roster.NameOf(t.TeamLeaderStaffID, t.TeamLeader);
 
+                LoadingOverlay.Report("Populating teams & worker preferences...");
                 if (prefSheet != null)
                 {
                     TableMapper.PopulateTableSafe<TeamRecord>((object)prefSheet!, "TeamTable", record.Teams);
@@ -291,13 +299,16 @@ internal static partial class SheetMapper
 
                 var entries = record.AttendanceEntries.OrderBy(e => e.Date).ThenBy(e => e.Time).ToList();
                 foreach (var e in entries) e.StaffName = Roster.NameOf(e.StaffID, e.StaffName);
+                LoadingOverlay.Report("Populating attendance entries...");
                 if (entriesSheet != null)
                     TableMapper.PopulateTableSafe<AttendanceEntry>((object)entriesSheet!, EntriesTableName, entries);
 
+                LoadingOverlay.Report("Rendering daily schedule board...");
                 ScheduleBoardMapper.Render((object)board!, date, record.Projects, entries, autoPopulate: true);
 
                 if (attendanceSheet != null)
                 {
+                    LoadingOverlay.Report("Rolling up daily attendances...");
                     var rows = AttendanceRollupService.Run(date, entries.Where(e => e.Date == date).ToList(), record.Projects, record.WorkerAttendance, BoardContext.LateCutOff, BoardContext.OTStartTime);
                     WriteAttendanceRows(attendanceSheet, rows);
                 }
@@ -690,8 +701,11 @@ internal static partial class SheetMapper
                 return;
             }
 
-            var record = ServerSyncCommands.FetchSchedule(date.Value);
-            PopulateWorksheet(record);
+            using (LoadingOverlay.BeginScope($"Schedule Manager — Loading {date.Value:dd MMM yyyy}", "Fetching schedule from system..."))
+            {
+                var record = ServerSyncCommands.FetchSchedule(date.Value);
+                PopulateWorksheet(record);
+            }
             SheetOperations.ShowStatusConfirmation($"Schedule for {date:yyyy-MM-dd} loaded.");
         }
         catch (Exception ex)

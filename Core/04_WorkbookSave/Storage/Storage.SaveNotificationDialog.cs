@@ -3,6 +3,7 @@
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Windows.Forms;
+using SKSB_App.Core.RuntimeUI.Progress;
 
 public enum SaveNotificationType
 {
@@ -141,18 +142,21 @@ public class SaveNotificationDialog : Form
 
     public static void ShowSuccess(string moduleName, string message = "All records have been safely synchronized to the system.")
     {
+        using var _ = LoadingOverlay.Suspend();
         using var dlg = new SaveNotificationDialog(moduleName, message, SaveNotificationType.Success);
         dlg.ShowDialog();
     }
 
     public static void ShowOffline(string moduleName, string message)
     {
+        using var _ = LoadingOverlay.Suspend();
         using var dlg = new SaveNotificationDialog(moduleName, message, SaveNotificationType.Offline);
         dlg.ShowDialog();
     }
 
     public static void ShowError(string moduleName, string message)
     {
+        using var _ = LoadingOverlay.Suspend();
         using var dlg = new SaveNotificationDialog(moduleName, message, SaveNotificationType.Error);
         dlg.ShowDialog();
     }

@@ -6,6 +6,7 @@ using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using ExcelDna.Integration;
 using ExcelDna.Integration.CustomUI;
+using SKSB_App.Core.RuntimeUI.Progress;
 using SKSB_App.Core.RuntimeUI.Ribbon;
 using SKSB_App.Core.WorkbookSave.Entry;
 
@@ -86,7 +87,13 @@ public class RibbonController : ManagerRibbonBase
             // Queue as Excel Macro so COM worksheet manipulation runs safely on the UI thread
             ExcelAsyncUtil.QueueAsMacro(() =>
             {
-                var (imported, skipped, totalAmount, provider) = SheetMapper.ImportFuelStatement(selectedFilePath);
+                int imported, skipped;
+                decimal totalAmount;
+                string provider;
+                using (LoadingOverlay.BeginScope("Vehicle Manager — Importing Fuel Statement", $"Parsing {fileNameOnly}..."))
+                {
+                    (imported, skipped, totalAmount, provider) = SheetMapper.ImportFuelStatement(selectedFilePath);
+                }
 
                 if (imported == 0 && skipped == 0)
                 {
@@ -128,7 +135,11 @@ public class RibbonController : ManagerRibbonBase
         {
             try
             {
-                var result = SheetMapper.SortAndHealOdometers();
+                SheetMapper.OdometerReconcileResult result;
+                using (LoadingOverlay.BeginScope("Vehicle Manager — Sorting & Matching Odometers", "Reconciling fleet odometer trajectories..."))
+                {
+                    result = SheetMapper.SortAndHealOdometers();
+                }
 
                 if (result.RowsSorted == 0)
                 {

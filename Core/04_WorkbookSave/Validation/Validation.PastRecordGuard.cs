@@ -8,6 +8,7 @@ using System.Windows.Forms;
 using ExcelDna.Integration;
 using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.RuntimeUI.DropDown;
+using SKSB_App.Core.RuntimeUI.Progress;
 
 /// <summary>
 /// Failsafe that makes users confirm before they modify or save a record dated before today.
@@ -150,6 +151,8 @@ public static class PastRecordGuard
             try { origUpdating = (bool)xlApp.ScreenUpdating; xlApp.ScreenUpdating = true; } catch { }
             try { origEvents = (bool)xlApp.EnableEvents; xlApp.EnableEvents = true; } catch { }
             try { owner = Arrow.GetExcelHwnd(xlApp); } catch { }
+
+            using var _ = LoadingOverlay.Suspend();
 
             var result = owner != IntPtr.Zero
                 ? MessageBox.Show(new ExcelWindow(owner), message, Caption, MessageBoxButtons.YesNo, MessageBoxIcon.Warning, MessageBoxDefaultButton.Button2)

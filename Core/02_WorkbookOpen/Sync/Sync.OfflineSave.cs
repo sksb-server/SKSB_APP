@@ -3,6 +3,7 @@ namespace SKSB_App.Core.WorkbookOpen.Sync;
 using ExcelDna.Integration;
 using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.Integration.Database;
+using SKSB_App.Core.RuntimeUI.Progress;
 using SKSB_App.Core.WorkbookOpen.Sheet;
 using SKSB_App.Core.WorkbookSave.Entry;
 using SKSB_App.Core.WorkbookSave.Storage;
@@ -24,6 +25,8 @@ public static class OfflineSave
                 return;
             }
 
+            using var progress = LoadingOverlay.BeginScope($"{contract.ModuleName} — Starting Up", "Checking PostgreSQL server connection...");
+
             dynamic xlApp = ExcelDnaUtil.Application;
             dynamic? wb = xlApp.ActiveWorkbook;
             dynamic? activeSheetBefore = null;
@@ -35,6 +38,7 @@ public static class OfflineSave
             contract.UpdateWindowCaption();
 
             AppLogger.Info("Calling contract.SyncLookups...");
+            LoadingOverlay.Report("Synchronizing lookup lists & dropdowns...");
             contract.SyncLookups?.Invoke(false);
 
             bool hasPending = OfflineSnapshot.HasPendingSnapshot<T>();
@@ -57,12 +61,15 @@ public static class OfflineSave
                 if (!isValid)
                 {
                     AppLogger.Warn("Found a corrupt or invalid offline pending file. Aborting upload.");
-                    MessageBox.Show(
-                        "Found a corrupt or invalid offline pending file. The upload has been aborted to protect the database.",
-                        "Upload Rejected",
-                        MessageBoxButtons.OK,
-                        MessageBoxIcon.Warning
-                    );
+                    using (LoadingOverlay.Suspend())
+                    {
+                        MessageBox.Show(
+                            "Found a corrupt or invalid offline pending file. The upload has been aborted to protect the database.",
+                            "Upload Rejected",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Warning
+                        );
+                    }
                     OfflineSnapshot.ClearPendingSnapshot<T>();
                 }
                 else
@@ -88,17 +95,21 @@ public static class OfflineSave
                             ? contract.FormatConflictSummary(pendingData!, serverData)
                             : $"  Your Offline Save: {localOfflineUtc.ToLocalTime():yyyy-MM-dd HH:mm:ss}\n  Current Server:     {serverLastUpdateUtc.Value.ToLocalTime():yyyy-MM-dd HH:mm:ss}\n";
 
-                        var dialogChoice = MessageBox.Show(
-                            $"=== DATA VERSION CONFLICT DETECTED ===\n" +
-                            $"The server was modified after your last offline save.\n\n" +
-                            $"{diffMessage}\n\n" +
-                            $"Would you like to OVERWRITE the server with your local offline version?\n" +
-                            $"  Yes: Overwrite server database with your local offline records.\n" +
-                            $"  No:  Discard your offline file and load the latest server copy.",
-                            "Synchronization Conflict",
-                            MessageBoxButtons.YesNo,
-                            MessageBoxIcon.Question
-                        );
+                        DialogResult dialogChoice;
+                        using (LoadingOverlay.Suspend())
+                        {
+                            dialogChoice = MessageBox.Show(
+                                $"=== DATA VERSION CONFLICT DETECTED ===\n" +
+                                $"The server was modified after your last offline save.\n\n" +
+                                $"{diffMessage}\n\n" +
+                                $"Would you like to OVERWRITE the server with your local offline version?\n" +
+                                $"  Yes: Overwrite server database with your local offline records.\n" +
+                                $"  No:  Discard your offline file and load the latest server copy.",
+                                "Synchronization Conflict",
+                                MessageBoxButtons.YesNo,
+                                MessageBoxIcon.Question
+                            );
+                        }
 
                         canCommit = (dialogChoice == DialogResult.Yes);
                         AppLogger.Info($"Offline sync conflict decision: {(canCommit ? "overwrite server with local offline save" : "discard offline save")}.");
@@ -107,6 +118,7 @@ public static class OfflineSave
                     if (canCommit)
                     {
                         AppLogger.Info("Committing offline pending save to server...");
+                        LoadingOverlay.Report("Uploading pending offline changes to server...");
                         var (success, dbError) = contract.SaveToServer(pendingData!);
                         if (success)
                         {
@@ -122,7 +134,9 @@ public static class OfflineSave
                             try { origCalculation = (int)xlApp.Calculation; xlApp.Calculation = -4135; /* xlCalculationManual */ } catch { }
                             try
                             {
+                                LoadingOverlay.Report($"Fetching {contract.ModuleName} records from server...");
                                 var authoritative = contract.FetchFromServer != null ? contract.FetchFromServer() : default;
+                                LoadingOverlay.Report($"Populating {contract.ModuleName} worksheets...");
                                 contract.PopulateWorksheet?.Invoke(authoritative ?? pendingData!);
                                 if (activeSheetBefore != null)
                                 {
@@ -145,12 +159,15 @@ public static class OfflineSave
                         else
                         {
                             AppLogger.Error($"Could not commit offline file to database: {dbError}");
-                            MessageBox.Show(
-                                $"Could not commit offline file to database:\n\n{dbError}\n\nThe offline file has been retained.",
-                                "Server Upload Failed",
-                                MessageBoxButtons.OK,
-                                MessageBoxIcon.Error
-                            );
+                            using (LoadingOverlay.Suspend())
+                            {
+                                MessageBox.Show(
+                                    $"Could not commit offline file to database:\n\n{dbError}\n\nThe offline file has been retained.",
+                                    "Server Upload Failed",
+                                    MessageBoxButtons.OK,
+                                    MessageBoxIcon.Error
+                                );
+                            }
                         }
                     }
                 }
@@ -158,6 +175,7 @@ public static class OfflineSave
 
             if (contract.FetchFromServer != null)
             {
+                LoadingOverlay.Report($"Fetching {contract.ModuleName} records from server...");
                 AppLogger.Info("Calling contract.FetchFromServer()...");
                 var serverData = contract.FetchFromServer();
                 bool isEmpty = contract.IsDatasetEmpty(serverData);
@@ -177,6 +195,7 @@ public static class OfflineSave
 
                     try
                     {
+                        LoadingOverlay.Report($"Populating {contract.ModuleName} worksheets...");
                         contract.PopulateWorksheet?.Invoke(serverData);
 
                         if (activeSheetBefore != null)
@@ -208,6 +227,7 @@ public static class OfflineSave
     private static void LoadOfflineSnapshotIntoWorkbook<T>(SaveContract<T> contract, dynamic xlApp, dynamic? activeSheetBefore, bool hasPending)
     {
         AppLogger.Info("OFFLINE MODE: loading local offline snapshot (no upload attempted).");
+        LoadingOverlay.Report("Loading local offline snapshot...");
         var data = contract.FetchFromServer != null ? contract.FetchFromServer() : OfflineSnapshot.Load<T>();
         bool isEmpty = contract.IsDatasetEmpty(data);
 
@@ -221,6 +241,7 @@ public static class OfflineSave
             try { origCalculation = (int)xlApp.Calculation; xlApp.Calculation = -4135; /* xlCalculationManual */ } catch { }
             try
             {
+                LoadingOverlay.Report("Populating worksheets from offline snapshot...");
                 contract.PopulateWorksheet?.Invoke(data);
                 if (activeSheetBefore != null)
                 {

@@ -11,6 +11,7 @@ using ExcelDna.Integration;
 using ExcelDna.Integration.CustomUI;
 using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.Integration.Erp;
+using SKSB_App.Core.RuntimeUI.Progress;
 using SKSB_App.Core.RuntimeUI.Ribbon;
 using SKSB_App.Core.ThumbprintSync;
 using SKSB_App.Core.RuntimeUI.TableRowManager;
@@ -92,7 +93,11 @@ public class RibbonController : ManagerRibbonBase
             string selectedFilePath = openFileDialog.FileName;
             string fileNameOnly = Path.GetFileName(selectedFilePath);
 
-            var importResult = Importer.ImportStaffs(selectedFilePath);
+            StaffImportResult importResult;
+            using (LoadingOverlay.BeginScope("Staff Manager — Importing SQL Payroll", $"Reading {fileNameOnly}..."))
+            {
+                importResult = Importer.ImportStaffs(selectedFilePath);
+            }
 
             if (importResult.ImportedStaffs.Count == 0 && importResult.SkippedErrors.Count == 0)
             {
@@ -108,40 +113,43 @@ public class RibbonController : ManagerRibbonBase
 
             ExcelAsyncUtil.QueueAsMacro(() =>
             {
-                var (existingStaffs, _, _) = SheetMapper.ExtractStaffRecordsWithDiagnostics();
-
-                var cleanStaffs = TableRowManager.FilterDuplicates(
-                    incomingRecords: importResult.ImportedStaffs,
-                    keySelector: s => $"{s.StaffID}",
-                    displaySelector: s => $"Staff ID {s.StaffID} ({s.StaffDetails.StaffName})",
-                    entityLabel: "Staff Profile",
-                    duplicateWarnings: out var duplicateNotices,
-                    existingRecords: existingStaffs
-                );
-
-                if (cleanStaffs == null)
+                using (LoadingOverlay.BeginScope("Staff Manager — Importing SQL Payroll", "Merging staff profiles and licenses..."))
                 {
-                    SheetOperations.ShowStatusConfirmation("Staff import cancelled by user.");
-                    return;
-                }
+                    var (existingStaffs, _, _) = SheetMapper.ExtractStaffRecordsWithDiagnostics();
 
-                if (cleanStaffs.Count > 0)
-                {
-                    var existingLookup = (existingStaffs ?? new List<StaffRecord>())
-                        .Where(w => w.StaffID > 0)
-                        .GroupBy(w => w.StaffID)
-                        .ToDictionary(g => g.Key, g => g.First());
+                    var cleanStaffs = TableRowManager.FilterDuplicates(
+                        incomingRecords: importResult.ImportedStaffs,
+                        keySelector: s => $"{s.StaffID}",
+                        displaySelector: s => $"Staff ID {s.StaffID} ({s.StaffDetails.StaffName})",
+                        entityLabel: "Staff Profile",
+                        duplicateWarnings: out var duplicateNotices,
+                        existingRecords: existingStaffs
+                    );
 
-                    foreach (var imported in cleanStaffs)
+                    if (cleanStaffs == null)
                     {
-                        if (existingLookup.TryGetValue(imported.StaffID, out var current))
-                        {
-                            imported.VehicleLicenses = current.VehicleLicenses;
-                            imported.SkillLicenses = current.SkillLicenses;
-                        }
+                        SheetOperations.ShowStatusConfirmation("Staff import cancelled by user.");
+                        return;
                     }
 
-                    SheetMapper.PopulateWorksheet(cleanStaffs);
+                    if (cleanStaffs.Count > 0)
+                    {
+                        var existingLookup = (existingStaffs ?? new List<StaffRecord>())
+                            .Where(w => w.StaffID > 0)
+                            .GroupBy(w => w.StaffID)
+                            .ToDictionary(g => g.Key, g => g.First());
+
+                        foreach (var imported in cleanStaffs)
+                        {
+                            if (existingLookup.TryGetValue(imported.StaffID, out var current))
+                            {
+                                imported.VehicleLicenses = current.VehicleLicenses;
+                                imported.SkillLicenses = current.SkillLicenses;
+                            }
+                        }
+
+                        SheetMapper.PopulateWorksheet(cleanStaffs);
+                    }
                 }
 
                 using var summaryDialog = new ImportResultDialog(importResult.ToGenericReport(), fileNameOnly);

@@ -9,6 +9,7 @@ using ExcelDna.Integration;
 using ExcelDna.Integration.CustomUI;
 using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.Integration.Database;
+using SKSB_App.Core.RuntimeUI.Progress;
 using SKSB_App.Core.RuntimeUI.TableRowManager;
 using SKSB_App.Core.WorkbookOpen.Sheet;
 using SKSB_App.Core.WorkbookSave.Entry;
@@ -327,9 +328,14 @@ public abstract class ManagerRibbonBase : ExcelRibbon
     {
         try
         {
-            Contract.SyncLookups?.Invoke(false);
+            bool isEmpty;
+            Action? populate;
+            using (LoadingOverlay.BeginScope($"{Contract.ModuleName} — Loading from System", "Fetching records from system..."))
+            {
+                Contract.SyncLookups?.Invoke(false);
+                (isEmpty, populate) = Contract.FetchForPopulate();
+            }
 
-            var (isEmpty, populate) = Contract.FetchForPopulate();
             if (populate == null || (isEmpty && !PopulateWhenEmpty))
             {
                 if (ShowEmptyLoadDialog)
@@ -344,7 +350,10 @@ public abstract class ManagerRibbonBase : ExcelRibbon
             {
                 try
                 {
-                    populate();
+                    using (LoadingOverlay.BeginScope($"{Contract.ModuleName} — Loading from System", "Populating workbook tables..."))
+                    {
+                        populate();
+                    }
                     Contract.UpdateWindowCaption();
                     SheetOperations.ShowStatusConfirmation(ServerEnvironment.IsOffline
                         ? $"[OFFLINE MODE] {Contract.ModuleName} records loaded from local offline snapshot."
@@ -410,7 +419,11 @@ public abstract class ManagerRibbonBase : ExcelRibbon
                 dynamic? ws = xlApp.ActiveWorkbook?.ActiveSheet;
                 if (ws == null) return;
 
-                int tablesCleaned = TableRowManager.CleanActiveSheetTables(ws);
+                int tablesCleaned;
+                using (LoadingOverlay.BeginScope($"{Contract.ModuleName} — Trimming Empty Rows", "Scanning and trimming empty table rows..."))
+                {
+                    tablesCleaned = TableRowManager.CleanActiveSheetTables(ws);
+                }
                 SheetOperations.ShowStatusConfirmation(
                     $"Cleaned empty rows across {tablesCleaned} table(s). Exactly 1 empty row retained."
                 );
@@ -444,9 +457,12 @@ public abstract class ManagerRibbonBase : ExcelRibbon
 
                 try
                 {
-                    foreach (dynamic table in ws.ListObjects)
+                    using (LoadingOverlay.BeginScope($"{Contract.ModuleName} — Removing Duplicates", "Scanning tables for duplicate rows..."))
                     {
-                        totalDuplicatesRemoved += TableRowManager.CleanTableDuplicateRows(table, warnings);
+                        foreach (dynamic table in ws.ListObjects)
+                        {
+                            totalDuplicatesRemoved += TableRowManager.CleanTableDuplicateRows(table, warnings);
+                        }
                     }
                 }
                 finally

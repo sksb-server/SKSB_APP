@@ -2,6 +2,7 @@
 
 using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.RuntimeUI.DropDown;
+using SKSB_App.Core.RuntimeUI.Progress;
 using SKSB_App.Core.RuntimeUI.RuleEngine;
 using SKSB_App.Core.RuntimeUI.TableRowManager;
 using SKSB_App.Core.WorkbookSave.SheetMapper;
@@ -139,6 +140,7 @@ public static class RulesExtractor
                 int startCol = (int)table.HeaderRowRange.Column;
                 int colSpan = (int)table.ListColumns.Count;
 
+                LoadingOverlay.Report($"Validating table: {tableName} ({rowCount} row(s))...", $"Worksheet: {sName}");
                 var (tblErrors, tblWarnings) = EvaluateAndExtractInternal(
                     worksheet: (object)ws,
                     tableObj: (object)table,
