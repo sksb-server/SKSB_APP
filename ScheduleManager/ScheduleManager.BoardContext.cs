@@ -92,9 +92,10 @@ internal static class BoardContext
                 var reqs = TableMapper.ExtractFromTable<ProjectTypeRequirement>((object)lookups, "ProjectTypeRequirementsTable");
                 _requirements = reqs.Where(r => r.ProjectType != ProjectType.None).GroupBy(r => r.ProjectType).ToDictionary(g => g.Key, g => g.First());
 
+                // Code-owned DefaultIcons take precedence; Lookups!SkillIconsTable only supplies extra unmapped keys.
                 var icons = new Dictionary<string, string>(DefaultIcons, StringComparer.OrdinalIgnoreCase);
                 foreach (var i in TableMapper.ExtractFromTable<SkillIcon>((object)lookups, "SkillIconsTable"))
-                    if (!string.IsNullOrWhiteSpace(i.Key) && !string.IsNullOrWhiteSpace(i.Icon)) icons[i.Key.Trim()] = i.Icon.Trim();
+                    if (!string.IsNullOrWhiteSpace(i.Key) && !string.IsNullOrWhiteSpace(i.Icon)) icons.TryAdd(i.Key.Trim(), i.Icon.Trim());
                 _icons = icons;
             }
 

@@ -135,6 +135,13 @@ public abstract class ManagerRibbonBase : ExcelRibbon
     {
         return @"
                 <group id='grpRowDirection' label='Row Management'>
+                  <button id='btnInsertTableRow'
+                          label='Insert Row'
+                          size='large'
+                          imageMso='TableInsertRowsBelow'
+                          screentip='Insert Row (Ctrl+Shift+I)'
+                          supertip='Inserts a new formatted row at the top or bottom of the active table (following the Insert at Top toggle) and selects it.'
+                          onAction='OnInsertTableRowClicked' />
                   <toggleButton id='btnToggleInsertTop'
                                 label='Insert at Top'
                                 size='large'
@@ -500,6 +507,11 @@ public abstract class ManagerRibbonBase : ExcelRibbon
                 MessageBox.Show($"Failed to remove duplicate rows:\n{ex.Message}", "Cleanup Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         });
+    }
+
+    public void OnInsertTableRowClicked(IRibbonControl control)
+    {
+        ExcelAsyncUtil.QueueAsMacro(TableRowManager.InsertRowCommand);
     }
 
     public void OnDeleteTableRowClicked(IRibbonControl control)

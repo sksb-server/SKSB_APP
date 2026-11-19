@@ -118,6 +118,99 @@ public static partial class TableRowManager
     }
 
     /// <summary>
+    /// Inserts a new formatted row at the top or bottom of the active table
+    /// (per Insert at Top toggle) and selects it. Accessible via Ctrl+Shift+I.
+    /// </summary>
+    [ExcelCommand(Name = "InsertTableRow", ShortCut = "^+I")]
+    public static void InsertRowCommand()
+    {
+        try
+        {
+            if (_isManagingRows) return;
+
+            dynamic xlApp = ExcelDnaUtil.Application;
+            dynamic selection = xlApp.Selection;
+
+            dynamic? table = null;
+            try { table = selection?.ListObject; } catch { }
+            if (table == null)
+            {
+                try { table = selection?.Cells[1, 1].ListObject; } catch { }
+            }
+            if (table == null)
+            {
+                try
+                {
+                    dynamic? ws = xlApp.ActiveWorkbook?.ActiveSheet;
+                    if (ws != null && (int)ws.ListObjects.Count == 1) table = ws.ListObjects[1];
+                }
+                catch { }
+            }
+
+            if (table == null)
+            {
+                MessageBox.Show("Please select a cell inside a table to insert a row.",
+                    "No Table Selected", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                return;
+            }
+
+            _isManagingRows = true;
+
+            int oldCalc = -4105;
+            bool oldEvents = true;
+            bool oldScreen = true;
+            try { oldCalc = (int)xlApp.Calculation; } catch { }
+            try { oldEvents = (bool)xlApp.EnableEvents; } catch { }
+            try { oldScreen = (bool)xlApp.ScreenUpdating; } catch { }
+
+            bool atTop = IsInsertAtTopEnabled;
+            string tableName = "Table";
+            dynamic? newRowFirstCell = null;
+
+            try
+            {
+                try { xlApp.Calculation = -4135; } catch { }
+                try { xlApp.EnableEvents = false; } catch { }
+                try { xlApp.ScreenUpdating = false; } catch { }
+
+                tableName = table.Name?.ToString() ?? "Table";
+                dynamic worksheet = table.Parent;
+                int startCol = (int)table.HeaderRowRange.Column;
+                int colCount = (int)table.ListColumns.Count;
+                int headerRow = (int)table.HeaderRowRange.Row;
+
+                SpawnRowSafely(worksheet, table, startCol, colCount, headerRow, atTop);
+
+                int rowCount = (int)table.ListRows.Count;
+                if (rowCount > 0)
+                {
+                    newRowFirstCell = (atTop ? table.ListRows[1].Range : table.ListRows[rowCount].Range).Cells[1, 1];
+                }
+            }
+            finally
+            {
+                try { xlApp.Calculation = oldCalc; } catch { }
+                try { xlApp.EnableEvents = oldEvents; } catch { }
+                try { xlApp.ScreenUpdating = oldScreen; } catch { }
+                _isManagingRows = false;
+            }
+
+            if (newRowFirstCell != null)
+            {
+                try { newRowFirstCell.Select(); } catch { }
+            }
+
+            SheetOperations.ShowStatusConfirmation(atTop
+                ? $"Inserted new row at top of '{tableName}'."
+                : $"Inserted new row at bottom of '{tableName}'.");
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("InsertRowCommand failed", ex);
+        }
+    }
+
+    /// <summary>
     /// Explicit row deletion command. Only executes on Absolute tables; blocks on Additive tables.
     /// Accessible via Manager Ribbon and Ctrl+Shift+D.
     /// </summary>
@@ -484,10 +577,14 @@ public static partial class TableRowManager
         List<string>? auditLog = null)
     {
         string tableName = table.Name?.ToString() ?? string.Empty;
-        dynamic newRow = atTop ? table.ListRows.Add(1) : table.ListRows.Add();
+        int existingRows = 0;
+        try { existingRows = (int)table.ListRows.Count; } catch { }
+        bool insertAtTop = atTop && existingRows > 0;
+
+        dynamic newRow = insertAtTop ? table.ListRows.Add(1) : table.ListRows.Add();
         dynamic newRowRange = newRow.Range;
 
-        int sourceArchetypeRow = atTop ? headerRow + 2 : headerRow + 1;
+        int sourceArchetypeRow = insertAtTop ? headerRow + 2 : headerRow + 1;
 
         // Inside TableRowManager.SpawnRowSafely:
 
