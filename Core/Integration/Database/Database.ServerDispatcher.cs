@@ -714,14 +714,28 @@ ALTER TABLE vehicle_maintenance ADD COLUMN IF NOT EXISTS workshop_address TEXT D
 
     private static void PersistSkillLicenseTypes(IEnumerable<SkillLicenseType> types)
     {
-        var names = types.Where(t => !string.IsNullOrWhiteSpace(t.SkillLicenseName)).Select(t => t.SkillLicenseName.Trim()).Distinct().ToList();
+        var items = types
+            .Where(t => !string.IsNullOrWhiteSpace(t.SkillLicenseName))
+            .GroupBy(t => t.SkillLicenseName.Trim(), StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.First())
+            .Select(t => new
+            {
+                SkillLicenseName = t.SkillLicenseName.Trim(),
+                DisplayIcon = (t.DisplayIcon ?? string.Empty).Trim()
+            }).ToList();
+        string[] names = items.Select(i => i.SkillLicenseName).ToArray();
+
         Db.ExecuteInTransaction((conn, trans) =>
         {
-            conn.Execute("DELETE FROM lookup_skill_license_types WHERE skill_license_type != ALL(@Names);", new { Names = names.ToArray() }, trans);
+            conn.Execute("ALTER TABLE lookup_skill_license_types ADD COLUMN IF NOT EXISTS display_icon VARCHAR(32) NOT NULL DEFAULT '';", transaction: trans);
+            if (items.Count == 0) return;
+
+            conn.Execute("DELETE FROM lookup_skill_license_types WHERE skill_license_type != ALL(@Names);", new { Names = names }, trans);
             conn.Execute(@"
-                INSERT INTO lookup_skill_license_types (skill_license_type, description)
-                VALUES (@SkillLicenseType, '')
-                ON CONFLICT (skill_license_type) DO NOTHING;", names.Select(n => new { SkillLicenseType = n }), trans);
+                INSERT INTO lookup_skill_license_types (skill_license_type, description, display_icon)
+                VALUES (@SkillLicenseName, '', @DisplayIcon)
+                ON CONFLICT (skill_license_type) DO UPDATE SET
+                    display_icon = EXCLUDED.display_icon;", items, trans);
         });
     }
 

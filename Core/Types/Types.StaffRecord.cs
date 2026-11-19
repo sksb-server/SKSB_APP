@@ -277,7 +277,60 @@ public record SkillLicenseType
 
     [DataList("SkillLicenseTypeList")]
     [ExcelColumn("Skill License Type", isRequired: true)]
+    [ColumnRule(IsRequired = true)]
     public string SkillLicenseName { get; set; } = string.Empty;
 
     public string Description { get; set; } = string.Empty;
+
+    [ExcelColumn("Display Icon")]
+    [ColumnRule("DisplayIconList", IsRequired = false, IsWarningOnly = true)]
+    public string DisplayIcon { get; set; } = string.Empty;
+}
+
+// =========================================================================
+// 5. SKILL CATALOG (shared display icons + vehicle-license role skills)
+// =========================================================================
+
+/// <summary>
+/// Shared skill/icon catalog: the emoji palette behind the <c>DisplayIconList</c> dropdown and the
+/// built-in mapping from <see cref="VehicleLicenseClass"/> to a schedulable role skill.
+/// </summary>
+public static class SkillCatalog
+{
+    public const string GeneralWorker = "General Worker";
+    public const string GeneralWorkerIcon = "🧰";
+
+    public static readonly string[] DisplayIcons =
+    {
+        "🚗", "🚜", "🔧", "👷", "🧰", "🚚", "🚛", "🏗", "🏍", "🚐", "🚙", "⛏", "🛠",
+        "⚡", "🔥", "🦺", "🚧", "🔨", "⚙", "🚰", "💧", "🚒", "🔗", "🛣", "📋"
+    };
+
+    public const string Driver = "Driver";
+    public const string ExcavatorOperator = "Excavator Operator";
+    public const string ForkliftOperator = "Forklift Operator";
+    public const string MotorcycleRider = "Motorcycle Rider";
+
+    public static string? RoleSkillFor(VehicleLicenseClass licenseClass) => licenseClass switch
+    {
+        VehicleLicenseClass.D or VehicleLicenseClass.DA or VehicleLicenseClass.E or VehicleLicenseClass.E1
+            or VehicleLicenseClass.E2 or VehicleLicenseClass.GDL_D or VehicleLicenseClass.GDL_E
+            or VehicleLicenseClass.GDL_E_Full or VehicleLicenseClass.GDL or VehicleLicenseClass.PSV => Driver,
+        VehicleLicenseClass.H or VehicleLicenseClass.I => ExcavatorOperator,
+        VehicleLicenseClass.Forklift => ForkliftOperator,
+        VehicleLicenseClass.B or VehicleLicenseClass.B2 => MotorcycleRider,
+        _ => null
+    };
+
+    public static IReadOnlyDictionary<string, string> VehicleLicenseRoleIcons { get; } =
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            [Driver] = "🚗",
+            [ExcavatorOperator] = "🚜",
+            [ForkliftOperator] = "🏗",
+            [MotorcycleRider] = "🏍"
+        };
+
+    public static IReadOnlyList<string> VehicleLicenseRoleSkills { get; } =
+        new[] { Driver, ExcavatorOperator, ForkliftOperator, MotorcycleRider };
 }

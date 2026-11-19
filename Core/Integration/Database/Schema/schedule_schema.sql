@@ -76,6 +76,12 @@ CREATE TABLE IF NOT EXISTS worker_preferences (
     updated_at              TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 
+CREATE TABLE IF NOT EXISTS lookup_schedule_skills (
+    skill_name   VARCHAR(100) PRIMARY KEY,
+    display_icon VARCHAR(32)  NOT NULL DEFAULT '',
+    updated_at   TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
 CREATE TABLE IF NOT EXISTS teams_master (
     team_name            VARCHAR(100) PRIMARY KEY,
     team_leader_staff_id BIGINT,

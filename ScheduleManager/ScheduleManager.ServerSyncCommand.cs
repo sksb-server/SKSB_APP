@@ -45,12 +45,17 @@ internal static class ServerSyncCommands
         if (record.DailyScheduleDate != date)
         {
             AppLogger.Warn($"[{Module}] Offline snapshot is for {record.DailyScheduleDate:yyyy-MM-dd}; showing {date:yyyy-MM-dd} without date-scoped rows.");
-            record = new ScheduleRecord { DailyScheduleDate = date, Preferences = record.Preferences, Teams = record.Teams };
+            record = new ScheduleRecord { DailyScheduleDate = date, Preferences = record.Preferences, Teams = record.Teams, Skills = record.Skills };
         }
 
         // Offline Mode only: Online Mode already got LicensedSkills from staff_vehicle_licenses / staff_skill_licenses
         // in BuildFromServer. Licence validity is date-effective: re-derived for every date the board is moved to.
-        if (ServerEnvironment.IsOffline) DeriveLicensedSkills(record.Preferences, date);
+        if (ServerEnvironment.IsOffline)
+        {
+            DeriveLicensedSkills(record.Preferences, date);
+            BoardContext.SetSkillLicenseTypes(LoadOfflineSkillLicenseTypes());
+        }
+        BoardContext.SetSkills(record.Skills);
         Hydrate(record);
         return record;
     }
@@ -169,6 +174,18 @@ internal static class ServerSyncCommands
             });
         }
 
+        // Preference[SkillsTable] (source 3 of the unified skill list).
+        foreach (var r in db.Query<dynamic>("SELECT skill_name, display_icon FROM lookup_schedule_skills ORDER BY skill_name;"))
+        {
+            record.Skills.Add(new ScheduleSkillRecord
+            {
+                SkillName = Text(r.skill_name),
+                DisplayIcon = Text(r.display_icon)
+            });
+        }
+        BoardContext.SetSkillLicenseTypes(QuerySkillLicenseTypes(db));
+        BoardContext.SetSkills(record.Skills);
+
         // Licensed skills are derived from StaffManager data, never stored with the preference.
         var vehicleLicenses = db.Query<dynamic>("SELECT staff_id, vehicle_license_class, renew_date, expiry_date, status FROM staff_vehicle_licenses;")
             .Select(r => new VehicleLicense
@@ -193,6 +210,36 @@ internal static class ServerSyncCommands
         return record;
     }
 
+    /// <summary>StaffManager's skill licence types (source 1), tolerating a database without the display_icon column.</summary>
+    private static List<SkillLicenseType> QuerySkillLicenseTypes(PostgreSqlService db)
+    {
+        try
+        {
+            bool hasIcon = db.Query<string>(
+                "SELECT column_name FROM information_schema.columns WHERE table_name = 'lookup_skill_license_types' AND column_name = 'display_icon';").Any();
+            string iconExpr = hasIcon ? "COALESCE(display_icon, '')" : "''";
+            return db.Query<dynamic>($"SELECT skill_license_type, {iconExpr} AS display_icon FROM lookup_skill_license_types ORDER BY skill_license_type;")
+                .Select(r => new SkillLicenseType
+                {
+                    SkillLicenseName = Text(r.skill_license_type),
+                    DisplayIcon = Text(r.display_icon)
+                })
+                .Where(t => t.SkillLicenseName.Length > 0)
+                .ToList();
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn($"[{Module}] Skill licence types unavailable: {ex.Message}");
+            return new List<SkillLicenseType>();
+        }
+    }
+
+    private static List<SkillLicenseType> LoadOfflineSkillLicenseTypes()
+    {
+        try { return OfflineSnapshot.Load<List<SkillLicenseType>>() ?? new List<SkillLicenseType>(); }
+        catch { return new List<SkillLicenseType>(); }
+    }
+
     // =========================================================================
     // 3. LICENSED SKILL DERIVATION (StaffManager licences -> WorkerPreference.LicensedSkills)
     // =========================================================================
@@ -213,8 +260,8 @@ internal static class ServerSyncCommands
     /// <summary>
     /// A licence counts for <c>scheduleDate</c> when it is not Suspended and RenewDate &lt;= scheduleDate &lt;= ExpiryDate
     /// (so a licence that has since expired still counts for past dates, and a future renewal does not apply early).
-    /// Any qualifying vehicle licence class grants
-    /// "Driver" plus "License &lt;class&gt;"; a valid skill licence grants its type name.
+    /// Any qualifying vehicle licence class grants its role skill (<see cref="SkillCatalog.RoleSkillFor"/>, falling back
+    /// to "Driver") plus "License &lt;class&gt;"; a valid skill licence grants its type name.
     /// </summary>
     internal static void ApplyLicensedSkills(
         IEnumerable<WorkerPreference> prefs,
@@ -232,7 +279,7 @@ internal static class ServerSyncCommands
 
         foreach (var l in vehicleLicenses.Where(l => l.VehicleLicenseStatus != VehicleLicenseStatus.Suspended && l.RenewDate <= scheduleDate && scheduleDate <= l.ExpiryDate && l.VehicleLicenseClass != VehicleLicenseClass.None))
         {
-            Add(l.StaffID, "Driver");
+            Add(l.StaffID, SkillCatalog.RoleSkillFor(l.VehicleLicenseClass) ?? SkillCatalog.Driver);
             Add(l.StaffID, $"License {l.VehicleLicenseClass.ToString().Replace('_', ' ')}");
         }
         foreach (var l in skillLicenses.Where(l => l.SkillLicenseStatus != SkillLicenseStatus.Suspended && l.RenewDate <= scheduleDate && scheduleDate <= l.ExpiryDate && !string.IsNullOrWhiteSpace(l.SkillLicenseType)))
@@ -272,6 +319,31 @@ internal static class ServerSyncCommands
 
         var projects = Roster.Projects.Select(p => p.Id).Where(p => p.Length > 0).Distinct().ToList();
         if (projects.Count > 0) DataList.SyncValues("ProjectIDList", projects);
+
+        // Emoji palette behind SkillsTable[Display Icon].
+        DataList.SyncValues("DisplayIconList", SkillCatalog.DisplayIcons);
+
+        // Unified skill list: SkillsTable + SkillLicenseTypesTable + VehicleLicenseClass role skills.
+        if (BoardContext.SkillLicenseTypes.Count == 0)
+        {
+            if (ServerEnvironment.IsOnline)
+            {
+                try { BoardContext.SetSkillLicenseTypes(QuerySkillLicenseTypes(new PostgreSqlService())); }
+                catch (Exception ex) { AppLogger.Warn($"[{Module}] Skill licence types fetch skipped: {ex.Message}"); }
+            }
+            else
+            {
+                BoardContext.SetSkillLicenseTypes(LoadOfflineSkillLicenseTypes());
+            }
+        }
+        SyncSkillList();
+    }
+
+    /// <summary>Pushes <see cref="BoardContext.AllConfiguredSkills"/> into the 'Data' sheet's StaffSkillList.</summary>
+    internal static void SyncSkillList()
+    {
+        var allSkills = BoardContext.AllConfiguredSkills();
+        if (allSkills.Count > 0) DataList.SyncValues("StaffSkillList", allSkills);
     }
 
     // =========================================================================

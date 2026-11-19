@@ -21,7 +21,7 @@ internal static class BoardContext
     // =========================================================================
     private static readonly Dictionary<string, string> DefaultIcons = new(StringComparer.OrdinalIgnoreCase)
     {
-        ["Driver"] = "🚗", ["Excavator Operator"] = "🚜", ["Pipe Fitter"] = "🔧", ["Foreman"] = "👷", ["General Worker"] = "🧰",
+        ["Driver"] = "🚗", ["Excavator Operator"] = "🚜", [SkillCatalog.GeneralWorker] = SkillCatalog.GeneralWorkerIcon,
         ["Car"] = "🚗", ["Hilux"] = "🚙", ["Van"] = "🚐", ["Lorry"] = "🚚", ["Tipper_Lorry"] = "🚛", ["Roro_Lorry"] = "🚛",
         ["Crane_Lorry"] = "🏗", ["Skylift"] = "🏗", ["Backhoe"] = "🚜", ["Excavator"] = "🚜", ["Roller"] = "🚧",
         ["Compressor"] = "🔨", ["Generator"] = "⚡", ["Motorcycle"] = "🏍", ["Machinery"] = "⚙",
@@ -31,15 +31,15 @@ internal static class BoardContext
 
     private static readonly Dictionary<ProjectType, (string[] Skills, VehicleType[] Vehicles)> DefaultRequirements = new()
     {
-        [ProjectType.Pipe_Repair] = (new[] { "Pipe Fitter", "General Worker" }, new[] { VehicleType.Hilux, VehicleType.Backhoe }),
-        [ProjectType.Pipe_Laying] = (new[] { "Pipe Fitter", "Excavator Operator", "General Worker" }, new[] { VehicleType.Excavator, VehicleType.Tipper_Lorry }),
-        [ProjectType.Comm_Pipe_Meter] = (new[] { "Pipe Fitter" }, new[] { VehicleType.Hilux }),
-        [ProjectType.Valve_Hydrant] = (new[] { "Pipe Fitter" }, new[] { VehicleType.Hilux }),
-        [ProjectType.Tapping_Connection] = (new[] { "Pipe Fitter" }, new[] { VehicleType.Hilux }),
-        [ProjectType.Road_Reinstatement] = (new[] { "General Worker", "Driver" }, new[] { VehicleType.Roller, VehicleType.Tipper_Lorry }),
-        [ProjectType.Civil_Earthworks] = (new[] { "Excavator Operator", "Driver" }, new[] { VehicleType.Excavator, VehicleType.Tipper_Lorry }),
-        [ProjectType.Machinery_Rental] = (new[] { "Driver" }, new[] { VehicleType.Machinery }),
-        [ProjectType.General_Maintenance] = (new[] { "General Worker" }, new[] { VehicleType.Hilux })
+        [ProjectType.Pipe_Repair] = (Array.Empty<string>(), new[] { VehicleType.Hilux, VehicleType.Backhoe }),
+        [ProjectType.Pipe_Laying] = (Array.Empty<string>(), new[] { VehicleType.Excavator, VehicleType.Tipper_Lorry }),
+        [ProjectType.Comm_Pipe_Meter] = (Array.Empty<string>(), new[] { VehicleType.Hilux }),
+        [ProjectType.Valve_Hydrant] = (Array.Empty<string>(), new[] { VehicleType.Hilux }),
+        [ProjectType.Tapping_Connection] = (Array.Empty<string>(), new[] { VehicleType.Hilux }),
+        [ProjectType.Road_Reinstatement] = (Array.Empty<string>(), new[] { VehicleType.Roller, VehicleType.Tipper_Lorry }),
+        [ProjectType.Civil_Earthworks] = (Array.Empty<string>(), new[] { VehicleType.Excavator, VehicleType.Tipper_Lorry }),
+        [ProjectType.Machinery_Rental] = (Array.Empty<string>(), new[] { VehicleType.Machinery }),
+        [ProjectType.General_Maintenance] = (Array.Empty<string>(), new[] { VehicleType.Hilux })
     };
 
     // =========================================================================
@@ -48,7 +48,11 @@ internal static class BoardContext
     private static List<WorkerPreference> _prefs = new();
     private static List<TeamRecord> _teams = new();
     private static Dictionary<ProjectType, ProjectTypeRequirement> _requirements = new();
-    private static Dictionary<string, string> _icons = new(DefaultIcons, StringComparer.OrdinalIgnoreCase);
+    private static Dictionary<string, string> _icons = BuildBaseIcons();
+    private static List<ScheduleSkillRecord> _skills = new();
+    private static List<SkillLicenseType> _skillLicenseTypes = new();
+    /// <summary>Last-read Lookups[SkillIconsTable] overlay, reused when icons are rebuilt without the sheet.</summary>
+    private static Dictionary<string, string> _legendIcons = new(StringComparer.OrdinalIgnoreCase);
     public static readonly TimeOnly DefaultLateCutOff = new(11, 0);
     public static readonly TimeOnly DefaultOtStartTime = new(18, 0);
 
@@ -61,6 +65,8 @@ internal static class BoardContext
 
     public static IReadOnlyList<WorkerPreference> Preferences => _prefs;
     public static IReadOnlyList<TeamRecord> Teams => _teams;
+    public static IReadOnlyList<ScheduleSkillRecord> Skills => _skills;
+    public static IReadOnlyList<SkillLicenseType> SkillLicenseTypes => _skillLicenseTypes;
     public static TimeOnly LateCutOff => _lateCutOff;
     public static TimeOnly OTStartTime => _otStartTime;
 
@@ -70,6 +76,42 @@ internal static class BoardContext
     {
         _prefs = prefs.ToList();
         _teams = teams.ToList();
+    }
+
+    /// <summary>Preference[SkillsTable] rows (source 3). Rebuilds the icon map.</summary>
+    public static void SetSkills(IEnumerable<ScheduleSkillRecord>? skills)
+    {
+        _skills = (skills ?? Enumerable.Empty<ScheduleSkillRecord>()).ToList();
+        RebuildIcons();
+    }
+
+    /// <summary>StaffManager's lookup_skill_license_types rows (source 1). Rebuilds the icon map.</summary>
+    public static void SetSkillLicenseTypes(IEnumerable<SkillLicenseType>? types)
+    {
+        _skillLicenseTypes = (types ?? Enumerable.Empty<SkillLicenseType>()).ToList();
+        RebuildIcons();
+    }
+
+    /// <summary>
+    /// Distinct (case-insensitive, first spelling wins) union of every configured skill:
+    /// SkillsTable -> SkillLicenseTypesTable -> VehicleLicenseClass role skills.
+    /// </summary>
+    public static List<string> AllConfiguredSkills()
+    {
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var result = new List<string>();
+        void Add(string? name)
+        {
+            if (string.IsNullOrWhiteSpace(name)) return;
+            string n = name.Trim();
+            if (seen.Add(n)) result.Add(n);
+        }
+
+        foreach (var s in _skills) Add(s.SkillName);
+        foreach (var t in _skillLicenseTypes) Add(t.SkillLicenseName);
+        foreach (var r in SkillCatalog.VehicleLicenseRoleSkills) Add(r);
+        Add(SkillCatalog.GeneralWorker);
+        return result;
     }
 
     // =========================================================================
@@ -84,6 +126,7 @@ internal static class BoardContext
             {
                 _prefs = TableMapper.ExtractFromTable<WorkerPreference>((object)prefSheet, "WorkerPreferencesTable");
                 _teams = TableMapper.ExtractFromTable<TeamRecord>((object)prefSheet, "TeamTable");
+                _skills = TableMapper.ExtractFromTable<ScheduleSkillRecord>((object)prefSheet, "SkillsTable");
             }
 
             dynamic? lookups = SheetMapperHelper.ResolveSheetSafely(wbObj, new[] { "Lookups" }, "Lookups");
@@ -91,12 +134,8 @@ internal static class BoardContext
             {
                 var reqs = TableMapper.ExtractFromTable<ProjectTypeRequirement>((object)lookups, "ProjectTypeRequirementsTable");
                 _requirements = reqs.Where(r => r.ProjectType != ProjectType.None).GroupBy(r => r.ProjectType).ToDictionary(g => g.Key, g => g.First());
-
-                var icons = new Dictionary<string, string>(DefaultIcons, StringComparer.OrdinalIgnoreCase);
-                foreach (var i in TableMapper.ExtractFromTable<SkillIcon>((object)lookups, "SkillIconsTable"))
-                    if (!string.IsNullOrWhiteSpace(i.Key) && !string.IsNullOrWhiteSpace(i.Icon)) icons[i.Key.Trim()] = i.Icon.Trim();
-                _icons = icons;
             }
+            RebuildIcons((object?)lookups);
 
             dynamic? attSheet = SheetMapperHelper.ResolveSheetSafely(wbObj, SheetMapper.MasterSheetAliases, "Daily Attendances");
             if (attSheet != null)
@@ -128,6 +167,46 @@ internal static class BoardContext
     // =========================================================================
     // 4. REQUIREMENTS & ICONS
     // =========================================================================
+    private static Dictionary<string, string> BuildBaseIcons()
+    {
+        var icons = new Dictionary<string, string>(DefaultIcons, StringComparer.OrdinalIgnoreCase);
+        foreach (var kv in SkillCatalog.VehicleLicenseRoleIcons) icons[kv.Key] = kv.Value;
+        return icons;
+    }
+
+    /// <summary>
+    /// Rebuilds the icon map in precedence order: built-in defaults + vehicle-licence role icons ->
+    /// SkillLicenseTypesTable -> SkillsTable -> Lookups[SkillIconsTable]. Pass the Lookups sheet to re-read the
+    /// legend (macro thread only); without it the last-read legend overlay is reused.
+    /// </summary>
+    public static void RebuildIcons(object? lookupsSheet = null)
+    {
+        if (lookupsSheet != null)
+        {
+            try
+            {
+                var legend = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                foreach (var i in TableMapper.ExtractFromTable<SkillIcon>(lookupsSheet, "SkillIconsTable"))
+                    if (!string.IsNullOrWhiteSpace(i.Key) && !string.IsNullOrWhiteSpace(i.Icon)) legend[i.Key.Trim()] = i.Icon.Trim();
+                _legendIcons = legend;
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Warn($"[ScheduleManager.BoardContext] SkillIconsTable read warning: {ex.Message}");
+            }
+        }
+
+        var icons = BuildBaseIcons();
+        foreach (var t in _skillLicenseTypes)
+            if (!string.IsNullOrWhiteSpace(t.SkillLicenseName) && !string.IsNullOrWhiteSpace(t.DisplayIcon))
+                icons[t.SkillLicenseName.Trim()] = t.DisplayIcon.Trim();
+        foreach (var s in _skills)
+            if (!string.IsNullOrWhiteSpace(s.SkillName) && !string.IsNullOrWhiteSpace(s.DisplayIcon))
+                icons[s.SkillName.Trim()] = s.DisplayIcon.Trim();
+        foreach (var kv in _legendIcons) icons[kv.Key] = kv.Value;
+        _icons = icons;
+    }
+
     public static (IReadOnlyList<string> Skills, IReadOnlyList<VehicleType> Vehicles) RequirementsFor(IEnumerable<ProjectType> types)
     {
         var skills = new List<string>();

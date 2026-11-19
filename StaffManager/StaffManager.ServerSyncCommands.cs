@@ -94,11 +94,16 @@ public static class ServerSyncCommands
                 ? "skill_license_type_id"
                 : "type_id";
 
+            string iconExpr = existingCols.Any(c => c.Equals("display_icon", StringComparison.OrdinalIgnoreCase))
+                ? "COALESCE(display_icon, '')"
+                : "''";
+
             string querySql = $@"
                 SELECT
                     {idCol}   AS SkillLicenseTypeID,
                     {nameCol} AS SkillLicenseName,
-                    COALESCE(description, '') AS Description
+                    COALESCE(description, '') AS Description,
+                    {iconExpr} AS DisplayIcon
                 FROM lookup_skill_license_types
                 ORDER BY {nameCol};";
 

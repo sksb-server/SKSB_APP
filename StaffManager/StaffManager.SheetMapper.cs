@@ -145,6 +145,8 @@ public static class SheetMapper
 
     private static void WriteSkillLicenseTypes(object wbObj, List<SkillLicenseType>? types)
     {
+        // Always populate the emoji palette so the 'Display Icon' dropdown works even on an empty table.
+        DataList.SyncValues("DisplayIconList", SkillCatalog.DisplayIcons);
         if (types == null || types.Count == 0) return;
 
         dynamic? ws = SheetMapperHelper.ResolveSheetSafely(wbObj, SkillLicenseAliases, "Skill Licenses");
@@ -169,13 +171,18 @@ public static class SheetMapper
             var extracted = TableMapper.ExtractFromTable<SkillLicenseType>((object)sWs, "SkillLicenseTypesTable");
             var distinct = extracted
                 .Where(t => !string.IsNullOrWhiteSpace(t.SkillLicenseName))
-                .Select(t => t.SkillLicenseName.Trim())
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .OrderBy(n => n)
-                .Select((name, idx) => new SkillLicenseType
+                .GroupBy(t => t.SkillLicenseName.Trim(), StringComparer.OrdinalIgnoreCase)
+                .Select(g => new
+                {
+                    Name = g.Key,
+                    Icon = g.Select(t => (t.DisplayIcon ?? string.Empty).Trim()).FirstOrDefault(i => i.Length > 0) ?? string.Empty
+                })
+                .OrderBy(x => x.Name)
+                .Select((x, idx) => new SkillLicenseType
                 {
                     SkillLicenseTypeID = idx + 1,
-                    SkillLicenseName = name
+                    SkillLicenseName = x.Name,
+                    DisplayIcon = x.Icon
                 })
                 .ToList();
 

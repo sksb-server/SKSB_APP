@@ -118,6 +118,17 @@ public static partial class ServerDispatcher
             }).ToList();
         string[] activeTeamNames = teams.Select(t => t.TeamName).ToArray();
 
+        var skills = (schedule.Skills ?? new List<ScheduleSkillRecord>())
+            .Where(s => !string.IsNullOrWhiteSpace(s.SkillName))
+            .GroupBy(s => s.SkillName.Trim(), StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.First())
+            .Select(s => new
+            {
+                SkillName = s.SkillName.Trim(),
+                DisplayIcon = (s.DisplayIcon ?? string.Empty).Trim()
+            }).ToList();
+        string[] activeSkillNames = skills.Select(s => s.SkillName).ToArray();
+
         const string sqlSlotUpsert = @"
         INSERT INTO daily_project_schedules (schedule_date, shift, slot_index, project_id, premix_holes, workers, vehicles, remarks)
         VALUES (@ScheduleDate, @Shift, @SlotIndex, @ProjectId, @PremixHoles, @Workers, @Vehicles, @Remarks)
@@ -179,6 +190,13 @@ public static partial class ServerDispatcher
             default_vehicles     = EXCLUDED.default_vehicles,
             updated_at           = CURRENT_TIMESTAMP;";
 
+        const string sqlSkillUpsert = @"
+        INSERT INTO lookup_schedule_skills (skill_name, display_icon)
+        VALUES (@SkillName, @DisplayIcon)
+        ON CONFLICT (skill_name) DO UPDATE SET
+            display_icon = EXCLUDED.display_icon,
+            updated_at   = CURRENT_TIMESTAMP;";
+
         const string sqlSettingsUpsert = @"
         INSERT INTO daily_schedule_settings (schedule_date, late_cut_off_time, ot_start_time)
         VALUES (@ScheduleDate, @LateCutOffTime, @OtStartTime)
@@ -211,6 +229,11 @@ public static partial class ServerDispatcher
                 conn.Execute("DELETE FROM worker_preferences WHERE staff_id != ALL(@ActiveIds);", new { ActiveIds = activePrefIds }, trans);
             if (activeTeamNames.Length > 0)
                 conn.Execute("DELETE FROM teams_master WHERE team_name != ALL(@ActiveNames);", new { ActiveNames = activeTeamNames }, trans);
+            if (activeSkillNames.Length > 0)
+            {
+                conn.Execute("DELETE FROM lookup_schedule_skills WHERE skill_name != ALL(@ActiveNames);", new { ActiveNames = activeSkillNames }, trans);
+                conn.Execute(sqlSkillUpsert, skills, trans);
+            }
 
             if (teams.Count > 0) conn.Execute(sqlTeamUpsert, teams, trans);
             if (prefs.Count > 0) conn.Execute(sqlPrefUpsert, prefs, trans);
@@ -222,7 +245,7 @@ public static partial class ServerDispatcher
         AppLogger.Info(
             $"[PostgreSQL Upload - Schedule {schedule.DailyScheduleDate:yyyy-MM-dd}] " +
             $"lateCutOff={schedule.LateCutOffTime:HH:mm}, otStart={schedule.OTStartTime:HH:mm}, " +
-            $"slots={slots.Count}, attendances={attendances.Count}, entries={entries.Count}, prefs={prefs.Count}, teams={teams.Count}");
+            $"slots={slots.Count}, attendances={attendances.Count}, entries={entries.Count}, prefs={prefs.Count}, teams={teams.Count}, skills={skills.Count}");
     }
 
     // =========================================================================

@@ -79,6 +79,7 @@ public record ScheduleRecord
 
     public List<WorkerPreference> Preferences { get; set; } = new();
     public List<TeamRecord> Teams { get; set; } = new();
+    public List<ScheduleSkillRecord> Skills { get; set; } = new();
 }
 
 // =========================================================================
@@ -269,7 +270,7 @@ public record WorkerPreference
 
     /// <summary>Single dedicated role, e.g. Driver, Excavator Operator, Pipe Fitter, Foreman, General Worker.</summary>
     [ExcelColumn("Primary Skill")]
-    [ColumnRule("SkillsTable[Skills]", IsRequired = false, IsWarningOnly = true)]
+    [ColumnRule("StaffSkillList", "SkillsTable[Skills]", IsRequired = false, IsWarningOnly = true)]
     public string PrimarySkill { get; set; } = string.Empty;
 
     /// <summary>Read-only: derived from StaffManager's valid vehicle / skill licenses on every load.</summary>
@@ -278,11 +279,11 @@ public record WorkerPreference
     public List<string> LicensedSkills { get; set; } = new();
 
     [ExcelColumn("Other Skills")]
-    [ColumnRule("SkillsTable[Skills]", IsRequired = false, IsWarningOnly = true, IsMultiSelect = true)]
+    [ColumnRule("StaffSkillList", "SkillsTable[Skills]", IsRequired = false, IsWarningOnly = true, IsMultiSelect = true)]
     public List<string> OtherSkills { get; set; } = new();
 
     [ExcelColumn("Blacklisted Skills")]
-    [ColumnRule("SkillsTable[Skills]", IsRequired = false, IsWarningOnly = true, IsMultiSelect = true)]
+    [ColumnRule("StaffSkillList", "SkillsTable[Skills]", IsRequired = false, IsWarningOnly = true, IsMultiSelect = true)]
     public List<string> BlacklistedSkills { get; set; } = new();
 
     [ExcelColumn("Preferred Vehicle Type")]
@@ -331,6 +332,23 @@ public record TeamRecord
 }
 
 // =========================================================================
+// 7b. SKILLS TABLE ("SkillsTable" on the Preference sheet)
+// =========================================================================
+
+[ExcelTable("SkillsTable")]
+public record ScheduleSkillRecord
+{
+    [DataList("StaffSkillList")]
+    [ExcelColumn("Skills", isRequired: true)]
+    [ColumnRule(IsRequired = true)]
+    public string SkillName { get; set; } = string.Empty;
+
+    [ExcelColumn("Display Icon")]
+    [ColumnRule("DisplayIconList", IsRequired = false, IsWarningOnly = true)]
+    public string DisplayIcon { get; set; } = string.Empty;
+}
+
+// =========================================================================
 // 8. PROJECT-TYPE REQUIREMENTS (editable mapping on 'Lookups')
 // =========================================================================
 
@@ -342,7 +360,7 @@ public record ProjectTypeRequirement
     public ProjectType ProjectType { get; set; } = ProjectType.None;
 
     [ExcelColumn("Required Skills")]
-    [ColumnRule("SkillsTable[Skills]", IsRequired = false, IsWarningOnly = true, IsMultiSelect = true)]
+    [ColumnRule("StaffSkillList", "SkillsTable[Skills]", IsRequired = false, IsWarningOnly = true, IsMultiSelect = true)]
     public List<string> RequiredSkills { get; set; } = new();
 
     [ExcelColumn("Required Vehicle Types")]
