@@ -126,7 +126,8 @@ internal static partial class SheetMapper
         DateOnly scheduleDate = record.DailyScheduleDate;
 
         // Duplicate workers within a shift band block the save.
-        errors.AddRange(ScheduleBoardMapper.FindDuplicateWorkers(record.Projects));
+        errors.AddRange(ScheduleBoardMapper.FindDuplicateWorkers(record.Projects, record.DailyScheduleDate, record.AttendanceEntries));
+        errors.AddRange(ScheduleBoardMapper.FindDuplicateProjects(record.Projects));
 
         foreach (var slot in record.Projects)
         {
