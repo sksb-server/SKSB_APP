@@ -40,9 +40,11 @@ internal static class BoardContext
     private static List<SkillLicenseType> _skillLicenseTypes = new();
     /// <summary>Last-read Lookups[SkillIconsTable] overlay, reused when icons are rebuilt without the sheet.</summary>
     private static Dictionary<string, string> _legendIcons = new(StringComparer.OrdinalIgnoreCase);
+    public static readonly TimeOnly DefaultDayStartTime = new(6, 0);
     public static readonly TimeOnly DefaultLateCutOff = new(11, 0);
     public static readonly TimeOnly DefaultOtStartTime = new(18, 0);
 
+    private static TimeOnly _dayStartTime = DefaultDayStartTime;
     private static TimeOnly _lateCutOff = DefaultLateCutOff;
     private static TimeOnly _otStartTime = DefaultOtStartTime;
 
@@ -54,6 +56,7 @@ internal static class BoardContext
     public static IReadOnlyList<TeamRecord> Teams => _teams;
     public static IReadOnlyList<ScheduleSkillRecord> Skills => _skills;
     public static IReadOnlyList<SkillLicenseType> SkillLicenseTypes => _skillLicenseTypes;
+    public static TimeOnly DayStartTime => _dayStartTime;
     public static TimeOnly LateCutOff => _lateCutOff;
     public static TimeOnly OTStartTime => _otStartTime;
 
@@ -243,6 +246,7 @@ internal static class BoardContext
             dynamic? attSheet = SheetMapperHelper.ResolveSheetSafely(wbObj, SheetMapper.MasterSheetAliases, "Daily Attendances");
             if (attSheet != null)
             {
+                _dayStartTime = ReadTimeCell(attSheet, SheetMapper.DayStartCell, DefaultDayStartTime);
                 _lateCutOff = ReadTimeCell(attSheet, SheetMapper.LateCutOffCell, DefaultLateCutOff);
                 _otStartTime = ReadTimeCell(attSheet, SheetMapper.OtStartCell, DefaultOtStartTime);
             }

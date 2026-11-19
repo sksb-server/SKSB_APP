@@ -52,14 +52,16 @@ CREATE TABLE IF NOT EXISTS daily_attendances (
     PRIMARY KEY (schedule_date, staff_id)
 );
 
--- Per-date attendance parameters (Daily Attendances C2 / D2). Missing row => defaults 11:00 / 18:00.
+-- Per-date attendance parameters (Daily Attendances C2 / D2 / E2). Missing row => defaults 06:00 / 11:00 / 18:00.
 CREATE TABLE IF NOT EXISTS daily_schedule_settings (
     schedule_date     DATE         PRIMARY KEY,
+    day_start_time    TIME         NOT NULL DEFAULT '06:00:00',
     late_cut_off_time TIME         NOT NULL DEFAULT '11:00:00',
     ot_start_time     TIME         NOT NULL DEFAULT '18:00:00',
     created_at        TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at        TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+ALTER TABLE daily_schedule_settings ADD COLUMN IF NOT EXISTS day_start_time TIME NOT NULL DEFAULT '06:00:00';
 
 CREATE TABLE IF NOT EXISTS worker_preferences (
     staff_id                BIGINT       PRIMARY KEY,

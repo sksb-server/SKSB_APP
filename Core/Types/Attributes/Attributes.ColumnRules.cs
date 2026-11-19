@@ -61,6 +61,12 @@ public sealed class ColumnRuleAttribute : Attribute
     public bool IsMultiSelect { get; set; } = false;
 
     /// <summary>
+    /// When true, users cannot modify this column in Excel (blocked via '=FALSE' validation and auto-undone on SheetChange),
+    /// while C# COM writes continue to work normally.
+    /// </summary>
+    public bool IsReadOnly { get; set; } = false;
+
+    /// <summary>
     /// Multi-select only: header of an integer column that receives the count of distinct selected tokens
     /// whenever this column is edited (e.g. Workers -> Worker Presence).
     /// </summary>

@@ -550,7 +550,7 @@ public static partial class TableRowManager
 
                 string headerText = worksheet.Cells[headerRow, absCol].Value2?.ToString()?.Trim() ?? string.Empty;
                 var rule = RuleRegistry.GetRule(table.Name?.ToString() ?? string.Empty, headerText);
-                if (rule?.IsStrictlyCalculated == true) continue;
+                if (rule?.IsLocked == true) continue;
                 if (RuleRegistry.IsZeroOrEmptyValue(cell.Value2, rule)) continue;
 
                 if (rule?.DefaultRule?.Kind == DefaultKind.Literal &&
@@ -755,7 +755,7 @@ public static partial class TableRowManager
             {
                 headers[c] = headerGrid[1, c]?.ToString()?.Trim() ?? string.Empty;
                 var colRule = RuleRegistry.GetRule(tableName, headers[c]);
-                ignoreCol[c] = colRule?.IsStrictlyCalculated == true;
+                ignoreCol[c] = colRule?.IsLocked == true;
                 isTimeCol[c] = colRule?.EffectiveFormatKind == ColumnFormatKind.Time
                     || headers[c].Equals("Time", StringComparison.OrdinalIgnoreCase)
                     || headers[c].Equals("Clock-In Time", StringComparison.OrdinalIgnoreCase)

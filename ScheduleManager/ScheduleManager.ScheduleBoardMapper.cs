@@ -239,15 +239,20 @@ internal static class ScheduleBoardMapper
 
     /// <summary>
     /// Two check-in spans conflict when they start together, are both still open, or their time ranges overlap.
-    /// Back-to-back spans (08:00-12:00, 12:00-17:00) do not conflict.
+    /// Back-to-back spans (08:00-12:00, 12:00-17:00) do not conflict. Times are compared as offsets from the working-day
+    /// start so night spans crossing midnight (22:00-02:00) compare correctly.
     /// </summary>
-    private static bool SpansConflict(WorkerProjectSpan a, WorkerProjectSpan b)
+    private static bool SpansConflict(WorkerProjectSpan a, WorkerProjectSpan b, TimeOnly dayStartTime)
     {
-        if (a.In == b.In) return true;
+        TimeSpan aIn = AttendanceRollupService.ShiftOffset(a.In, dayStartTime);
+        TimeSpan bIn = AttendanceRollupService.ShiftOffset(b.In, dayStartTime);
+        if (aIn == bIn) return true;
         if (a.Out == null && b.Out == null) return true;
-        if (a.Out == null) return a.In < b.Out!.Value;
-        if (b.Out == null) return b.In < a.Out.Value;
-        return a.In < b.Out.Value && b.In < a.Out.Value;
+        if (a.Out == null) return aIn < AttendanceRollupService.ShiftOffset(b.Out!.Value, dayStartTime);
+        TimeSpan aOut = AttendanceRollupService.ShiftOffset(a.Out.Value, dayStartTime);
+        if (b.Out == null) return bIn < aOut;
+        TimeSpan bOut = AttendanceRollupService.ShiftOffset(b.Out.Value, dayStartTime);
+        return aIn < bOut && bIn < aOut;
     }
 
     private static List<WorkerProjectSpan> SpansFor(Dictionary<(long StaffId, string ProjectId), List<WorkerProjectSpan>> spans, long staffId, string projectId) =>
@@ -283,7 +288,7 @@ internal static class ScheduleBoardMapper
                         .Where(x => x.Spans.Count > 0).ToList();
                     for (int i = 0; i < withSpans.Count; i++)
                         for (int j = i + 1; j < withSpans.Count; j++)
-                            if (withSpans[i].Spans.Any(a => withSpans[j].Spans.Any(b => SpansConflict(a, b))))
+                            if (withSpans[i].Spans.Any(a => withSpans[j].Spans.Any(b => SpansConflict(a, b, BoardContext.DayStartTime))))
                             {
                                 hit.Add(withSpans[i].Slot);
                                 hit.Add(withSpans[j].Slot);
@@ -302,7 +307,7 @@ internal static class ScheduleBoardMapper
     internal static List<string> FindDuplicateWorkers(IEnumerable<DailyProjectSchedule> slots, DateOnly date, IEnumerable<AttendanceEntry> entries)
     {
         var list = slots.ToList();
-        var spans = AttendanceRollupService.BuildSpans(entries, date, list);
+        var spans = AttendanceRollupService.BuildSpans(entries, date, BoardContext.DayStartTime);
         var messages = new List<string>();
         foreach (var c in ComputeWorkerConflicts(list, spans))
         {
@@ -431,7 +436,7 @@ internal static class ScheduleBoardMapper
     internal static void Render(object wsObj, DateOnly date, IReadOnlyList<DailyProjectSchedule> slots, IReadOnlyList<AttendanceEntry> entries, bool autoPopulate = false)
     {
         dynamic ws = wsObj;
-        var spans = AttendanceRollupService.BuildSpans(entries, date, slots);
+        var spans = AttendanceRollupService.BuildSpans(entries, date, BoardContext.DayStartTime);
         string cutOffText = BoardContext.LateCutOff.ToString("HH:mm", CultureInfo.InvariantCulture);
 
         var layouts = Bands.ToDictionary(b => b.Shift, b => LayoutSlots(b.Shift, date, slots, autoPopulate));
@@ -735,7 +740,7 @@ internal static class ScheduleBoardMapper
     {
         if (data.ProjectID.Length == 0) return (EmptyHeaderText, null, null);
 
-        var window = AttendanceRollupService.WindowFor(data.ProjectID, spans);
+        var window = AttendanceRollupService.WindowFor(data.ProjectID, spans, BoardContext.DayStartTime);
         string windowText = FormatSpan(window.Start, window.End);
 
         var info = Roster.FindProject(data.ProjectID);

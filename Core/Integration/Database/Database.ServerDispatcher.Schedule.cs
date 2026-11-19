@@ -222,9 +222,10 @@ public static partial class ServerDispatcher
             updated_at        = CURRENT_TIMESTAMP;";
 
         const string sqlSettingsUpsert = @"
-        INSERT INTO daily_schedule_settings (schedule_date, late_cut_off_time, ot_start_time)
-        VALUES (@ScheduleDate, @LateCutOffTime, @OtStartTime)
+        INSERT INTO daily_schedule_settings (schedule_date, day_start_time, late_cut_off_time, ot_start_time)
+        VALUES (@ScheduleDate, @DayStartTime, @LateCutOffTime, @OtStartTime)
         ON CONFLICT (schedule_date) DO UPDATE SET
+            day_start_time    = EXCLUDED.day_start_time,
             late_cut_off_time = EXCLUDED.late_cut_off_time,
             ot_start_time     = EXCLUDED.ot_start_time,
             updated_at        = CURRENT_TIMESTAMP;";
@@ -232,6 +233,7 @@ public static partial class ServerDispatcher
         var settings = new
         {
             ScheduleDate = date,
+            DayStartTime = schedule.DayStartTime.ToTimeSpan(),
             LateCutOffTime = schedule.LateCutOffTime.ToTimeSpan(),
             OtStartTime = schedule.OTStartTime.ToTimeSpan()
         };
@@ -273,7 +275,7 @@ public static partial class ServerDispatcher
 
         AppLogger.Info(
             $"[PostgreSQL Upload - Schedule {schedule.DailyScheduleDate:yyyy-MM-dd}] " +
-            $"lateCutOff={schedule.LateCutOffTime:HH:mm}, otStart={schedule.OTStartTime:HH:mm}, " +
+            $"dayStart={schedule.DayStartTime:HH:mm}, lateCutOff={schedule.LateCutOffTime:HH:mm}, otStart={schedule.OTStartTime:HH:mm}, " +
             $"slots={slots.Count}, attendances={attendances.Count}, entries={entries.Count}, prefs={prefs.Count}, teams={teams.Count}, skills={skills.Count}, projSkillReqs={projSkillReqs.Count}");
     }
 
@@ -289,6 +291,28 @@ public static partial class ServerDispatcher
             is_approved      = EXCLUDED.is_approved,
             whatsapp_picture = EXCLUDED.whatsapp_picture,
             updated_at       = CURRENT_TIMESTAMP;";
+
+    // DO NOTHING: terminal sync never overwrites manual is_approved / override_reason / project_id edits on stored punches.
+    private const string SqlEntryInsertIgnore = @"
+        INSERT INTO attendance_entries (entry_date, entry_time, staff_id, project_id, entry_type, source, override_reason, is_approved, whatsapp_picture)
+        VALUES (@EntryDate, @EntryTime, @StaffId, @ProjectId, @EntryType, @Source, @OverrideReason, @IsApproved, @WhatsappPicture)
+        ON CONFLICT (entry_date, entry_time, staff_id, entry_type, source) DO NOTHING;";
+
+    /// <summary>Inserts new attendance entries across any dates, skipping rows that already exist. Returns rows actually inserted.</summary>
+    public static int InsertAttendanceEntries(IEnumerable<AttendanceEntry> entries)
+    {
+        EnsureScheduleSchema();
+        var rows = entries.Where(e => e.StaffID > 0).Select(ToEntryRow).ToList();
+        if (rows.Count == 0) return 0;
+
+        int inserted = 0;
+        Db.ExecuteInTransaction((conn, trans) =>
+        {
+            inserted = conn.Execute(SqlEntryInsertIgnore, rows, trans);
+        });
+        AppLogger.Info($"[PostgreSQL Upload - Terminal Sync] inserted={inserted}, attempted={rows.Count}");
+        return inserted;
+    }
 
     private static object ToEntryRow(AttendanceEntry e) => new
     {

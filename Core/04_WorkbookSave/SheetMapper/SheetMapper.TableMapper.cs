@@ -215,7 +215,7 @@ public static class TableMapper
                                             hdr.Equals("IC Number", StringComparison.OrdinalIgnoreCase);
                                 bool isTime = cRule.Property != null && IsTimeProperty(cRule.Property);
                                 bool isOdo = cRule.EffectiveFormatKind == ColumnFormatKind.OdometerDynamic;
-                                if (isTime) { /* hh:mm is applied on populate */ }
+                                if (isTime) cell.NumberFormat = "hh:mm";
                                 else if (isIc || (cRule.PropertyType == typeof(string) && !isOdo && !RuleRegistry.ShouldApplyFormat(cRule)))
                                     cell.NumberFormat = "@";
                                 else if (!isOdo && RuleRegistry.ShouldApplyFormat(cRule))
@@ -347,7 +347,7 @@ public static class TableMapper
 
                 // 3. Write data
                 colRange.Value2 = colData;
-                if (rule?.IsStrictlyCalculated == true)
+                if (rule?.IsLocked == true)
                     RuleRegistry.ApplyCalculatedColumnLock(colRange, rule);
 
                 // 4. Unit display overrides (applied after the archetype format so they win)

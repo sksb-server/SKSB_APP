@@ -39,7 +39,12 @@ public class Events : ManagerEventsBase<ScheduleRecord>
         IsDatasetEmpty = IsEmpty,
         // Reference tables (teams, preferences) and the board must load even before any day has been scheduled.
         PopulateStartupWhenEmpty = true,
-        SaveToServer = schedule => (ServerSyncCommands.SaveScheduleSilent(schedule, out string err), err),
+        SaveToServer = schedule =>
+        {
+            bool ok = ServerSyncCommands.SaveScheduleSilent(schedule, out string err);
+            if (ok) SheetMapper.MarkEntriesSaved(schedule.AttendanceEntries);
+            return (ok, err);
+        },
         SaveToOffline = schedule => OfflineSnapshot.SaveOfflineSnapshot(schedule),
         PopulateWorksheet = schedule => SheetMapper.PopulateWorksheet(schedule),
         FetchFromServer = () => ServerSyncCommands.FetchSchedule(CurrentDate()),
@@ -59,7 +64,7 @@ public class Events : ManagerEventsBase<ScheduleRecord>
     private static bool ConfirmPastSave(ScheduleRecord schedule)
     {
         if (!SheetMapper.HasUnsavedRecordEdits) return true;
-        var dates = new[] { schedule.DailyScheduleDate }.Concat(schedule.AttendanceEntries.Select(e => e.Date));
+        var dates = new[] { schedule.DailyScheduleDate }.Concat(SheetMapper.GetModifiedAttendanceEntryDates(schedule.AttendanceEntries));
         return PastRecordGuard.ConfirmPastRecordsSave(dates, "Schedule Manager");
     }
 

@@ -148,7 +148,7 @@ public static partial class RuleRegistry
                 }
             case ColumnFormatKind.Id: return blankZero ? "0;-0;;@" : "0;-0;0;@";
             case ColumnFormatKind.Date: return Four("dd/mm/yyyy", "dd/mm/yyyy", "dd/mm/yyyy");
-            case ColumnFormatKind.Time: return Four("hh:mm", "hh:mm", "hh:mm");
+            case ColumnFormatKind.Time: return "hh:mm;hh:mm;hh:mm;@";
             case ColumnFormatKind.Text: return "@";
             default: return null;
         }

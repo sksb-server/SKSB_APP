@@ -35,6 +35,17 @@ public static class DeviceSyncManager
     /// <summary>Punches of the same worker closer than this are one physical scan (double tap).</summary>
     private static readonly TimeSpan DoubleScanWindow = TimeSpan.FromMinutes(1);
 
+    /// <summary>Default working-day boundary (Daily Attendances C2): punches before 06:00 belong to the previous working day.</summary>
+    public static readonly TimeOnly DefaultDayStartTime = new(6, 0);
+
+    /// <summary>Working date a punch belongs to: before <paramref name="dayStartTime"/> it rolls back to the previous day.</summary>
+    public static DateOnly WorkingDate(DateOnly date, TimeOnly time, TimeOnly dayStartTime) =>
+        time < dayStartTime ? date.AddDays(-1) : date;
+
+    /// <summary>True when the punch (real calendar date + time) belongs to <paramref name="workingDate"/>.</summary>
+    public static bool IsInWorkingDay(DateOnly punchDate, TimeOnly punchTime, DateOnly workingDate, TimeOnly dayStartTime) =>
+        WorkingDate(punchDate, punchTime, dayStartTime) == workingDate;
+
     // =========================================================================
     // 1. TERMINAL READ (background thread only - never touches Excel)
     // =========================================================================
@@ -158,19 +169,21 @@ public static class DeviceSyncManager
 
     /// <summary>
     /// Removes duplicate rows already present (order preserved). Thumbprint rows within <see cref="DoubleScanWindow"/> of the
-    /// previous kept row for the same (staff, date) are dropped and the kept timeline's in/out alternation is normalized;
-    /// other sources drop rows repeating an earlier (date, staff, type, source, hh:mm).
+    /// previous kept row for the same (staff, working day) are dropped and the kept timeline's in/out alternation is normalized;
+    /// other sources drop rows repeating an earlier (date, staff, type, source, hh:mm). The working day is derived from
+    /// <paramref name="dayStartTime"/> (default <see cref="DefaultDayStartTime"/>) so night shifts crossing midnight stay together.
     /// </summary>
-    public static (List<AttendanceEntry> CleanEntries, int RemovedDuplicates) DeduplicateExisting(IReadOnlyCollection<AttendanceEntry> existing)
+    public static (List<AttendanceEntry> CleanEntries, int RemovedDuplicates) DeduplicateExisting(IReadOnlyCollection<AttendanceEntry> existing, TimeOnly? dayStartTime = null)
     {
+        TimeOnly dayStart = dayStartTime ?? DefaultDayStartTime;
         var drop = new HashSet<AttendanceEntry>(ReferenceEqualityComparer.Instance);
 
-        foreach (var g in existing.Where(e => e.Source == AttendanceSource.Thumbprint).GroupBy(e => (e.StaffID, e.Date)))
+        foreach (var g in existing.Where(e => e.Source == AttendanceSource.Thumbprint).GroupBy(e => (e.StaffID, WorkingDate(e.Date, e.Time, dayStart))))
         {
             var kept = new List<AttendanceEntry>();
-            foreach (var e in g.OrderBy(e => e.Time))   // stable sort
+            foreach (var e in g.OrderBy(e => e.Date).ThenBy(e => e.Time))   // stable sort
             {
-                if (kept.Count > 0 && Math.Abs((e.Time.ToTimeSpan() - kept[^1].Time.ToTimeSpan()).TotalSeconds) < DoubleScanWindow.TotalSeconds)
+                if (kept.Count > 0 && Math.Abs((e.Date.ToDateTime(e.Time) - kept[^1].Date.ToDateTime(kept[^1].Time)).TotalSeconds) < DoubleScanWindow.TotalSeconds)
                     drop.Add(e);
                 else
                     kept.Add(e);
@@ -194,46 +207,51 @@ public static class DeviceSyncManager
     /// Converts raw punches into new <see cref="AttendanceSource.Thumbprint"/> entries.
     /// The terminal's enroll number is the Staff ID. Punches are dropped when the worker is unknown, when the same
     /// instant already exists in <paramref name="existing"/> (re-sync), or when it is a double scan.
-    /// Entry type alternates per worker and day: the first punch is a CheckIn, then CheckOut, CheckIn...
+    /// Entry type alternates per worker and working day (see <see cref="WorkingDate"/>): the first punch is a CheckIn,
+    /// then CheckOut, CheckIn... A night-shift check-out after midnight stays in the previous working day's timeline.
     /// </summary>
     public static (List<AttendanceEntry> NewEntries, int Duplicates, int UnknownStaff) BuildEntries(
         IEnumerable<TerminalPunch> punches,
         IReadOnlyCollection<AttendanceEntry> existing,
-        Func<long, bool> isKnownStaff)
+        Func<long, bool> isKnownStaff,
+        TimeOnly? dayStartTime = null)
     {
+        TimeOnly dayStart = dayStartTime ?? DefaultDayStartTime;
         var result = new List<AttendanceEntry>();
         int duplicates = 0;
         int unknown = 0;
 
-        // Existing thumbprint rows per (staff, date), time-ordered: they seed the in/out alternation and the de-dup check.
+        // Existing thumbprint rows per (staff, working day), chronological: they seed the in/out alternation and the de-dup check.
         var history = existing
             .Where(e => e.Source == AttendanceSource.Thumbprint)
-            .GroupBy(e => (e.StaffID, e.Date))
-            .ToDictionary(g => g.Key, g => g.OrderBy(e => e.Time).ToList());
+            .GroupBy(e => (e.StaffID, WorkingDate(e.Date, e.Time, dayStart)))
+            .ToDictionary(g => g.Key, g => g.OrderBy(e => e.Date).ThenBy(e => e.Time).ToList());
 
         var parsed = punches
             .Select(p => (Ok: long.TryParse(p.EnrollNumber?.Trim(), out long id), Id: id, p.Timestamp))
             .ToList();
 
-        foreach (var staffDay in parsed.Where(p => p.Ok).GroupBy(p => (p.Id, Date: DateOnly.FromDateTime(p.Timestamp))))
+        foreach (var staffDay in parsed.Where(p => p.Ok).GroupBy(p => (p.Id, WorkDate: WorkingDate(DateOnly.FromDateTime(p.Timestamp), TimeOnly.FromDateTime(p.Timestamp), dayStart))))
         {
             if (!isKnownStaff(staffDay.Key.Id)) { unknown += staffDay.Count(); continue; }
 
-            if (!history.TryGetValue((staffDay.Key.Id, staffDay.Key.Date), out var timeline))
+            if (!history.TryGetValue((staffDay.Key.Id, staffDay.Key.WorkDate), out var timeline))
                 timeline = new List<AttendanceEntry>();
 
             foreach (var punch in staffDay.OrderBy(p => p.Timestamp))
             {
-                var time = TimeOnly.FromDateTime(punch.Timestamp);
-                time = new TimeOnly(time.Hour, time.Minute, time.Second); // drop sub-second noise
+                var t = TimeOnly.FromDateTime(punch.Timestamp);
+                var time = new TimeOnly(t.Hour, t.Minute, t.Second); // drop sub-second noise
+                var date = DateOnly.FromDateTime(punch.Timestamp);  // keep the real calendar date
+                DateTime punchDt = date.ToDateTime(time);
 
-                bool isRepeat = timeline.Any(e => Math.Abs((e.Time.ToTimeSpan() - time.ToTimeSpan()).TotalSeconds) < DoubleScanWindow.TotalSeconds);
+                bool isRepeat = timeline.Any(e => Math.Abs((e.Date.ToDateTime(e.Time) - punchDt).TotalSeconds) < DoubleScanWindow.TotalSeconds);
                 if (isRepeat) { duplicates++; continue; }
 
-                var previous = timeline.LastOrDefault(e => e.Time < time);
+                var previous = timeline.LastOrDefault(e => e.Date.ToDateTime(e.Time) < punchDt);
                 var entry = new AttendanceEntry
                 {
-                    Date = staffDay.Key.Date,
+                    Date = date,
                     Time = time,
                     StaffID = staffDay.Key.Id,
                     EntryType = previous != null && previous.EntryType == AttendanceEntryType.CheckIn
@@ -243,7 +261,7 @@ public static class DeviceSyncManager
                     IsApproved = true
                 };
                 timeline.Add(entry);
-                timeline.Sort((a, b) => a.Time.CompareTo(b.Time));
+                timeline.Sort((a, b) => a.Date.ToDateTime(a.Time).CompareTo(b.Date.ToDateTime(b.Time)));
                 result.Add(entry);
             }
         }

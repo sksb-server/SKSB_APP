@@ -62,10 +62,16 @@ public record ScheduleRecord
     /// <summary>The working date the date-scoped collections below belong to.</summary>
     public DateOnly DailyScheduleDate { get; set; } = DateOnly.FromDateTime(DateTime.Today);
 
-    /// <summary>Late Checked In Cut Off Time for <see cref="DailyScheduleDate"/> (Daily Attendances C2). Default 11:00.</summary>
+    /// <summary>
+    /// Day Start Time for <see cref="DailyScheduleDate"/> (Daily Attendances C2). Default 06:00. Working-day boundary:
+    /// punches before this time belong to the previous working day (night shifts).
+    /// </summary>
+    public TimeOnly DayStartTime { get; set; } = new(6, 0);
+
+    /// <summary>Late Checked In Cut Off Time for <see cref="DailyScheduleDate"/> (Daily Attendances D2). Default 11:00.</summary>
     public TimeOnly LateCutOffTime { get; set; } = new(11, 0);
 
-    /// <summary>OT Start Time for <see cref="DailyScheduleDate"/> (Daily Attendances D2). Default 18:00.</summary>
+    /// <summary>OT Start Time for <see cref="DailyScheduleDate"/> (Daily Attendances E2). Default 18:00.</summary>
     public TimeOnly OTStartTime { get; set; } = new(18, 0);
 
     /// <summary>Day / Night dispatch board slots (8 per band) for <see cref="DailyScheduleDate"/>.</summary>
@@ -104,7 +110,7 @@ public record AttendanceEntry
     public TimeOnly Time { get; set; } = TimeOnly.MinValue;
 
     [ExcelColumn("Staff ID", isRequired: true)]
-    [ColumnRule("StaffIDList", IsRequired = true)]
+    [ColumnRule("StaffIDList", IsRequired = true, IsWarningOnly = true)]
     [ColumnSync("Staff Name", "StaffIDList", "StaffNameList")]
     [ColumnFormat(ColumnFormatKind.Id, zero: ZeroBehavior.Blank)]
     public long StaffID { get; set; }
@@ -179,7 +185,7 @@ public record DailyWorkerAttendance
     [ColumnFormat(ColumnFormatKind.Time, ZeroBehavior.Blank)]
     public TimeOnly? ClockOutTime { get; set; }
 
-    /// <summary>Chronological timeline, e.g. <c>PROJ-A @ 08:05; PROJ-B @ 13:15</c>.</summary>
+    /// <summary>Distinct projects checked into that day, comma-separated (e.g. <c>PROJ-A, PROJ-B</c>), derived strictly from Attendance Entries.</summary>
     [ExcelColumn("Project Check-Ins")]
     [ColumnRule(IsRequired = false)]
     public string ProjectCheckIns { get; set; } = string.Empty;
@@ -215,7 +221,7 @@ public record DailyWorkerAttendance
     public decimal TotalFlattenedHours { get; set; }
 
     [ExcelColumn("Is Allocated")]
-    [ColumnRule(IsRequired = false)]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
     public bool IsAllocated { get; set; }
 }
 
@@ -254,15 +260,15 @@ public record DailyProjectSchedule
 public record WorkerPreference
 {
     [ExcelColumn("Staff ID", isRequired: true)]
-    [ColumnRule("StaffIDList", IsRequired = true)]
-    [ColumnSync("Staff Name", "StaffIDList", "StaffNameList")]
+    [ColumnRule("AllFieldStaffIDList", IsRequired = true)]
+    [ColumnSync("Staff Name", "AllFieldStaffIDList", "AllFieldStaffNameList")]
     [ColumnFormat(ColumnFormatKind.Id, zero: ZeroBehavior.Blank)]
     public long StaffID { get; set; }
 
     [JsonIgnore]
     [ExcelColumn("Staff Name")]
-    [ColumnRule("StaffNameList", IsRequired = false, IsWarningOnly = true)]
-    [ColumnSync("Staff ID", "StaffNameList", "StaffIDList")]
+    [ColumnRule("AllFieldStaffNameList", IsRequired = false)]
+    [ColumnSync("Staff ID", "AllFieldStaffNameList", "AllFieldStaffIDList")]
     public string StaffName { get; set; } = string.Empty;
 
     [ExcelColumn("Team")]
@@ -321,7 +327,7 @@ public record TeamRecord
 
     /// <summary>Leader's short name (Excel); resolved to a Staff ID on save.</summary>
     [ExcelColumn("Team Leader")]
-    [ColumnRule("StaffNameList", IsRequired = false, IsWarningOnly = true)]
+    [ColumnRule("AllFieldStaffNameList", IsRequired = false)]
     public string TeamLeader { get; set; } = string.Empty;
 
     [JsonIgnore]

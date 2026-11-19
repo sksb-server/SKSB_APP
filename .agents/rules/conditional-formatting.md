@@ -100,12 +100,13 @@ Authoritative conditional formatting (CF) conventions derived from `Staff_Manage
 ### Pattern 4 — Cost, Amount & Metric Heatmaps (`ColorScale`)
 - **Use For:** Financial costs, claim amounts, returns, odometer totals, and numeric summary metrics.
 - **Rule Granularity:** Create **one `ColorScale` rule per column** so each metric scales independently (exception: homogeneous cost-breakdown blocks such as `Maintenances` `O2:Y2 K2` may share one scale).
+- **3-Color Scale Endpoints:** Always set **Minimum** to `Type: Percent`, `Value: 0` and **Maximum** to `Type: Percent`, `Value: 100` — never `Lowest Value` / `Highest Value`.
 - **Sub-Variants:**
 
-| Variant | Use For | Min (`min` / `percent 0`) | Midpoint | Max (`max` / `percent 100`) |
+| Variant | Use For | Min (`Percent` `0`) | Midpoint | Max (`Percent` `100`) |
 | :--- | :--- | :--- | :--- | :--- |
-| **4A — Zero-Anchored (Default)** | Costs, amounts, returns, usage (keeps `0` visually clean) | White `#FFFFFF` | `percent 5` → Soft Green `#D9F2D0` | Soft Red `#FF9999` |
-| **4B — Centered / Symmetric** | Unit costs, `Profit / Margin`, centered metrics | Soft Green `#D9F2D0` | `percentile 50` (or `percent 50`) → White `#FFFFFF` | Soft Red `#FF9999` |
+| **4A — Zero-Anchored (Default)** | Costs, amounts, returns, usage (keeps `0` visually clean) | White `#FFFFFF` | `Percent` `5` → Soft Green `#D9F2D0` | Soft Red `#FF9999` |
+| **4B — Centered / Symmetric** | Unit costs, `Profit / Margin`, centered metrics | Soft Green `#D9F2D0` | `Percent` `50` (or `Percentile` `50` for median-centered) → White `#FFFFFF` | Soft Red `#FF9999` |
 | **4C — 2-Color Intensity** | Simple counts / shift intensity (e.g., `Regular Shifts`) | White `#FFFFFF` | *(None)* | Soft Red `#FF9999` |
 
 ---

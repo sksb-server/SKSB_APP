@@ -167,13 +167,14 @@ public static class SyncHelper
     public static void SyncNamedLists(
         string targetSheet,
         Dictionary<string, string[]> mappings,
-        WriteMode writeMode)
+        WriteMode writeMode,
+        bool synchronous = false)
     {
         if (mappings == null || mappings.Count == 0) return;
 
         using var _ = AppLogger.Scope($"SyncNamedLists(targetSheet='{targetSheet}', keys={mappings.Count}, mode={writeMode})");
 
-        ExcelAsyncUtil.QueueAsMacro(() =>
+        void Execute()
         {
             try
             {
@@ -285,7 +286,10 @@ public static class SyncHelper
             {
                 AppLogger.Error($"SyncNamedLists on '{targetSheet}' threw exception", ex);
             }
-        });
+        }
+
+        if (synchronous) Execute();
+        else ExcelAsyncUtil.QueueAsMacro(Execute);
     }
 
     private static dynamic EnsureSheetExistsCom(dynamic wb, string sheetName)

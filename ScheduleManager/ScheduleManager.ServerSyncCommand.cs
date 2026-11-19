@@ -41,11 +41,11 @@ internal static class ServerSyncCommands
 
         if (record == null) return new ScheduleRecord { DailyScheduleDate = date };
 
-        // The local snapshot holds whichever date was fetched last: keep the reference tables, drop foreign-date rows.
+        // The local snapshot holds whichever date was fetched last: keep the reference tables and all-time attendance entries, drop foreign-date rows.
         if (record.DailyScheduleDate != date)
         {
             AppLogger.Warn($"[{Module}] Offline snapshot is for {record.DailyScheduleDate:yyyy-MM-dd}; showing {date:yyyy-MM-dd} without date-scoped rows.");
-            record = new ScheduleRecord { DailyScheduleDate = date, Preferences = record.Preferences, Teams = record.Teams, Skills = record.Skills, ProjectSkillRequirements = record.ProjectSkillRequirements };
+            record = new ScheduleRecord { DailyScheduleDate = date, AttendanceEntries = record.AttendanceEntries, Preferences = record.Preferences, Teams = record.Teams, Skills = record.Skills, ProjectSkillRequirements = record.ProjectSkillRequirements };
         }
 
         // Offline Mode only: Online Mode already got LicensedSkills from staff_vehicle_licenses / staff_skill_licenses
@@ -88,9 +88,10 @@ internal static class ServerSyncCommands
         DateTime d = date.ToDateTime(TimeOnly.MinValue);
         var record = new ScheduleRecord { DailyScheduleDate = date };
 
-        // Per-date attendance parameters; no row => ScheduleRecord defaults (11:00 / 18:00).
-        foreach (var r in db.Query<dynamic>("SELECT late_cut_off_time, ot_start_time FROM daily_schedule_settings WHERE schedule_date = @D;", new { D = d }))
+        // Per-date attendance parameters; no row => ScheduleRecord defaults (06:00 / 11:00 / 18:00).
+        foreach (var r in db.Query<dynamic>("SELECT day_start_time, late_cut_off_time, ot_start_time FROM daily_schedule_settings WHERE schedule_date = @D;", new { D = d }))
         {
+            record.DayStartTime = Time(r.day_start_time) ?? record.DayStartTime;
             record.LateCutOffTime = Time(r.late_cut_off_time) ?? record.LateCutOffTime;
             record.OTStartTime = Time(r.ot_start_time) ?? record.OTStartTime;
         }
@@ -110,12 +111,16 @@ internal static class ServerSyncCommands
             });
         }
 
-        foreach (var r in db.Query<dynamic>("SELECT * FROM attendance_entries WHERE entry_date = @D ORDER BY entry_time, entry_id;", new { D = d }))
+        // All-time attendance entries are loaded; the Attendance Entries sheet filters its Date column to the selected date.
+        const string sqlEntries = @"
+        SELECT * FROM attendance_entries
+        ORDER BY entry_date, entry_time, entry_id;";
+        foreach (var r in db.Query<dynamic>(sqlEntries))
         {
             record.AttendanceEntries.Add(new AttendanceEntry
             {
                 EntryId = Convert.ToInt64(r.entry_id),
-                Date = date,
+                Date = DateOnly.FromDateTime(Convert.ToDateTime(r.entry_date)),
                 Time = Time(r.entry_time) ?? TimeOnly.MinValue,
                 StaffID = Convert.ToInt64(r.staff_id),
                 ProjectID = Text(r.project_id),
@@ -354,27 +359,40 @@ internal static class ServerSyncCommands
     // 4. LOOKUP LISTS FOR THE 'Data' SHEET
     // =========================================================================
     /// <summary>
-    /// Staff lists offer only workers employed on <paramref name="date"/>, plus anyone the loaded record already refers to
-    /// (<paramref name="alsoInclude"/>) so a former worker on an existing row still passes the dropdown rule.
+    /// StaffIDList/StaffNameList offer strictly the workers employed on <paramref name="date"/> (resigned / not-yet-joined excluded);
+    /// AllFieldStaffIDList/AllFieldStaffNameList include every field worker, resigned included (Preference sheet).
     /// </summary>
-    internal static void SyncLookupLists(DateOnly date, IEnumerable<long>? alsoInclude = null)
+    internal static void SyncLookupLists(DateOnly date)
     {
         Roster.Invalidate();
-        var extra = new HashSet<long>(alsoInclude ?? Enumerable.Empty<long>());
+        SyncStaffLookupLists(date, synchronous: false);
+        SyncOtherLookupLists();
+    }
 
+    internal static void SyncStaffLookupLists(DateOnly date, bool synchronous = false)
+    {
         // StaffIDList and StaffNameList stay index-aligned (Staff ID <-> Staff Name sync).
         var staff = Roster.Staff
-            .Where(s => s.Id > 0 && s.ShortName.Length > 0 && (Roster.IsActiveOn(s, date) || extra.Contains(s.Id)))
+            .Where(s => s.Id > 0 && s.ShortName.Length > 0 && Roster.IsActiveOn(s, date))
             .OrderBy(s => s.Id).ToList();
-        if (staff.Count > 0)
+        // AllFieldStaff* lists include resigned workers (used by the Preference sheet).
+        var allStaff = Roster.Staff
+            .Where(s => s.Id > 0 && s.ShortName.Length > 0)
+            .OrderBy(s => s.Id).ToList();
+        if (staff.Count > 0 || allStaff.Count > 0)
         {
             DataList.SyncAlignedLists(new Dictionary<string, IEnumerable<string>>
             {
                 ["StaffIDList"] = staff.Select(s => s.Id.ToString()).ToList(),
                 ["StaffNameList"] = staff.Select(s => s.ShortName).ToList(),
-            });
+                ["AllFieldStaffIDList"] = allStaff.Select(s => s.Id.ToString()).ToList(),
+                ["AllFieldStaffNameList"] = allStaff.Select(s => s.ShortName).ToList(),
+            }, synchronous);
         }
+    }
 
+    private static void SyncOtherLookupLists()
+    {
         var plates = Roster.Vehicles.Select(v => v.Plate).Where(p => p.Length > 0).Distinct().OrderBy(p => p).ToList();
         if (plates.Count > 0) DataList.SyncValues("VehiclePlateList", plates);
 
@@ -412,6 +430,35 @@ internal static class ServerSyncCommands
         if (unlicensedSkills.Count > 0) DataList.SyncValues("OtherSkillList", unlicensedSkills);
     }
 
+    /// <summary>All stored Thumbprint entries from <paramref name="minDate"/> onwards (used to dedupe terminal punches).</summary>
+    internal static List<AttendanceEntry> FetchThumbprintEntriesSince(DateOnly minDate)
+    {
+        ServerDispatcher.EnsureScheduleSchema();
+        var db = new PostgreSqlService();
+        const string sql = @"
+        SELECT * FROM attendance_entries
+        WHERE source = 'Thumbprint' AND entry_date >= @MinDate
+        ORDER BY entry_date, entry_time, entry_id;";
+        var list = new List<AttendanceEntry>();
+        foreach (var r in db.Query<dynamic>(sql, new { MinDate = minDate.ToDateTime(TimeOnly.MinValue) }))
+        {
+            list.Add(new AttendanceEntry
+            {
+                EntryId = Convert.ToInt64(r.entry_id),
+                Date = DateOnly.FromDateTime(Convert.ToDateTime(r.entry_date)),
+                Time = Time(r.entry_time) ?? TimeOnly.MinValue,
+                StaffID = Convert.ToInt64(r.staff_id),
+                ProjectID = Text(r.project_id),
+                EntryType = Parse(r.entry_type, AttendanceEntryType.CheckIn),
+                Source = Parse(r.source, AttendanceSource.Manual),
+                OverrideReason = Text(r.override_reason),
+                IsApproved = (bool)r.is_approved,
+                WhatsAppPicture = Text(r.whatsapp_picture)
+            });
+        }
+        return list;
+    }
+
     // =========================================================================
     // 5. DYNAMIC ROW HELPERS
     // =========================================================================
@@ -422,6 +469,13 @@ internal static class ServerSyncCommands
         string[] a => a.ToList(),
         IEnumerable<string> e => e.ToList(),
         _ => new List<string>()
+    };
+
+    private static DateOnly? Date(object? v) => v switch
+    {
+        DateOnly d => d,
+        DateTime dt => DateOnly.FromDateTime(dt),
+        _ => DateOnly.TryParse(v?.ToString(), out var parsed) ? parsed : null
     };
 
     private static TimeOnly? Time(object? v) => v switch

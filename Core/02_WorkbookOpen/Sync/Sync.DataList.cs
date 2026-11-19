@@ -154,7 +154,7 @@ public static class DataList
     /// Unlike <see cref="SyncValues"/>, items are only trimmed: no filtering, de-duplication or sorting,
     /// so position N in every list refers to the same record.
     /// </summary>
-    public static void SyncAlignedLists(Dictionary<string, IEnumerable<string>> lists)
+    public static void SyncAlignedLists(Dictionary<string, IEnumerable<string>> lists, bool synchronous = false)
     {
         if (lists == null || lists.Count == 0) return;
 
@@ -183,7 +183,7 @@ public static class DataList
 
         if (mappings.Count > 0)
         {
-            SyncHelper.SyncNamedLists(TargetSheet, mappings, WriteMode.SmartOrganize);
+            SyncHelper.SyncNamedLists(TargetSheet, mappings, WriteMode.SmartOrganize, synchronous);
         }
     }
 

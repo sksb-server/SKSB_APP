@@ -27,14 +27,91 @@ internal static partial class SheetMapper
     internal static readonly string[] EntriesAliases = { "Attendance Entries", "Attendance_Entries" };
     internal const string EntriesTableName = "AttendanceEntriesTable";
 
+    /// <summary>Day Start Time parameter: working-day boundary; punches before it belong to the previous working day.</summary>
+    internal const string DayStartCell = "C2";
+
     /// <summary>Late Checked In Cut Off Time parameter (moved here from the retired 'Daily Salary' sheet).</summary>
-    internal const string LateCutOffCell = "C2";
+    internal const string LateCutOffCell = "D2";
 
     /// <summary>OT Start Time parameter: day-band time clocked after this counts as overtime.</summary>
-    internal const string OtStartCell = "D2";
+    internal const string OtStartCell = "E2";
 
     private static bool _isRefreshing;
     private static bool _refreshQueued;
+
+    // Fingerprints of the attendance entries as last loaded / saved: PastRecordGuard only flags entries not in this set.
+    private static HashSet<string> _loadedEntryFingerprints = new(StringComparer.Ordinal);
+
+    // Tracks entries whose ProjectID was auto-derived from the schedule (entry identity -> last auto-derived ProjectID).
+    // Manual edits to a different ProjectID stop matching and are preserved; clearing ProjectID re-enables auto-derivation.
+    private static readonly Dictionary<string, string> _autoDerivedEntryProjects = new(StringComparer.Ordinal);
+
+    private static string EntryIdentityKey(AttendanceEntry e) =>
+        $"{e.Date:yyyy-MM-dd}|{e.Time:HH:mm:ss}|{e.StaffID}|{e.EntryType}|{e.Source}";
+
+    private static string EntryFingerprint(AttendanceEntry e) =>
+        string.Join("|",
+            e.Date, e.Time, e.StaffID,
+            (e.ProjectID ?? string.Empty).Trim().ToUpperInvariant(),
+            e.EntryType, e.Source,
+            (e.OverrideReason ?? string.Empty).Trim(),
+            e.IsApproved,
+            (e.WhatsAppPicture ?? string.Empty).Trim());
+
+    internal static IEnumerable<DateOnly> GetModifiedAttendanceEntryDates(IEnumerable<AttendanceEntry> current) =>
+        current.Where(e => !_loadedEntryFingerprints.Contains(EntryFingerprint(e))).Select(e => e.Date).Distinct().ToList();
+
+    internal static void MarkEntriesSaved(IEnumerable<AttendanceEntry> entries) =>
+        _loadedEntryFingerprints = new HashSet<string>(entries.Select(EntryFingerprint), StringComparer.Ordinal);
+
+    private static void ClearTableFilter(dynamic sheet, string tableName)
+    {
+        try
+        {
+            dynamic? table = TableMapper.ResolveTable(sheet, tableName);
+            if (table?.AutoFilter != null && (bool)table.AutoFilter.FilterMode)
+                table.AutoFilter.ShowAllData();
+        }
+        catch (Exception ex) { AppLogger.Warn($"[ScheduleManager] Could not clear filter on {tableName}: {ex.Message}"); }
+    }
+
+    private static void EnsureAutoFilterEnabled(dynamic sheet, string tableName)
+    {
+        try
+        {
+            dynamic? table = TableMapper.ResolveTable(sheet, tableName);
+            if (table == null) return;
+            table.ShowAutoFilter = true;
+            table.ShowAutoFilterDropDown = true;
+        }
+        catch (Exception ex) { AppLogger.Warn($"[ScheduleManager] Could not enable AutoFilter on {tableName}: {ex.Message}"); }
+    }
+
+    private static void ApplyDateFilter(dynamic sheet, string tableName, DateOnly date)
+    {
+        try
+        {
+            dynamic? table = TableMapper.ResolveTable(sheet, tableName);
+            if (table == null) return;
+            table.ShowAutoFilter = true;
+            table.ShowAutoFilterDropDown = true;
+            if (table.DataBodyRange == null) return;
+
+            int dateColIndex = -1;
+            int idx = 0;
+            foreach (dynamic col in table.ListColumns)
+            {
+                idx++;
+                string header = ((string?)col.Name ?? string.Empty).Trim();
+                if (header.Equals("Date", StringComparison.OrdinalIgnoreCase)) { dateColIndex = idx; break; }
+            }
+            if (dateColIndex < 0) return;
+
+            string oa = ((long)date.ToDateTime(TimeOnly.MinValue).ToOADate()).ToString(CultureInfo.InvariantCulture);
+            table.Range.AutoFilter(dateColIndex, $">={oa}", 1 /* xlAnd */, $"<={oa}");
+        }
+        catch (Exception ex) { AppLogger.Warn($"[ScheduleManager] Could not filter {tableName} to {date:yyyy-MM-dd}: {ex.Message}"); }
+    }
 
     /// <summary>Session key for <see cref="PastRecordGuard"/> edit approvals.</summary>
     internal const string GuardSession = "ScheduleManager";
@@ -83,7 +160,8 @@ internal static partial class SheetMapper
             var record = new ScheduleRecord
             {
                 DailyScheduleDate = date.Value,
-                LateCutOffTime = BoardContext.ReadTimeCell((object)attendanceSheet!, LateCutOffCell, BoardContext.DefaultLateCutOff),
+                DayStartTime = BoardContext.ReadTimeCell((object)attendanceSheet!, DayStartCell, BoardContext.DefaultDayStartTime),
+                LateCutOffTime =BoardContext.ReadTimeCell((object)attendanceSheet!, LateCutOffCell, BoardContext.DefaultLateCutOff),
                 OTStartTime = BoardContext.ReadTimeCell((object)attendanceSheet!, OtStartCell, BoardContext.DefaultOtStartTime)
             };
 
@@ -104,11 +182,18 @@ internal static partial class SheetMapper
             });
             LoadingOverlay.Report("Reading daily schedule board...");
             record.Projects = ScheduleBoardMapper.Read((object)board!, date.Value);
+            RunFrozen(() => SyncEntryProjectsWithSchedule(entriesSheet, record.AttendanceEntries, date.Value, record.Projects, record.DayStartTime, record.OTStartTime, resetTracking: false));
 
-            BoardContext.SetPreferences(record.Preferences, record.Teams);
             BoardContext.SetSkills(record.Skills);
+            ServerSyncCommands.EnsureLicensesLoaded();
+            PruneOrphanedTeamAndSkillReferences(prefSheet!, record);
+            BoardContext.SetPreferences(record.Preferences, record.Teams);
             BoardContext.SetProjectSkillRequirements(record.ProjectSkillRequirements);
+            RunFrozen(() => ServerSyncCommands.SyncSkillList());
             foreach (var t in record.Teams) t.TeamLeaderStaffID = Roster.FindStaff(t.TeamLeader)?.Id ?? 0;
+
+            // Dropdown lists strictly match workers employed on the selected date.
+            RunFrozen(() => ServerSyncCommands.SyncStaffLookupLists(date.Value, synchronous: true));
 
             // ---- table rule validation (required cells, dropdown sources, formats) ----
             var (ruleErrors, ruleWarnings) = RulesExtractor.ValidateAllWorkbookTables(wbObj);
@@ -120,8 +205,9 @@ internal static partial class SheetMapper
 
             // ---- roll punches + board up into the daily attendance rows that get persisted ----
             LoadingOverlay.Report("Rolling up daily worker attendance...");
-            var punchesForDate = record.AttendanceEntries.Where(e => e.Date == date.Value).ToList();
-            record.WorkerAttendance = AttendanceRollupService.Run(date.Value, punchesForDate, record.Projects, record.WorkerAttendance, record.LateCutOffTime, record.OTStartTime);
+            var punchesForDate = record.AttendanceEntries
+                .Where(e => DeviceSyncManager.IsInWorkingDay(e.Date, e.Time, date.Value, record.DayStartTime)).ToList();
+            record.WorkerAttendance = AttendanceRollupService.Run(date.Value, punchesForDate, record.Projects, record.WorkerAttendance, record.DayStartTime, record.LateCutOffTime, record.OTStartTime);
 
             return (record, errors, warnings);
         }
@@ -162,9 +248,10 @@ internal static partial class SheetMapper
                 warnings.Add($"  [Daily Schedule - {label}]: vehicle '{plate}' was not found in vehicle master.");
         }
 
-        DateOnly today = DateOnly.FromDateTime(DateTime.Today);
-        foreach (var p in record.Preferences.Where(p => p.StaffID > 0 && !Roster.IsActiveOn(p.StaffID, today)))
-            errors.Add($"  [Preference]: Staff ID '{p.StaffID}' is not a currently employed field worker (office / admin / resigned staff cannot be scheduled).");
+        foreach (var p in record.Preferences.Where(p => p.StaffID > 0 && Roster.FindStaff(p.StaffID) == null))
+            errors.Add($"  [Preference]: Staff ID '{p.StaffID}' is not a known field worker.");
+        foreach (var t in record.Teams.Where(t => !string.IsNullOrWhiteSpace(t.TeamLeader) && Roster.FindStaff(t.TeamLeader) == null))
+            errors.Add($"  [Team]: Team leader '{t.TeamLeader}' is not a known field worker.");
         ServerSyncCommands.EnsureLicensesLoaded();
         foreach (var p in record.Preferences)
         {
@@ -187,10 +274,16 @@ internal static partial class SheetMapper
                     errors.Add($"  [Preference]: Staff ID '{p.StaffID}' has Primary Skill '{primary}', which is not in their 'Licensed Skills' or 'Other Skills'.");
             }
         }
-        foreach (var id in record.AttendanceEntries
-                     .Where(e => e.StaffID > 0 && Roster.FindStaff(e.StaffID) == null)
-                     .Select(e => e.StaffID).Distinct())
-            warnings.Add($"  [Attendance Entries]: Staff ID '{id}' is not a known field worker; those punches are excluded from the attendance rollup.");
+        if (record.AttendanceEntries.Any(e => e.StaffID <= 0))
+            errors.Add("  [Attendance Entries]: Field 'Staff ID' is required and cannot be empty.");
+        foreach (var id in record.AttendanceEntries.Where(e => e.StaffID > 0).Select(e => e.StaffID).Distinct())
+        {
+            var staff = Roster.FindStaff(id);
+            if (staff == null)
+                warnings.Add($"  [Attendance Entries]: Staff ID '{id}' is not a known field worker; those punches are excluded from the attendance rollup.");
+            else if (!Roster.IsActiveOn(staff, scheduleDate))
+                warnings.Add($"  [Attendance Entries]: Staff ID '{id}' ({staff.ShortName}) was not employed on {scheduleDate:yyyy-MM-dd} ({Roster.DescribeInactive(staff, scheduleDate)}); those punches are excluded from the attendance rollup.");
+        }
 
         foreach (var g in record.Preferences.Where(p => p.StaffID > 0).GroupBy(p => p.StaffID).Where(g => g.Count() > 1))
             errors.Add($"  [Preference]: Duplicate Staff ID '{g.Key}' in 'WorkerPreferencesTable'.");
@@ -204,11 +297,12 @@ internal static partial class SheetMapper
         foreach (var g in record.AttendanceEntries.GroupBy(e => (e.Date, e.Time, e.StaffID, e.EntryType, e.Source)).Where(g => g.Count() > 1))
             errors.Add($"  [Attendance Entries]: Staff {g.Key.StaffID} has {g.Count()} identical {g.Key.Source} {g.Key.EntryType} punches at {g.Key.Date:dd/MM/yyyy} {g.Key.Time:HH:mm}.");
 
-        foreach (var day in record.AttendanceEntries.Where(e => e.IsApproved).GroupBy(e => (e.StaffID, e.Date)))
+        foreach (var day in record.AttendanceEntries.Where(e => e.IsApproved)
+                     .GroupBy(e => (e.StaffID, WorkingDay: DeviceSyncManager.WorkingDate(e.Date, e.Time, record.DayStartTime))))
         {
-            var ordered = day.OrderBy(e => e.Time).ToList();
+            var ordered = day.OrderBy(e => e.Date).ThenBy(e => e.Time).ToList();
             if (ordered[0].EntryType == AttendanceEntryType.CheckOut)
-                warnings.Add($"  [Attendance Entries]: Staff {day.Key.StaffID} on {day.Key.Date:dd/MM/yyyy} starts with a CheckOut and has no earlier CheckIn.");
+                warnings.Add($"  [Attendance Entries]: Staff {day.Key.StaffID} on {day.Key.WorkingDay:dd/MM/yyyy} starts with a CheckOut and has no earlier CheckIn.");
         }
 
         int pending = record.AttendanceEntries.Count(e => !e.IsApproved);
@@ -286,6 +380,150 @@ internal static partial class SheetMapper
         {
             AppLogger.Warn($"[ScheduleManager] Primary Skill dropdown failed: {ex.Message}");
             return null;
+        }
+    }
+
+    // =========================================================================
+    // 2b. PROJECT ID AUTO-DERIVATION (Daily Schedule -> Attendance Entries)
+    // =========================================================================
+    private static void SyncEntryProjectsWithSchedule(
+        dynamic? entriesSheet, List<AttendanceEntry> entries, DateOnly date,
+        IReadOnlyList<DailyProjectSchedule> slots, TimeOnly dayStartTime, TimeOnly otStartTime, bool resetTracking)
+    {
+        if (resetTracking) _autoDerivedEntryProjects.Clear();
+        var changedByKey = new Dictionary<string, string>(StringComparer.Ordinal);
+
+        foreach (var e in entries)
+        {
+            if (e.StaffID <= 0 || !DeviceSyncManager.IsInWorkingDay(e.Date, e.Time, date, dayStartTime)) continue;
+
+            string key = EntryIdentityKey(e);
+            string current = (e.ProjectID ?? string.Empty).Trim().ToUpperInvariant();
+            string scheduled = AttendanceRollupService.ScheduledProjectFor(e.StaffID, e.Time, slots, dayStartTime, otStartTime);
+
+            if (resetTracking)
+            {
+                if (current.Length == 0)
+                {
+                    if (scheduled.Length > 0)
+                    {
+                        e.ProjectID = scheduled;
+                        _autoDerivedEntryProjects[key] = scheduled;
+                        changedByKey[key] = scheduled;
+                    }
+                }
+                else if (scheduled.Length > 0 && current.Equals(scheduled, StringComparison.OrdinalIgnoreCase))
+                {
+                    _autoDerivedEntryProjects[key] = scheduled;
+                }
+                // else: manual override already persisted; not tracked.
+            }
+            else
+            {
+                bool wasAuto = _autoDerivedEntryProjects.TryGetValue(key, out string? lastAuto);
+                if (current.Length == 0)
+                {
+                    if (scheduled.Length > 0)
+                    {
+                        e.ProjectID = scheduled;
+                        _autoDerivedEntryProjects[key] = scheduled;
+                        changedByKey[key] = scheduled;
+                    }
+                    else
+                    {
+                        _autoDerivedEntryProjects.Remove(key);
+                    }
+                }
+                else if (wasAuto && current.Equals(lastAuto, StringComparison.OrdinalIgnoreCase))
+                {
+                    if (!current.Equals(scheduled, StringComparison.OrdinalIgnoreCase))
+                    {
+                        e.ProjectID = scheduled;
+                        if (scheduled.Length > 0) _autoDerivedEntryProjects[key] = scheduled;
+                        else _autoDerivedEntryProjects.Remove(key);
+                        changedByKey[key] = scheduled;
+                    }
+                }
+                else
+                {
+                    _autoDerivedEntryProjects.Remove(key); // manual override: preserve e.ProjectID
+                }
+            }
+        }
+
+        if (entriesSheet != null && changedByKey.Count > 0)
+            WriteDerivedProjectIdsToSheet(entriesSheet, changedByKey);
+    }
+
+    private static void WriteDerivedProjectIdsToSheet(dynamic entriesSheet, Dictionary<string, string> changedByKey)
+    {
+        try
+        {
+            dynamic? table = TableMapper.ResolveTable(entriesSheet, EntriesTableName);
+            dynamic? body = table?.DataBodyRange;
+            if (table == null || body == null) return;
+
+            int rows = (int)body!.Rows.Count;
+            int cols = (int)table!.ListColumns.Count;
+            object[,] header = TableMapper.GetRange2DValues(table.HeaderRowRange, 1, cols);
+            int dateCol = -1, timeCol = -1, staffCol = -1, projectCol = -1, typeCol = -1, sourceCol = -1;
+            for (int c = 1; c <= cols; c++)
+            {
+                string h = header[1, c]?.ToString()?.Trim() ?? string.Empty;
+                if (h.Equals("Date", StringComparison.OrdinalIgnoreCase)) dateCol = c;
+                else if (h.Equals("Time", StringComparison.OrdinalIgnoreCase)) timeCol = c;
+                else if (h.Equals("Staff ID", StringComparison.OrdinalIgnoreCase)) staffCol = c;
+                else if (h.Equals("Project ID", StringComparison.OrdinalIgnoreCase)) projectCol = c;
+                else if (h.Equals("Entry Type", StringComparison.OrdinalIgnoreCase)) typeCol = c;
+                else if (h.Equals("Source", StringComparison.OrdinalIgnoreCase)) sourceCol = c;
+            }
+            if (dateCol < 0 || timeCol < 0 || staffCol < 0 || projectCol < 0 || typeCol < 0 || sourceCol < 0) return;
+
+            object[,] data = TableMapper.GetRange2DValues(body, rows, cols);
+            var column = new object?[rows, 1];
+            bool dirty = false;
+            for (int r = 1; r <= rows; r++)
+            {
+                column[r - 1, 0] = data[r, projectCol];
+
+                object? dv = data[r, dateCol], tv = data[r, timeCol], sv = data[r, staffCol];
+                DateOnly rowDate;
+                if (dv is double dd) rowDate = DateOnly.FromDateTime(DateTime.FromOADate(dd));
+                else if (dv is DateTime ddt) rowDate = DateOnly.FromDateTime(ddt);
+                else if (!DateOnly.TryParse(dv?.ToString(), out rowDate)) continue;
+
+                TimeOnly rowTime;
+                if (tv is double td)
+                {
+                    int secs = (int)Math.Round((td - Math.Floor(td)) * 86400.0);
+                    rowTime = TimeOnly.FromTimeSpan(TimeSpan.FromSeconds(secs >= 86400 ? 0 : secs));
+                }
+                else if (tv is DateTime tdt) rowTime = TimeOnly.FromDateTime(tdt);
+                else if (!TimeOnly.TryParse(tv?.ToString(), out rowTime)) continue;
+
+                long staffId;
+                if (sv is double sd) staffId = (long)sd;
+                else if (!long.TryParse(sv?.ToString(), out staffId)) continue;
+
+                if (!Enum.TryParse<AttendanceEntryType>(data[r, typeCol]?.ToString()?.Trim(), true, out var et)) continue;
+                if (!Enum.TryParse<AttendanceSource>(data[r, sourceCol]?.ToString()?.Trim(), true, out var src)) continue;
+                if (staffId <= 0) continue;
+
+                string key = $"{rowDate:yyyy-MM-dd}|{rowTime:HH:mm:ss}|{staffId}|{et}|{src}";
+                if (changedByKey.TryGetValue(key, out string? newProject))
+                {
+                    column[r - 1, 0] = newProject;
+                    dirty = true;
+                }
+            }
+
+            if (!dirty) return;
+            dynamic target = entriesSheet.Range[body.Cells[1, projectCol], body.Cells[rows, projectCol]];
+            target.Value2 = column;
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn($"[ScheduleManager] WriteDerivedProjectIdsToSheet warning: {ex.Message}");
         }
     }
 
@@ -373,12 +611,6 @@ internal static partial class SheetMapper
                 _loadedDate = date;
                 _hasUnsavedRecordEdits = false;
 
-                // Staff dropdowns: workers employed on this date + anyone this record already refers to.
-                var referenced = record.AttendanceEntries.Select(e => e.StaffID)
-                    .Concat(record.WorkerAttendance.Select(a => a.StaffID))
-                    .Concat(record.Projects.SelectMany(p => p.Workers).Select(w => Roster.FindStaff(w)?.Id ?? 0))
-                    .Where(id => id > 0).ToList();
-
                 // SkillsTable: an empty record (first load / fresh server) keeps the template-seeded rows instead of wiping them.
                 bool writeSkills = record.Skills.Count > 0;
                 if (!writeSkills && prefSheet != null)
@@ -388,12 +620,10 @@ internal static partial class SheetMapper
                 if (!writeProjectSkillReqs && prefSheet != null)
                     record.ProjectSkillRequirements = TableMapper.ExtractFromTable<ProjectSkillRequirement>((object)prefSheet!, "ProjectRequirementsTable");
                 BoardContext.SetProjectSkillRequirements(record.ProjectSkillRequirements);
-                ServerSyncCommands.SyncLookupLists(date, referenced);
+                ServerSyncCommands.SyncLookupLists(date);
 
                 // Preferences & teams (names are UI-only helpers resolved from the roster)
-                // Preferences are global, not dated: only currently employed field workers are shown (and re-saved).
-                DateOnly todayDate = DateOnly.FromDateTime(DateTime.Today);
-                record.Preferences = record.Preferences.Where(p => Roster.IsActiveOn(p.StaffID, todayDate)).ToList();
+                // Preferences are global, not dated: resigned field workers are kept visible and preserved on save.
                 foreach (var p in record.Preferences) p.StaffName = Roster.NameOf(p.StaffID, p.StaffName);
                 foreach (var t in record.Teams)
                     if (t.TeamLeaderStaffID > 0) t.TeamLeader = Roster.NameOf(t.TeamLeaderStaffID, t.TeamLeader);
@@ -409,26 +639,38 @@ internal static partial class SheetMapper
                     TableMapper.PopulateTableSafe<WorkerPreference>((object)prefSheet!, "WorkerPreferencesTable", record.Preferences);
                 }
 
-                // The loaded date's cut-off / OT start go on the sheet first so Reload (and the rollup below) use them.
-                if (attendanceSheet != null) WriteAttendanceParameters((object)attendanceSheet!, record.LateCutOffTime, record.OTStartTime);
+                // The loaded date's day start / cut-off / OT start go on the sheet first so Reload (and the rollup below) use them.
+                if (attendanceSheet != null) WriteAttendanceParameters((object)attendanceSheet!, record.DayStartTime, record.LateCutOffTime, record.OTStartTime);
 
-                // Context (requirements, icons, cut-off, OT start) comes from the workbook; prefs/teams from the record just loaded.
+                // Context (requirements, icons, day start, cut-off, OT start) comes from the workbook; prefs/teams from the record just loaded.
                 BoardContext.Reload(wbObj);
                 BoardContext.SetPreferences(record.Preferences, record.Teams);
 
-                var entries = record.AttendanceEntries.OrderBy(e => e.Date).ThenBy(e => e.Time).ToList();
+                SyncEntryProjectsWithSchedule(null, record.AttendanceEntries, date, record.Projects, BoardContext.DayStartTime, BoardContext.OTStartTime, resetTracking: true);
+
+                var entries = record.AttendanceEntries
+                    .OrderBy(e => e.Date).ThenBy(e => e.Time).ToList();
+                var dayEntries = entries
+                    .Where(e => DeviceSyncManager.IsInWorkingDay(e.Date, e.Time, date, BoardContext.DayStartTime)).ToList();
                 foreach (var e in entries) e.StaffName = Roster.NameOf(e.StaffID, e.StaffName);
+                _loadedEntryFingerprints = new HashSet<string>(entries.Select(EntryFingerprint), StringComparer.Ordinal);
                 LoadingOverlay.Report("Populating attendance entries...");
                 if (entriesSheet != null)
+                {
+                    ClearTableFilter(entriesSheet, EntriesTableName);
                     TableMapper.PopulateTableSafe<AttendanceEntry>((object)entriesSheet!, EntriesTableName, entries);
+                    ApplyDateFilter(entriesSheet, EntriesTableName, date);
+                }
 
                 LoadingOverlay.Report("Rendering daily schedule board...");
-                ScheduleBoardMapper.Render((object)board!, date, record.Projects, entries, autoPopulate: true);
+                ScheduleBoardMapper.Render((object)board!, date, record.Projects, dayEntries, autoPopulate: true);
 
                 if (attendanceSheet != null)
                 {
                     LoadingOverlay.Report("Rolling up daily attendances...");
-                    var rows = AttendanceRollupService.Run(date, entries.Where(e => e.Date == date).ToList(), record.Projects, record.WorkerAttendance, BoardContext.LateCutOff, BoardContext.OTStartTime);
+                    var rows = AttendanceRollupService.Run(date,
+                        dayEntries,
+                        record.Projects, record.WorkerAttendance, BoardContext.DayStartTime, BoardContext.LateCutOff, BoardContext.OTStartTime);
                     WriteAttendanceRows(attendanceSheet, rows);
                 }
             });
@@ -439,23 +681,26 @@ internal static partial class SheetMapper
         }
     }
 
-    /// <summary>Writes the per-date Late Cut-Off (C2) and OT Start (D2) times as Excel time serials. Call inside RunFrozen.</summary>
-    private static void WriteAttendanceParameters(dynamic attendanceSheet, TimeOnly lateCutOff, TimeOnly otStart)
+    /// <summary>
+    /// Writes the per-date Day Start (C2), Late Cut-Off (D2) and OT Start (E2) times as Excel time serials in strict
+    /// 24-hour "hh:mm". Call inside RunFrozen.
+    /// </summary>
+    private static void WriteAttendanceParameters(dynamic attendanceSheet, TimeOnly dayStart, TimeOnly lateCutOff, TimeOnly otStart)
+    {
+        WriteTimeParameter(attendanceSheet, DayStartCell, dayStart);
+        WriteTimeParameter(attendanceSheet, LateCutOffCell, lateCutOff);
+        WriteTimeParameter(attendanceSheet, OtStartCell, otStart);
+    }
+
+    private static void WriteTimeParameter(dynamic attendanceSheet, string cellAddress, TimeOnly value)
     {
         try
         {
-            dynamic late = attendanceSheet.Range[LateCutOffCell];
-            late.Value2 = lateCutOff.ToTimeSpan().TotalDays;
-            late.NumberFormat = "hh:mm";
+            dynamic cell = attendanceSheet.Range[cellAddress];
+            cell.Value2 = value.ToTimeSpan().TotalDays;
+            cell.NumberFormat = "hh:mm";
         }
-        catch (Exception ex) { AppLogger.Warn($"[ScheduleManager] Writing {LateCutOffCell} failed: {ex.Message}"); }
-        try
-        {
-            dynamic ot = attendanceSheet.Range[OtStartCell];
-            ot.Value2 = otStart.ToTimeSpan().TotalDays;
-            ot.NumberFormat = "hh:mm";
-        }
-        catch (Exception ex) { AppLogger.Warn($"[ScheduleManager] Writing {OtStartCell} failed: {ex.Message}"); }
+        catch (Exception ex) { AppLogger.Warn($"[ScheduleManager] Writing {cellAddress} failed: {ex.Message}"); }
     }
 
     /// <summary>Re-evaluates WorkerPreferencesTable[Licensed Skills] from the cached StaffManager licences (bulk read/write).</summary>
@@ -522,6 +767,153 @@ internal static partial class SheetMapper
         }
     }
 
+    /// <summary>
+    /// Strips Team / Skill references that no longer exist in TeamTable / SkillsTable (and licensed skills) from
+    /// WorkerPreferencesTable and ProjectRequirementsTable, both in the record and on the sheet (bulk column writes).
+    /// </summary>
+    private static void PruneOrphanedTeamAndSkillReferences(dynamic prefSheet, ScheduleRecord record)
+    {
+        try
+        {
+            var validTeams = new HashSet<string>(
+                record.Teams.Select(t => (t.TeamName ?? string.Empty).Trim()).Where(n => n.Length > 0),
+                StringComparer.OrdinalIgnoreCase);
+            bool pruneTeams = validTeams.Count > 0;
+            var validSkills = new HashSet<string>(BoardContext.AllConfiguredSkills(), StringComparer.OrdinalIgnoreCase);
+            bool pruneSkills = record.Skills.Any(s => !string.IsNullOrWhiteSpace(s.SkillName));
+            if (!pruneTeams && !pruneSkills) return;
+
+            int removed = 0;
+
+            // ---- in-memory record ----
+            foreach (var p in record.Preferences)
+            {
+                if (pruneTeams) removed += p.Team.RemoveAll(s => !validTeams.Contains(s.Trim()));
+                if (pruneSkills)
+                {
+                    removed += p.OtherSkills.RemoveAll(s => !validSkills.Contains(s.Trim()));
+                    removed += p.BlacklistedSkills.RemoveAll(s => !validSkills.Contains(s.Trim()));
+                    if (!string.IsNullOrWhiteSpace(p.PrimarySkill) && !validSkills.Contains(p.PrimarySkill.Trim()))
+                    {
+                        p.PrimarySkill = string.Empty;
+                        removed++;
+                    }
+                }
+            }
+            if (pruneSkills)
+                foreach (var r in record.ProjectSkillRequirements)
+                    removed += r.Skills.RemoveAll(s => !validSkills.Contains(s.Trim()));
+
+            // ---- worksheet (bulk 2D column writes) ----
+            int sheetRemoved = 0;
+            RunFrozen(() =>
+            {
+                if (pruneTeams) sheetRemoved += PruneMultiSelectColumn(prefSheet, "WorkerPreferencesTable", "Team", validTeams);
+                if (pruneSkills)
+                {
+                    sheetRemoved += PruneMultiSelectColumn(prefSheet, "WorkerPreferencesTable", "Other Skills", validSkills);
+                    sheetRemoved += PruneMultiSelectColumn(prefSheet, "WorkerPreferencesTable", "Blacklisted Skills", validSkills);
+                    sheetRemoved += PruneSingleValueColumn(prefSheet, "WorkerPreferencesTable", "Primary Skill", validSkills);
+                    sheetRemoved += PruneMultiSelectColumn(prefSheet, "ProjectRequirementsTable", "Required Skills", validSkills);
+                }
+            });
+
+            removed = Math.Max(removed, sheetRemoved);
+            if (removed > 0)
+            {
+                AppLogger.Info($"[ScheduleManager] Cleaned {removed} orphaned team/skill reference(s) from Preference tables.");
+                SheetOperations.ShowStatusConfirmation($"Cleaned {removed} orphaned team/skill reference(s) from Preference tables.");
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn($"[ScheduleManager] PruneOrphanedTeamAndSkillReferences failed: {ex.Message}");
+        }
+    }
+
+    private static dynamic? GetTableColumnBody(dynamic sheet, string tableName, string header, out int rowCount)
+    {
+        rowCount = 0;
+        dynamic? table = null;
+        try { table = sheet.ListObjects[tableName]; } catch { }
+        if (table == null) return null;
+        dynamic tbl = table!;
+        if (tbl.DataBodyRange == null) return null;
+        foreach (dynamic col in tbl.ListColumns)
+        {
+            string name = ((string?)col.Name ?? string.Empty).Trim();
+            if (!name.Equals(header, StringComparison.OrdinalIgnoreCase)) continue;
+            if (col.DataBodyRange == null) return null;
+            rowCount = (int)tbl.DataBodyRange.Rows.Count;
+            return col.DataBodyRange;
+        }
+        return null;
+    }
+
+    private static int PruneMultiSelectColumn(dynamic sheet, string tableName, string header, HashSet<string> valid)
+    {
+        try
+        {
+            dynamic? body = GetTableColumnBody(sheet, tableName, header, out int rowCount);
+            if (body == null || rowCount <= 0) return 0;
+            object[,] values = TableMapper.GetRange2DValues(body, rowCount, 1);
+            var grid = new object[rowCount, 1];
+            int removed = 0;
+            bool anyChanged = false;
+            for (int r = 1; r <= rowCount; r++)
+            {
+                object? raw = values[r, 1];
+                string current = raw?.ToString() ?? string.Empty;
+                var tokens = RuleEvaluator.SplitMultiSelectTokens(current);
+                var kept = tokens.Where(t => valid.Contains(t.Trim())).ToList();
+                if (kept.Count != tokens.Count)
+                {
+                    removed += tokens.Count - kept.Count;
+                    anyChanged = true;
+                    grid[r - 1, 0] = string.Join(", ", kept);
+                }
+                else grid[r - 1, 0] = raw ?? string.Empty;
+            }
+            if (anyChanged) ((dynamic)body!).Value2 = grid;
+            return removed;
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn($"[ScheduleManager] Pruning {tableName}[{header}] failed: {ex.Message}");
+            return 0;
+        }
+    }
+
+    private static int PruneSingleValueColumn(dynamic sheet, string tableName, string header, HashSet<string> valid)
+    {
+        try
+        {
+            dynamic? body = GetTableColumnBody(sheet, tableName, header, out int rowCount);
+            if (body == null || rowCount <= 0) return 0;
+            object[,] values = TableMapper.GetRange2DValues(body, rowCount, 1);
+            var grid = new object[rowCount, 1];
+            int removed = 0;
+            for (int r = 1; r <= rowCount; r++)
+            {
+                object? raw = values[r, 1];
+                string current = (raw?.ToString() ?? string.Empty).Trim();
+                if (current.Length > 0 && !valid.Contains(current))
+                {
+                    grid[r - 1, 0] = string.Empty;
+                    removed++;
+                }
+                else grid[r - 1, 0] = raw ?? string.Empty;
+            }
+            if (removed > 0) ((dynamic)body!).Value2 = grid;
+            return removed;
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn($"[ScheduleManager] Pruning {tableName}[{header}] failed: {ex.Message}");
+            return 0;
+        }
+    }
+
     private static void WriteAttendanceRows(dynamic attendanceSheet, List<DailyWorkerAttendance> rows)
     {
         foreach (var r in rows) r.StaffName = Roster.NameOf(r.StaffID, r.StaffName);
@@ -575,12 +967,16 @@ internal static partial class SheetMapper
                     ? TableMapper.ExtractFromTable<AttendanceEntry>((object)entriesSheet!, EntriesTableName)
                     : new List<AttendanceEntry>();
 
+                SyncEntryProjectsWithSchedule(entriesSheet, entries, date.Value, slots, BoardContext.DayStartTime, BoardContext.OTStartTime, resetTracking: false);
+
                 ScheduleBoardMapper.Render((object)board!, date.Value, slots, entries);
 
                 if (rollup && attendanceSheet != null)
                 {
                     var existing = TableMapper.ExtractFromTable<DailyWorkerAttendance>((object)attendanceSheet!, MasterTableName);
-                    var rows = AttendanceRollupService.Run(date.Value, entries.Where(e => e.Date == date.Value).ToList(), slots, existing, BoardContext.LateCutOff, BoardContext.OTStartTime);
+                    var rows = AttendanceRollupService.Run(date.Value,
+                        entries.Where(e => DeviceSyncManager.IsInWorkingDay(e.Date, e.Time, date.Value, BoardContext.DayStartTime)).ToList(),
+                        slots, existing, BoardContext.DayStartTime, BoardContext.LateCutOff, BoardContext.OTStartTime);
                     if (Signature(rows) != Signature(existing)) WriteAttendanceRows(attendanceSheet, rows);
                 }
             });
@@ -655,16 +1051,17 @@ internal static partial class SheetMapper
             bool isEntries = EntriesAliases.Any(a => a.Equals(name, StringComparison.OrdinalIgnoreCase));
             bool isAttendance = MasterSheetAliases.Any(a => a.Equals(name, StringComparison.OrdinalIgnoreCase));
 
-            // C2 (Late Cut-Off) / D2 (OT Start): per-date parameters. Decide here; confirm + refresh on the macro thread.
+            // C2 (Day Start) / D2 (Late Cut-Off) / E2 (OT Start): per-date parameters. Decide here; confirm + refresh on the macro thread.
             if (isAttendance && row <= 2)
             {
                 dynamic xlApp = ExcelDnaUtil.Application;
+                bool hitsDayStart = Hits(xlApp, target, sheet.Range[DayStartCell]);
                 bool hitsLate = Hits(xlApp, target, sheet.Range[LateCutOffCell]);
                 bool hitsOt = Hits(xlApp, target, sheet.Range[OtStartCell]);
-                if (hitsLate || hitsOt)
+                if (hitsDayStart || hitsLate || hitsOt)
                 {
                     object attObj = sheet;
-                    ExcelAsyncUtil.QueueAsMacro(() => OnAttendanceParameterChanged(attObj, hitsLate, hitsOt));
+                    ExcelAsyncUtil.QueueAsMacro(() => OnAttendanceParameterChanged(attObj, hitsDayStart, hitsLate, hitsOt));
                     return;
                 }
             }
@@ -683,28 +1080,32 @@ internal static partial class SheetMapper
     }
 
     /// <summary>
-    /// Macro thread. A non-default cut-off / OT start is confirmed first (with a stronger note on past dates);
+    /// Macro thread. A non-default day start / cut-off / OT start is confirmed first (with a stronger note on past dates);
     /// declining restores the previous values. Accepted changes mark the record edited (past-record guard) and
     /// re-run the rollup. Blank / unreadable input falls back to the previous value.
     /// </summary>
-    private static void OnAttendanceParameterChanged(object attendanceObj, bool hitsLate, bool hitsOt)
+    private static void OnAttendanceParameterChanged(object attendanceObj, bool hitsDayStart, bool hitsLate, bool hitsOt)
     {
         try
         {
             object attendanceSheet = attendanceObj;
+            TimeOnly prevDayStart = BoardContext.DayStartTime;
             TimeOnly prevLate = BoardContext.LateCutOff;
             TimeOnly prevOt = BoardContext.OTStartTime;
+            TimeOnly newDayStart = hitsDayStart ? BoardContext.ReadTimeCell(attendanceSheet, DayStartCell, prevDayStart) : prevDayStart;
             TimeOnly newLate = hitsLate ? BoardContext.ReadTimeCell(attendanceSheet, LateCutOffCell, prevLate) : prevLate;
             TimeOnly newOt = hitsOt ? BoardContext.ReadTimeCell(attendanceSheet, OtStartCell, prevOt) : prevOt;
 
-            if (newLate == prevLate && newOt == prevOt)
+            if (newDayStart == prevDayStart && newLate == prevLate && newOt == prevOt)
             {
                 // Same value (or junk / blank): just put the normalized times back.
-                RunFrozen(() => WriteAttendanceParameters(attendanceSheet, prevLate, prevOt));
+                RunFrozen(() => WriteAttendanceParameters(attendanceSheet, prevDayStart, prevLate, prevOt));
                 return;
             }
 
             var notes = new List<string>();
+            if (newDayStart != prevDayStart && newDayStart != BoardContext.DefaultDayStartTime)
+                notes.Add($"  Day Start Time: {newDayStart:HH:mm} (default {BoardContext.DefaultDayStartTime:HH:mm})");
             if (newLate != prevLate && newLate != BoardContext.DefaultLateCutOff)
                 notes.Add($"  Late Cut-Off Time: {newLate:HH:mm} (default {BoardContext.DefaultLateCutOff:HH:mm})");
             if (newOt != prevOt && newOt != BoardContext.DefaultOtStartTime)
@@ -725,13 +1126,13 @@ internal static partial class SheetMapper
 
                 if (answer != DialogResult.Yes)
                 {
-                    RunFrozen(() => WriteAttendanceParameters(attendanceSheet, prevLate, prevOt));
+                    RunFrozen(() => WriteAttendanceParameters(attendanceSheet, prevDayStart, prevLate, prevOt));
                     SheetOperations.ShowStatusConfirmation("Attendance parameter change reverted.");
                     return;
                 }
             }
 
-            RunFrozen(() => WriteAttendanceParameters(attendanceSheet, newLate, newOt));
+            RunFrozen(() => WriteAttendanceParameters(attendanceSheet, newDayStart, newLate, newOt));
             RegisterRecordEdit();
             RefreshDerived(reloadContext: true, rollup: true);
         }
@@ -923,25 +1324,27 @@ internal static partial class SheetMapper
         if (entriesSheet == null || date == null) return (0, 0, punches.Count);
 
         DateOnly day = date!.Value;
-        var forDate = punches.Where(p => DateOnly.FromDateTime(p.Timestamp) == day).ToList();
-        int added = 0, duplicates = 0, unknown = punches.Count - forDate.Count;
+        TimeOnly dayStart = DeviceSyncManager.DefaultDayStartTime;
+        int added = 0, duplicates = 0, unknown = 0;
         bool wrote = false;
 
         NormalizeApprovals(entriesSheet);
         RunFrozen(() =>
         {
             var existing = TableMapper.ExtractFromTable<AttendanceEntry>((object)entriesSheet!, EntriesTableName);
-            var (clean, removedExistingDuplicates) = DeviceSyncManager.DeduplicateExisting(existing);
-            var result = DeviceSyncManager.BuildEntries(forDate, clean, id => Roster.FindStaff(id) != null);
+            var (clean, removedExistingDuplicates) = DeviceSyncManager.DeduplicateExisting(existing, dayStart);
+            var result = DeviceSyncManager.BuildEntries(punches, clean, id => Roster.FindStaff(id) != null, dayStart);
             added = result.NewEntries.Count;
             duplicates = result.Duplicates + removedExistingDuplicates;
             unknown += result.UnknownStaff;
-            if (added == 0 && removedExistingDuplicates == 0) return;
+            if (added == 0 && removedExistingDuplicates == 0) { ApplyDateFilter(entriesSheet, EntriesTableName, day); return; }
 
             var all = clean.Concat(result.NewEntries).OrderBy(e => e.Date).ThenBy(e => e.Time).ToList();
-            ServerSyncCommands.SyncLookupLists(day, all.Select(e => e.StaffID));
+            ServerSyncCommands.SyncLookupLists(day);
             foreach (var e in all) e.StaffName = Roster.NameOf(e.StaffID, e.StaffName);
+            ClearTableFilter(entriesSheet, EntriesTableName);
             TableMapper.PopulateTableSafe<AttendanceEntry>((object)entriesSheet!, EntriesTableName, all);
+            ApplyDateFilter(entriesSheet, EntriesTableName, day);
             wrote = true;
         });
 
@@ -951,6 +1354,70 @@ internal static partial class SheetMapper
             RefreshDerived(reloadContext: false, rollup: true);
         }
         return (added, duplicates, unknown);
+    }
+
+    /// <summary>Thumbprint/any entries currently on the Attendance Entries sheet. Macro thread only.</summary>
+    internal static List<AttendanceEntry> ReadCurrentSheetEntries()
+    {
+        dynamic xlApp = ExcelDnaUtil.Application;
+        dynamic? wb = xlApp.ActiveWorkbook;
+        if (wb == null) return new List<AttendanceEntry>();
+        dynamic? entriesSheet = SheetMapperHelper.ResolveSheetSafely((object)wb!, EntriesAliases, "Attendance Entries");
+        if (entriesSheet == null) return new List<AttendanceEntry>();
+        return TableMapper.ExtractFromTable<AttendanceEntry>((object)entriesSheet!, EntriesTableName);
+    }
+
+    /// <summary>
+    /// Merges already-persisted terminal entries (all dates) into the open sheet and filters the Date column to
+    /// <paramref name="selectedDate"/>. Does not mark the record edited (rows are already in the database). Macro thread only.
+    /// Returns (rows added in total, rows added within the selected working day).
+    /// </summary>
+    internal static (int TotalAdded, int AddedForSelectedDate) MergePersistedEntries(IReadOnlyList<AttendanceEntry> persistedEntries, DateOnly selectedDate)
+    {
+        dynamic xlApp = ExcelDnaUtil.Application;
+        dynamic? wb = xlApp.ActiveWorkbook;
+        if (wb == null) return (0, 0);
+        dynamic? entriesSheet = SheetMapperHelper.ResolveSheetSafely((object)wb!, EntriesAliases, "Attendance Entries");
+        if (entriesSheet == null) return (0, 0);
+
+        if (persistedEntries.Count == 0)
+        {
+            RunFrozen(() => ApplyDateFilter(entriesSheet, EntriesTableName, selectedDate));
+            return (0, 0);
+        }
+
+        int totalAdded = 0, addedForDate = 0;
+        bool wrote = false;
+        NormalizeApprovals(entriesSheet);
+        RunFrozen(() =>
+        {
+            var existing = TableMapper.ExtractFromTable<AttendanceEntry>((object)entriesSheet!, EntriesTableName);
+            var (clean, removedExistingDuplicates) = DeviceSyncManager.DeduplicateExisting(existing, DeviceSyncManager.DefaultDayStartTime);
+            var toAdd = persistedEntries.Where(n => !clean.Any(c =>
+                (c.Date == n.Date && c.Time == n.Time && c.StaffID == n.StaffID && c.EntryType == n.EntryType && c.Source == n.Source) ||
+                (c.Source == AttendanceSource.Thumbprint && n.Source == AttendanceSource.Thumbprint && c.StaffID == n.StaffID &&
+                 Math.Abs((c.Date.ToDateTime(c.Time) - n.Date.ToDateTime(n.Time)).TotalSeconds) <= 60))).ToList();
+            if (toAdd.Count == 0 && removedExistingDuplicates == 0)
+            {
+                ApplyDateFilter(entriesSheet, EntriesTableName, selectedDate);
+                return;
+            }
+
+            var all = clean.Concat(toAdd).OrderBy(e => e.Date).ThenBy(e => e.Time).ToList();
+            ServerSyncCommands.SyncLookupLists(selectedDate);
+            foreach (var e in all) e.StaffName = Roster.NameOf(e.StaffID, e.StaffName);
+            ClearTableFilter(entriesSheet, EntriesTableName);
+            TableMapper.PopulateTableSafe<AttendanceEntry>((object)entriesSheet!, EntriesTableName, all);
+            ApplyDateFilter(entriesSheet, EntriesTableName, selectedDate);
+            // Already persisted: keep PastRecordGuard from treating them as unsaved manual edits.
+            foreach (var e in toAdd) _loadedEntryFingerprints.Add(EntryFingerprint(e));
+            totalAdded = toAdd.Count;
+            addedForDate = toAdd.Count(e => DeviceSyncManager.IsInWorkingDay(e.Date, e.Time, selectedDate, BoardContext.DayStartTime));
+            wrote = true;
+        });
+
+        if (wrote) RefreshDerived(reloadContext: false, rollup: true);
+        return (totalAdded, addedForDate);
     }
 
     /// <summary>Called after the ribbon's "Remove Duplicates" deleted rows: mark the record edited and rebuild the derived views.</summary>

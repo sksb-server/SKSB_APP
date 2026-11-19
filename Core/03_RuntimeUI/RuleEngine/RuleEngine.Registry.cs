@@ -21,6 +21,7 @@ public sealed class PropertyRuleDescriptor
     public string[] Sources { get; init; } = Array.Empty<string>();
     public bool IsRequired { get; init; }
     public bool IsWarningOnly { get; init; }
+    public bool IsReadOnly { get; init; }
     public bool IsMultiSelect { get; init; }
     public string? CountTargetHeader { get; init; }
     public bool AllowNonNegativeZero { get; init; } = true;
@@ -45,6 +46,9 @@ public sealed class PropertyRuleDescriptor
     public bool IsStrictlyCalculated =>
         (CalculateRule != null && CalculateRule.Mode == CalculationMode.Always) ||
         RollupRules.Any(r => r.Mode == CalculationMode.Always);
+
+    /// <summary>True when users may not edit the column (strictly calculated or declared read-only).</summary>
+    public bool IsLocked => IsStrictlyCalculated || IsReadOnly;
 
     /// <summary>True when C# declares a formula/rollup for the column (any mode); legacy Excel formulas are stripped.</summary>
     public bool HasCSharpFormula => CalculateRule != null || RollupRules.Count > 0;
@@ -208,6 +212,7 @@ public static partial class RuleRegistry
                 Sources = ruleAttr?.Sources ?? Array.Empty<string>(),
                 IsRequired = isRequired,
                 IsWarningOnly = isWarningOnly,
+                IsReadOnly = ruleAttr?.IsReadOnly ?? false,
                 IsMultiSelect = ruleAttr?.IsMultiSelect ?? false,
                 CountTargetHeader = ruleAttr?.CountTargetHeader,
                 AllowNonNegativeZero = ruleAttr?.AllowNonNegativeZero ?? true,
@@ -271,7 +276,7 @@ public static partial class RuleRegistry
     /// </summary>
     internal static void ApplyCalculatedColumnLock(dynamic targetRange, PropertyRuleDescriptor? rule)
     {
-        if (targetRange == null || rule == null || !rule!.IsStrictlyCalculated) return;
+        if (targetRange == null || rule == null || !rule!.IsLocked) return;
         try
         {
             try { targetRange!.Validation.Delete(); } catch { }
@@ -280,15 +285,29 @@ public static partial class RuleRegistry
             targetRange!.Validation.Add(7, 1, 1, "=FALSE");
             targetRange.Validation.IgnoreBlank = false;
 
-            string formulaText = rule!.DisplayFormula ?? "Calculated automatically by SKSB.";
-            if (formulaText.Length > 220) formulaText = formulaText.Substring(0, 220);
+            string inputTitle, inputMessage, errorTitle, error;
+            if (rule!.IsStrictlyCalculated)
+            {
+                string formulaText = rule.DisplayFormula ?? "Calculated automatically by SKSB.";
+                if (formulaText.Length > 220) formulaText = formulaText.Substring(0, 220);
+                inputTitle = "Formula Evaluated Cell (Locked)";
+                inputMessage = formulaText;
+                errorTitle = "Locked Calculated Column";
+                error = $"'{rule.HeaderName}' is automatically calculated ({formulaText}) and cannot be edited manually.";
+            }
+            else
+            {
+                inputTitle = "Read-Only Column (Locked)";
+                inputMessage = "Managed automatically by SKSB and cannot be edited manually.";
+                errorTitle = "Read-Only Column";
+                error = $"'{rule.HeaderName}' is managed automatically by SKSB and cannot be edited manually.";
+            }
 
-            targetRange.Validation.InputTitle = "Formula Evaluated Cell (Locked)";
-            targetRange.Validation.InputMessage = formulaText;
+            targetRange.Validation.InputTitle = inputTitle;
+            targetRange.Validation.InputMessage = inputMessage;
             targetRange.Validation.ShowInput = true;
 
-            targetRange.Validation.ErrorTitle = "Locked Calculated Column";
-            string error = $"'{rule.HeaderName}' is automatically calculated ({formulaText}) and cannot be edited manually.";
+            targetRange.Validation.ErrorTitle = errorTitle;
             targetRange.Validation.ErrorMessage = error.Length > 255 ? error.Substring(0, 255) : error;
             targetRange.Validation.ShowError = true;
         }
@@ -363,6 +382,18 @@ public static partial class RuleRegistry
                                 }
                                 ApplyColumnNumberFormat(table, c, archCell, rule);
                                 ApplyCalculatedColumnLock(calcRange, rule);
+                            }
+                            catch { }
+                            continue;
+                        }
+
+                        if (rule.IsReadOnly)
+                        {
+                            try
+                            {
+                                dynamic lockRange = (bodyRange != null) ? table.ListColumns[c].DataBodyRange : archCell;
+                                ApplyColumnNumberFormat(table, c, archCell, rule);
+                                ApplyCalculatedColumnLock(lockRange, rule);
                             }
                             catch { }
                             continue;

@@ -1,6 +1,7 @@
 ﻿namespace SKSB_App.ScheduleManager;
 
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using SKSB_App.Core.WorkbookOpen.Sheet;
@@ -11,8 +12,10 @@ using System.Windows.Forms;
 using ExcelDna.Integration;
 using ExcelDna.Integration.CustomUI;
 using SKSB_App.Core.Diagnostics;
+using SKSB_App.Core.Integration.Database;
 using SKSB_App.Core.RuntimeUI.Ribbon;
 using SKSB_App.Core.ThumbprintSync;
+using SKSB_App.Core.Types;
 using SKSB_App.Core.WorkbookSave.Entry;
 
 [ComVisible(true)]
@@ -61,7 +64,7 @@ public class RibbonController : ManagerRibbonBase
                           supertip='Rebuilds Daily Attendances and the board check-in times from the approved Attendance Entries.' />
                   <button id='btnSyncTerminal' label='Sync Thumbprint Terminal' size='large' imageMso='AccessRefreshAllLists' onAction='OnSyncTerminalClicked'
                           screentip='Sync Thumbprint Terminal'
-                          supertip='Reads punches from the attendance terminal and appends the new ones to Attendance Entries (Source = Thumbprint).' />
+                          supertip='Reads all punches from the attendance terminal, saves new entries across all dates to the database, and refreshes the current day.' />
                 </group>";
 
     // =========================================================================
@@ -95,49 +98,73 @@ public class RibbonController : ManagerRibbonBase
 
     public void OnSyncTerminalClicked(IRibbonControl control)
     {
-        // Read the date on the macro thread, talk to the terminal on a worker thread, write back on the macro thread.
+        // Read state on the macro thread, talk to the terminal/database on a worker thread, write back on the macro thread.
         ExcelAsyncUtil.QueueAsMacro(() =>
         {
             DateOnly date = Events.CurrentDate();
-            if (date < DateOnly.FromDateTime(DateTime.Today) &&
-                !PastRecordGuard.ConfirmPastRecordEdit(SheetMapper.GuardSession, date, "Schedule Manager"))
-            {
-                SheetOperations.ShowStatusConfirmation("Terminal sync cancelled.");
-                return;
-            }
-            AppLogger.Info($"[ScheduleManager] Syncing thumbprint terminal ({DeviceSyncManager.DefaultIp}) for {date:yyyy-MM-dd}...");
+            bool isOnline = ServerEnvironment.IsOnline;
             string? addinDir = null;
             try { addinDir = Path.GetDirectoryName(ExcelDnaUtil.XllPath); } catch { }
-            try { ((dynamic)ExcelDnaUtil.Application).StatusBar = $"Syncing thumbprint terminal ({DeviceSyncManager.DefaultIp}) for {date:dd MMM yyyy}..."; } catch { }
+
+            if (!isOnline) { SyncTerminalOffline(date, addinDir); return; }
+
+            var knownStaffIds = Roster.Staff.Select(s => s.Id).ToHashSet();
+            var sheetThumbprintEntries = SheetMapper.ReadCurrentSheetEntries().Where(e => e.Source == AttendanceSource.Thumbprint).ToList();
+            TimeOnly dayStart = DeviceSyncManager.DefaultDayStartTime;
+            SetStatus($"Syncing all punches from thumbprint terminal ({DeviceSyncManager.DefaultIp})...");
+            AppLogger.Info($"[ScheduleManager] Syncing all punches from thumbprint terminal ({DeviceSyncManager.DefaultIp})...");
+
             Task.Run(async () =>
             {
                 try
                 {
-                    var punches = await DeviceSyncManager.FetchPunchesAsync(since: date, addinDirectory: addinDir);
+                    var punches = await DeviceSyncManager.FetchPunchesAsync(since: null, addinDirectory: addinDir);
+                    if (punches.Count == 0)
+                    {
+                        ExcelAsyncUtil.QueueAsMacro(() =>
+                        {
+                            SetStatus(false);
+                            MessageBox.Show($"Terminal {DeviceSyncManager.DefaultIp}: 0 punches found on the terminal.",
+                                "Thumbprint Sync", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        });
+                        return;
+                    }
+
+                    static DateOnly WorkDay(DateOnly d, TimeOnly t, TimeOnly start) => t < start ? d.AddDays(-1) : d;
+                    DateOnly firstDate = DateOnly.FromDateTime(punches.Min(p => p.Timestamp));
+                    DateOnly lastDate = DateOnly.FromDateTime(punches.Max(p => p.Timestamp));
+                    var dbEntries = ServerSyncCommands.FetchThumbprintEntriesSince(firstDate.AddDays(-1));
+                    var existing = dbEntries.Concat(sheetThumbprintEntries).ToList();
+
+                    var (newEntries, duplicates, unknown) = DeviceSyncManager.BuildEntries(punches, existing, id => knownStaffIds.Contains(id), dayStart);
+                    int savedToDb = newEntries.Count > 0 ? ServerDispatcher.InsertAttendanceEntries(newEntries) : 0;
+
+                    int totalDays = punches.Select(p => WorkDay(DateOnly.FromDateTime(p.Timestamp), TimeOnly.FromDateTime(p.Timestamp), dayStart)).Distinct().Count();
+                    int savedDays = newEntries.Select(e => WorkDay(e.Date, e.Time, dayStart)).Distinct().Count();
+
                     ExcelAsyncUtil.QueueAsMacro(() =>
                     {
                         try
                         {
-                        var forDate = punches.Where(p => DateOnly.FromDateTime(p.Timestamp) == date).ToList();
-                        var (added, duplicates, unknown) = SheetMapper.AppendTerminalPunches(forDate, date);
-                        try { ((dynamic)ExcelDnaUtil.Application).StatusBar = false; } catch { }
-                        MessageBox.Show(
-                            $"Terminal {DeviceSyncManager.DefaultIp} ({date:dd MMM yyyy}): {forDate.Count} punch(es) read for this date.\n\n" +
-                            $"  Added to Attendance Entries : {added}\n" +
-                            $"  Already present / double scans : {duplicates}\n" +
-                            $"  Unknown staff / other dates : {unknown}\n\n" +
-                            "Use 'Save to System' to persist the new entries.",
-                            "Thumbprint Sync", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                            var allPersisted = dbEntries.Concat(newEntries).ToList();
+                            var (totalAddedToSheet, addedForDate) = SheetMapper.MergePersistedEntries(allPersisted, date);
+                            string msg =
+                                $"Terminal {DeviceSyncManager.DefaultIp}: {punches.Count} punch(es) read, {firstDate:dd MMM yyyy} - {lastDate:dd MMM yyyy} ({totalDays} working day(s)).\n\n" +
+                                $"  Saved to database (all dates) : {savedToDb}" + (savedToDb > 0 ? $" (across {savedDays} day(s))" : "") + "\n" +
+                                $"  Added to Attendance Entries : {totalAddedToSheet} ({addedForDate} on {date:dd MMM yyyy})\n" +
+                                $"  Already present / double scans : {duplicates}\n" +
+                                $"  Unknown staff : {unknown}\n\n" +
+                                $"Attendance Entries holds all dates and is filtered to {date:dd MMM yyyy} via the Date header (clear the Date filter to view all dates)." +
+                                (addedForDate > 0 ? " The current day's board and Daily Attendances were refreshed; use 'Save to System' to persist the rolled-up Daily Attendances." : "");
+                            SetStatus(false);
+                            MessageBox.Show(msg, "Thumbprint Sync", MessageBoxButtons.OK, MessageBoxIcon.Information);
                         }
                         catch (Exception ex2)
                         {
-                            AppLogger.Error("[ScheduleManager] Appending terminal punches failed", ex2);
-                            MessageBox.Show($"Appending terminal punches failed:\n\n{ex2.Message}", "Thumbprint Sync", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            AppLogger.Error("[ScheduleManager] Merging terminal punches failed", ex2);
+                            MessageBox.Show($"Entries were saved to the database, but refreshing the sheet failed:\n\n{ex2.Message}", "Thumbprint Sync", MessageBoxButtons.OK, MessageBoxIcon.Error);
                         }
-                        finally
-                        {
-                            try { ((dynamic)ExcelDnaUtil.Application).StatusBar = false; } catch { }
-                        }
+                        finally { SetStatus(false); }
                     });
                 }
                 catch (Exception ex)
@@ -145,12 +172,67 @@ public class RibbonController : ManagerRibbonBase
                     AppLogger.Error("[ScheduleManager] Terminal sync failed", ex);
                     ExcelAsyncUtil.QueueAsMacro(() =>
                     {
-                        try { ((dynamic)ExcelDnaUtil.Application).StatusBar = false; } catch { }
-                        MessageBox.Show(
-                            $"Terminal sync failed:\n\n{ex.Message}", "Thumbprint Sync", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        SetStatus(false);
+                        MessageBox.Show($"Terminal sync failed:\n\n{ex.Message}", "Thumbprint Sync", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     });
                 }
             });
+        });
+    }
+
+    private static void SetStatus(object value)
+    {
+        try { ((dynamic)ExcelDnaUtil.Application).StatusBar = value; } catch { }
+    }
+
+    /// <summary>Offline fallback: all punches are read from the terminal and appended to the sheet, filtered to the displayed date. Macro thread.</summary>
+    private static void SyncTerminalOffline(DateOnly date, string? addinDir)
+    {
+        if (date < DateOnly.FromDateTime(DateTime.Today) &&
+            !PastRecordGuard.ConfirmPastRecordEdit(SheetMapper.GuardSession, date, "Schedule Manager"))
+        {
+            SheetOperations.ShowStatusConfirmation("Terminal sync cancelled.");
+            return;
+        }
+        AppLogger.Info($"[ScheduleManager] Offline: syncing all punches from thumbprint terminal ({DeviceSyncManager.DefaultIp})...");
+        SetStatus($"Syncing all punches from thumbprint terminal ({DeviceSyncManager.DefaultIp})...");
+        Task.Run(async () =>
+        {
+            try
+            {
+                var punches = await DeviceSyncManager.FetchPunchesAsync(since: null, addinDirectory: addinDir);
+                ExcelAsyncUtil.QueueAsMacro(() =>
+                {
+                    try
+                    {
+                        var (added, duplicates, unknown) = SheetMapper.AppendTerminalPunches(punches, date);
+                        SetStatus(false);
+                        MessageBox.Show(
+                            $"Terminal {DeviceSyncManager.DefaultIp}: {punches.Count} punch(es) read (all dates).\n\n" +
+                            $"  Added to Attendance Entries : {added}\n" +
+                            $"  Already present / double scans : {duplicates}\n" +
+                            $"  Unknown staff / other dates :{unknown}\n\n" +
+                            $"Attendance Entries holds all dates and is filtered to {date:dd MMM yyyy} via the Date header (clear the Date filter to view all dates).\n" +
+                            "Use 'Save to System' to persist the new entries.",
+                            "Thumbprint Sync", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    }
+                    catch (Exception ex2)
+                    {
+                        AppLogger.Error("[ScheduleManager] Appending terminal punches failed", ex2);
+                        MessageBox.Show($"Appending terminal punches failed:\n\n{ex2.Message}", "Thumbprint Sync", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    }
+                    finally { SetStatus(false); }
+                });
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error("[ScheduleManager] Terminal sync failed", ex);
+                ExcelAsyncUtil.QueueAsMacro(() =>
+                {
+                    SetStatus(false);
+                    MessageBox.Show($"Terminal sync failed:\n\n{ex.Message}", "Thumbprint Sync", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                });
+            }
         });
     }
 }

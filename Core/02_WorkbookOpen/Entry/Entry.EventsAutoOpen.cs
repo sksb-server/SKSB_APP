@@ -267,7 +267,7 @@ public class EventsAutoOpen : IExcelAddIn
     }
 
     /// <summary>
-    /// Returns the first strictly-calculated column rule whose data cells intersect <paramref name="target"/>.
+    /// Returns the first locked (strictly-calculated or read-only) column rule whose data cells intersect <paramref name="target"/>.
     /// Only the columns actually covered by the target are inspected (no per-column Intersect calls).
     /// </summary>
     private static PropertyRuleDescriptor? FindLockedRule(dynamic xlApp, dynamic sh, dynamic target)
@@ -293,7 +293,7 @@ public class EventsAutoOpen : IExcelAddIn
                     {
                         string header = sh.Cells[headerRow, col].Value2?.ToString()?.Trim() ?? string.Empty;
                         var rule = RuleRegistry.GetRule(tableName, header);
-                        if (rule != null && rule.IsStrictlyCalculated) return rule;
+                        if (rule != null && rule.IsLocked) return rule;
                     }
                 }
             }
@@ -348,8 +348,9 @@ public class EventsAutoOpen : IExcelAddIn
                 try { origEvents = (bool)xlApp.EnableEvents; xlApp.EnableEvents = false; } catch { }
                 try { xlApp.Undo(); } catch { }
                 try { xlApp.EnableEvents = origEvents; } catch { }
-                SheetOperations.ShowStatusConfirmation(
-                    $"Column '{lockedRule.HeaderName}' is locked (Formula evaluated cell: {lockedRule.DisplayFormula}).");
+                SheetOperations.ShowStatusConfirmation(lockedRule.IsStrictlyCalculated
+                    ? $"Column '{lockedRule.HeaderName}' is locked (Formula evaluated cell: {lockedRule.DisplayFormula})."
+                    : $"Column '{lockedRule.HeaderName}' is read-only and cannot be edited manually.");
                 return;
             }
 

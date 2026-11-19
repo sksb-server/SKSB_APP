@@ -118,7 +118,7 @@ public static class RuleEvaluator
                 {
                     int absCol = startCol + c - 1;
                     var rule = colRules[c];
-                    if (rule?.IsStrictlyCalculated == true) continue;
+                    if (rule?.IsLocked == true) continue;
 
                     string f = worksheet.Cells[excelRow, absCol].Formula?.ToString() ?? string.Empty;
                     if (f.StartsWith("=")) continue;
@@ -473,7 +473,7 @@ public static class RuleEvaluator
                         continue;
 
                     var rule = colRules[c];
-                    if (rule?.IsStrictlyCalculated == true) continue;
+                    if (rule?.IsLocked == true) continue;
                     if (rule?.DefaultRule?.Kind == DefaultKind.Literal &&
                         string.Equals(clean, rule.DefaultRule.LiteralValue, StringComparison.OrdinalIgnoreCase))
                         continue;
