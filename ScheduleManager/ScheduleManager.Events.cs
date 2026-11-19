@@ -66,7 +66,7 @@ public class Events : ManagerEventsBase<ScheduleRecord>
     private static bool IsEmpty(ScheduleRecord? s) =>
         s == null ||
         (s.Projects.Count == 0 && s.WorkerAttendance.Count == 0 && s.AttendanceEntries.Count == 0 &&
-         s.Preferences.Count == 0 && s.Teams.Count == 0);
+         s.Preferences.Count == 0 && s.Teams.Count == 0 && s.Skills.Count == 0);
 
     /// <summary>The date typed on the board (today when the cell is empty or no workbook is open).</summary>
     internal static DateOnly CurrentDate()

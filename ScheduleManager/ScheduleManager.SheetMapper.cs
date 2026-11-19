@@ -94,6 +94,7 @@ internal static partial class SheetMapper
             {
                 record.Preferences = TableMapper.ExtractFromTable<WorkerPreference>((object)prefSheet!, "WorkerPreferencesTable");
                 record.Teams = TableMapper.ExtractFromTable<TeamRecord>((object)prefSheet!, "TeamTable");
+                record.Skills = TableMapper.ExtractFromTable<ScheduleSkillRecord>((object)prefSheet!, "SkillsTable");
                 record.AttendanceEntries = TableMapper.ExtractFromTable<AttendanceEntry>((object)entriesSheet!, EntriesTableName);
                 var existing = TableMapper.ExtractFromTable<DailyWorkerAttendance>((object)attendanceSheet!, MasterTableName);
                 foreach (var e in existing) e.DailyScheduleDate = date.Value;
@@ -103,6 +104,7 @@ internal static partial class SheetMapper
             record.Projects = ScheduleBoardMapper.Read((object)board!, date.Value);
 
             BoardContext.SetPreferences(record.Preferences, record.Teams);
+            BoardContext.SetSkills(record.Skills);
             foreach (var t in record.Teams) t.TeamLeaderStaffID = Roster.FindStaff(t.TeamLeader)?.Id ?? 0;
 
             // ---- table rule validation (required cells, dropdown sources, formats) ----
@@ -169,6 +171,8 @@ internal static partial class SheetMapper
             errors.Add($"  [Preference]: Duplicate Staff ID '{g.Key}' in 'WorkerPreferencesTable'.");
         foreach (var g in record.Teams.Where(t => !string.IsNullOrWhiteSpace(t.TeamName)).GroupBy(t => t.TeamName.Trim(), StringComparer.OrdinalIgnoreCase).Where(g => g.Count() > 1))
             errors.Add($"  [Preference]: Duplicate team '{g.Key}' in 'TeamTable'.");
+        foreach (var g in record.Skills.Where(s => !string.IsNullOrWhiteSpace(s.SkillName)).GroupBy(s => s.SkillName.Trim(), StringComparer.OrdinalIgnoreCase).Where(g => g.Count() > 1))
+            errors.Add($"  [Preference]: Duplicate skill '{g.Key}' in 'SkillsTable'.");
 
         foreach (var g in record.AttendanceEntries.GroupBy(e => (e.Date, e.Time, e.StaffID, e.EntryType, e.Source)).Where(g => g.Count() > 1))
             errors.Add($"  [Attendance Entries]: Staff {g.Key.StaffID} has {g.Count()} identical {g.Key.Source} {g.Key.EntryType} punches at {g.Key.Date:dd/MM/yyyy} {g.Key.Time:HH:mm}.");
@@ -274,6 +278,12 @@ internal static partial class SheetMapper
                     .Concat(record.WorkerAttendance.Select(a => a.StaffID))
                     .Concat(record.Projects.SelectMany(p => p.Workers).Select(w => Roster.FindStaff(w)?.Id ?? 0))
                     .Where(id => id > 0).ToList();
+
+                // SkillsTable: an empty record (first load / fresh server) keeps the template-seeded rows instead of wiping them.
+                bool writeSkills = record.Skills.Count > 0;
+                if (!writeSkills && prefSheet != null)
+                    record.Skills = TableMapper.ExtractFromTable<ScheduleSkillRecord>((object)prefSheet!, "SkillsTable");
+                BoardContext.SetSkills(record.Skills);   // StaffSkillList below includes these
                 ServerSyncCommands.SyncLookupLists(date, referenced);
 
                 // Preferences & teams (names are UI-only helpers resolved from the roster)
@@ -287,6 +297,8 @@ internal static partial class SheetMapper
                 LoadingOverlay.Report("Populating teams & worker preferences...");
                 if (prefSheet != null)
                 {
+                    if (writeSkills)
+                        TableMapper.PopulateTableSafe<ScheduleSkillRecord>((object)prefSheet!, "SkillsTable", record.Skills);
                     TableMapper.PopulateTableSafe<TeamRecord>((object)prefSheet!, "TeamTable", record.Teams);
                     TableMapper.PopulateTableSafe<WorkerPreference>((object)prefSheet!, "WorkerPreferencesTable", record.Preferences);
                 }
@@ -377,7 +389,12 @@ internal static partial class SheetMapper
 
             RunFrozen(() =>
             {
-                if (reloadContext) BoardContext.Reload(wbObj);
+                if (reloadContext)
+                {
+                    BoardContext.Reload(wbObj);
+                    // A SkillsTable edit must show up in the StaffSkillList dropdowns straight away.
+                    ServerSyncCommands.SyncSkillList();
+                }
 
                 var slots = ScheduleBoardMapper.Read((object)board!, date.Value);
                 if (ScheduleBoardMapper.ExpandTeams(slots, out string? notice) && notice != null)

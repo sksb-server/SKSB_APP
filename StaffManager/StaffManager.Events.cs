@@ -67,6 +67,9 @@ public class Events : ManagerEventsBase<List<StaffRecord>>
             customListName: "VehiclePlateList"
         );
 
+        // Emoji palette behind SkillLicenseTypesTable[Display Icon]
+        DataList.SyncValues("DisplayIconList", SkillCatalog.DisplayIcons);
+
         // SkillLicenseTypesTable & SkillLicenseTypeList
         SheetMapper.PopulateSkillLicenseTypesTable(showDialogIfFailed: isInteractive);
     }

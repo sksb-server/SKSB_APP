@@ -709,22 +709,10 @@ internal static class ScheduleBoardMapper
     internal static List<string> SkillsFor(StaffInfo? staff, WorkerPreference? pref)
     {
         var skills = SkillsOf(pref);
-        if (skills.Count == 0 && staff != null && DefaultSkillForDepartment(staff.Department) is { } fallback)
-            skills.Add(fallback);
+        if (skills.Count == 0 && staff != null)
+            skills.Add(SkillCatalog.GeneralWorker);
         return skills;
     }
-
-    private static string? DefaultSkillForDepartment(string? department) =>
-        (department ?? string.Empty).Trim().ToLowerInvariant() switch
-        {
-            "driver" => "Driver",
-            "operator" => "Excavator Operator",
-            "foreman" => "Foreman",
-            "worker" => "General Worker",
-            "mechanic" => "Mechanic",
-            "supervisor" => "Supervisor",
-            _ => null
-        };
 
     // ---- header: "CODE ⚠" + derived "HH:mm - HH:mm" window + requirements note --------------------
     private static (string Text, string? Window, string? Comment) BuildHeader(
@@ -1047,10 +1035,10 @@ internal static class ScheduleBoardMapper
     private static CustomDropdownResult BuildSkillDropdown(object wsObj, DateOnly date, CellLocation loc)
     {
         var slot = ReadSlotContext(wsObj, date, loc);
-        var required = slot.RequiredSkills.Where(s => !string.IsNullOrWhiteSpace(s)).ToList();
-        // Department fallback skills are included so workers without a worker_preferences row can still be picked.
-        var others = BoardContext.Preferences.SelectMany(p => SkillsOf(p))
-            .Concat(Roster.ActiveOn(date).SelectMany(s => SkillsFor(s, BoardContext.PreferenceFor(s.Id))))
+        var configured = BoardContext.AllConfiguredSkills();
+        var allowed = new HashSet<string>(configured, StringComparer.OrdinalIgnoreCase);
+        var required = slot.RequiredSkills.Where(s => !string.IsNullOrWhiteSpace(s) && allowed.Contains(s.Trim())).ToList();
+        var others = configured
             .Where(s => !required.Contains(s, StringComparer.OrdinalIgnoreCase))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .OrderBy(s => s, StringComparer.OrdinalIgnoreCase);
