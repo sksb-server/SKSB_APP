@@ -234,21 +234,109 @@ internal static class ScheduleBoardMapper
         return m.Success && int.TryParse(m.Groups[1].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out holes) ? Math.Max(0, holes) : 0;
     }
 
-    /// <summary>Workers listed in more than one slot of the same band, as save-blocking messages.</summary>
-    internal static List<string> FindDuplicateWorkers(IEnumerable<DailyProjectSchedule> slots)
+    /// <summary>One duplicated worker inside a shift band: the slots involved and the exact worker cells (slot, index in slot.Workers).</summary>
+    private sealed record WorkerConflict(Shifts Shift, string Worker, List<int> Slots, List<(int Slot, int Index)> Cells);
+
+    /// <summary>
+    /// Two check-in spans conflict when they start together, are both still open, or their time ranges overlap.
+    /// Back-to-back spans (08:00-12:00, 12:00-17:00) do not conflict.
+    /// </summary>
+    private static bool SpansConflict(WorkerProjectSpan a, WorkerProjectSpan b)
+    {
+        if (a.In == b.In) return true;
+        if (a.Out == null && b.Out == null) return true;
+        if (a.Out == null) return a.In < b.Out!.Value;
+        if (b.Out == null) return b.In < a.Out.Value;
+        return a.In < b.Out.Value && b.In < a.Out.Value;
+    }
+
+    private static List<WorkerProjectSpan> SpansFor(Dictionary<(long StaffId, string ProjectId), List<WorkerProjectSpan>> spans, long staffId, string projectId) =>
+        spans.TryGetValue((staffId, projectId.Trim().ToUpperInvariant()), out var list) ? list : new List<WorkerProjectSpan>();
+
+    /// <summary>
+    /// Time-aware worker duplicates per band. The same worker twice in one slot always counts; across slots of a band
+    /// only when both slots have check-in spans for them and any pair of spans conflicts.
+    /// </summary>
+    private static List<WorkerConflict> ComputeWorkerConflicts(
+        IEnumerable<DailyProjectSchedule> slots,
+        Dictionary<(long StaffId, string ProjectId), List<WorkerProjectSpan>> spans)
+    {
+        var result = new List<WorkerConflict>();
+        var all = slots.ToList();
+        foreach (var band in Bands)
+        {
+            var groups = all.Where(s => s.Shift == band.Shift)
+                .SelectMany(s => s.Workers.Select((w, i) => (Slot: s, Name: w, Index: i)))
+                .Where(x => !string.IsNullOrWhiteSpace(x.Name))
+                .GroupBy(x => Roster.FindStaff(x.Name) is { } st ? $"#{st.Id}" : "n:" + x.Name.Trim().ToUpperInvariant());
+
+            foreach (var g in groups)
+            {
+                long? staffId = Roster.FindStaff(g.First().Name)?.Id;
+                var bySlot = g.GroupBy(x => x.Slot.SlotIndex).ToList();
+                var hit = new HashSet<int>(bySlot.Where(s => s.Count() > 1).Select(s => s.Key));
+
+                if (staffId.HasValue)
+                {
+                    var withSpans = bySlot
+                        .Select(s => (Slot: s.Key, Spans: SpansFor(spans, staffId.Value, s.First().Slot.ProjectID)))
+                        .Where(x => x.Spans.Count > 0).ToList();
+                    for (int i = 0; i < withSpans.Count; i++)
+                        for (int j = i + 1; j < withSpans.Count; j++)
+                            if (withSpans[i].Spans.Any(a => withSpans[j].Spans.Any(b => SpansConflict(a, b))))
+                            {
+                                hit.Add(withSpans[i].Slot);
+                                hit.Add(withSpans[j].Slot);
+                            }
+                }
+
+                if (hit.Count == 0) continue;
+                result.Add(new WorkerConflict(band.Shift, g.First().Name, hit.OrderBy(x => x).ToList(),
+                    g.Where(x => hit.Contains(x.Slot.SlotIndex)).Select(x => (x.Slot.SlotIndex, x.Index)).ToList()));
+            }
+        }
+        return result;
+    }
+
+    /// <summary>Workers double-booked within a shift band (time-aware, see <see cref="ComputeWorkerConflicts"/>), as save-blocking messages.</summary>
+    internal static List<string> FindDuplicateWorkers(IEnumerable<DailyProjectSchedule> slots, DateOnly date, IEnumerable<AttendanceEntry> entries)
+    {
+        var list = slots.ToList();
+        var spans = AttendanceRollupService.BuildSpans(entries, date, list);
+        var messages = new List<string>();
+        foreach (var c in ComputeWorkerConflicts(list, spans))
+        {
+            string label = Bands.First(b => b.Shift == c.Shift).Label;
+            string where = string.Join(", ", c.Slots.Select(s => $"slot {s + 1}"));
+            messages.Add($"  [Daily Schedule - {label}]: Worker '{c.Worker}' is assigned more than once ({where}).");
+        }
+        return messages;
+    }
+
+    /// <summary>(shift, slot) of every slot whose project also appears in another slot of the same band.</summary>
+    private static HashSet<(Shifts Shift, int Slot)> DuplicateProjectSlots(IEnumerable<DailyProjectSchedule> slots)
+    {
+        var result = new HashSet<(Shifts, int)>();
+        foreach (var g in slots.Where(s => !string.IsNullOrWhiteSpace(s.ProjectID))
+                     .GroupBy(s => (s.Shift, Id: s.ProjectID.Trim().ToUpperInvariant()))
+                     .Where(g => g.Count() > 1))
+            foreach (var s in g) result.Add((s.Shift, s.SlotIndex));
+        return result;
+    }
+
+    /// <summary>The same project in more than one slot of a shift band, as save-blocking messages.</summary>
+    internal static List<string> FindDuplicateProjects(IEnumerable<DailyProjectSchedule> slots)
     {
         var messages = new List<string>();
         foreach (var band in Bands)
         {
-            var seen = slots.Where(s => s.Shift == band.Shift)
-                .SelectMany(s => s.Workers.Select(w => (Name: w, s.SlotIndex)))
-                .GroupBy(x => x.Name, StringComparer.OrdinalIgnoreCase)
+            var dups = slots.Where(s => s.Shift == band.Shift && !string.IsNullOrWhiteSpace(s.ProjectID))
+                .GroupBy(s => s.ProjectID.Trim(), StringComparer.OrdinalIgnoreCase)
                 .Where(g => g.Count() > 1);
-
-            foreach (var g in seen)
+            foreach (var g in dups)
             {
                 string where = string.Join(", ", g.Select(x => $"slot {x.SlotIndex + 1}"));
-                messages.Add($"  [Daily Schedule - {band.Label}]: Worker '{g.Key}' is assigned more than once ({where}).");
+                messages.Add($"  [Daily Schedule - {band.Label}]: Project '{g.Key}' appears more than once ({where}).");
             }
         }
         return messages;
@@ -463,7 +551,26 @@ internal static class ScheduleBoardMapper
             }
         }
 
-        EnsureConditionalFormats(ws, cutOffText, slotCount);
+        // Conflicts are computed from the laid-out board (position = slot), reusing the save-time logic.
+        var board = new List<DailyProjectSchedule>();
+        foreach (var band in Bands)
+        {
+            var layout = layouts[band.Shift];
+            for (int i = 0; i < layout.Count; i++)
+                board.Add(new DailyProjectSchedule { DailyScheduleDate = date, Shift = band.Shift, SlotIndex = i, ProjectID = layout[i].ProjectID, Workers = layout[i].Workers });
+        }
+
+        var workerCells = new HashSet<(int Row, int Col)>();
+        foreach (var c in ComputeWorkerConflicts(board, spans))
+        {
+            var band = Bands.First(b => b.Shift == c.Shift);
+            foreach (var (slot, index) in c.Cells)
+                if (index < WorkerRowsPerBand) workerCells.Add((band.FirstWorkerRow + index, SlotColumn(slot)));
+        }
+        var headerCells = new HashSet<(int Row, int Col)>(DuplicateProjectSlots(board)
+            .Select(d => (Bands.First(b => b.Shift == d.Shift).HeaderRow, SlotColumn(d.Slot))));
+
+        EnsureConditionalFormats(ws, cutOffText, slotCount, workerCells, headerCells);
     }
 
     // Excel does not reflow AutoSize for hidden comments while ScreenUpdating = false, so the box
@@ -652,30 +759,47 @@ internal static class ScheduleBoardMapper
     // =========================================================================
     // 6. CONDITIONAL FORMATS (duplicate worker = red, late check-in = amber)
     // =========================================================================
-    private static void EnsureConditionalFormats(dynamic ws, string cutOffText, int slotCount)
+    private static void AddDuplicateHighlight(dynamic ws, int row, int col)
+    {
+        try
+        {
+            dynamic fc = ws.Cells[row, col].FormatConditions.Add(2, Type.Missing, "=TRUE");   // xlExpression
+            fc.Interior.Color = 13551615;   // RGB(255,199,206)
+            fc.Font.Color = 393372;         // RGB(156,0,6)
+        }
+        catch (Exception ex) { AppLogger.Warn($"[ScheduleBoard] duplicate highlight rule failed: {ex.Message}"); }
+    }
+
+    private static void EnsureConditionalFormats(dynamic ws, string cutOffText, int slotCount,
+        HashSet<(int Row, int Col)> workerCells, HashSet<(int Row, int Col)> headerCells)
     {
         const int xlExpression = 2;
         foreach (var band in Bands)
         {
-            // Duplicate worker: same name anywhere in the band's name columns.
-            var nameCols = Enumerable.Range(0, slotCount).Select(s => ColumnLetter(SlotColumn(s))).ToList();
-            string counts = string.Join("+", nameCols.Select(c => $"COUNTIF(${c}${band.FirstWorkerRow}:${c}${band.LastWorkerRow},{{0}})"));
+            // Duplicate project headers: clear the header row rules, then flag only the conflicting header cells.
+            try
+            {
+                dynamic headers = ws.Range[ws.Cells[band.HeaderRow, FirstSlotColumn], ws.Cells[band.HeaderRow, FirstSlotColumn + (slotCount * SlotWidth) - 1]];
+                headers.FormatConditions.Delete();
+            }
+            catch (Exception ex) { AppLogger.Warn($"[ScheduleBoard] clearing header rules failed: {ex.Message}"); }
+            for (int slot = 0; slot < slotCount; slot++)
+                if (headerCells.Contains((band.HeaderRow, SlotColumn(slot)))) AddDuplicateHighlight(ws, band.HeaderRow, SlotColumn(slot));
 
             for (int slot = 0; slot < slotCount; slot++)
             {
                 string nameCol = ColumnLetter(SlotColumn(slot));
                 string timeCol = ColumnLetter(SlotColumn(slot) + 2);
 
+                // Duplicate worker: clear stale rules, then flag only the conflicting name cells.
                 try
                 {
                     dynamic names = ws.Range[$"{nameCol}{band.FirstWorkerRow}:{nameCol}{band.LastWorkerRow}"];
                     names.FormatConditions.Delete();
-                    string first = $"{nameCol}{band.FirstWorkerRow}";
-                    dynamic dup = names.FormatConditions.Add(xlExpression, Type.Missing, $"=AND({first}<>\"\",({string.Format(counts, first)})>1)");
-                    dup.Interior.Color = 13551615;   // RGB(255,199,206)
-                    dup.Font.Color = 393372;         // RGB(156,0,6)
                 }
-                catch (Exception ex) { AppLogger.Warn($"[ScheduleBoard] duplicate highlight rule failed: {ex.Message}"); }
+                catch (Exception ex) { AppLogger.Warn($"[ScheduleBoard] clearing duplicate rules failed: {ex.Message}"); }
+                for (int r = band.FirstWorkerRow; r <= band.LastWorkerRow; r++)
+                    if (workerCells.Contains((r, SlotColumn(slot)))) AddDuplicateHighlight(ws, r, SlotColumn(slot));
 
                 if (band.Shift != Shifts.Morning) continue;
                 try
@@ -736,7 +860,7 @@ internal static class ScheduleBoardMapper
                 var active = Roster.ActiveProjectsOn(date).Select(p => p.Id).ToList();
                 var ordered = active.Concat(Roster.Projects.Select(p => p.Id).Where(id => !active.Contains(id, StringComparer.OrdinalIgnoreCase)))
                     .Select((id, i) => new DropdownOption { Display = id, Raw = id, Section = i }).ToList();
-                return new CustomDropdownResult(ordered, (c, opt) => c.Value2 = opt.Raw);
+                return new CustomDropdownResult(ordered, (c, opt) => ApplyHeaderPick(c, loc, opt.Raw));
             }
 
             case CellKind.Vehicle:
@@ -753,6 +877,54 @@ internal static class ScheduleBoardMapper
 
             default:
                 return null;
+        }
+    }
+
+    /// <summary>
+    /// Project Header pick. When the project already sits in another slot of the same band, the two whole slot columns
+    /// (header, premix, window, workers, vehicles) are swapped with two bulk 2D writes instead of creating a duplicate.
+    /// Runs inside the dropdown commit (events suppressed; observers are notified afterwards).
+    /// </summary>
+    private static void ApplyHeaderPick(dynamic cell, CellLocation loc, string pickedProjectId)
+    {
+        object wsObj = cell.Worksheet;
+        dynamic ws = wsObj;
+        var band = Bands.FirstOrDefault(b => b.Shift == loc.Shift);
+        if (band == null) { cell.Value2 = pickedProjectId; return; }
+
+        int otherSlot = -1;
+        try
+        {
+            _slotCount = Math.Max(_slotCount, DetectSlotCount(wsObj));
+            int cols = _slotCount * SlotWidth;
+            dynamic headerRange = ws.Range[ws.Cells[band.HeaderRow, FirstSlotColumn], ws.Cells[band.HeaderRow, FirstSlotColumn + cols - 1]];
+            object[,] headers = TableMapper.GetRange2DValues(headerRange, 1, cols);
+            for (int s = 0; s < _slotCount && otherSlot < 0; s++)
+            {
+                if (s == loc.Slot) continue;
+                string code = ParseProjectCode(headers[1, (s * SlotWidth) + 1]?.ToString() ?? string.Empty);
+                if (code.Equals(pickedProjectId.Trim(), StringComparison.OrdinalIgnoreCase)) otherSlot = s;
+            }
+        }
+        catch (Exception ex) { AppLogger.Warn($"[ScheduleBoard] duplicate project lookup failed: {ex.Message}"); }
+
+        if (otherSlot < 0) { cell.Value2 = pickedProjectId; return; }
+
+        try
+        {
+            int rows = band.LastVehicleRow - band.HeaderRow + 1;
+            dynamic mine = ws.Range[ws.Cells[band.HeaderRow, SlotColumn(loc.Slot)], ws.Cells[band.LastVehicleRow, SlotColumn(loc.Slot) + SlotWidth - 1]];
+            dynamic theirs = ws.Range[ws.Cells[band.HeaderRow, SlotColumn(otherSlot)], ws.Cells[band.LastVehicleRow, SlotColumn(otherSlot) + SlotWidth - 1]];
+            object[,] mineValues = TableMapper.GetRange2DValues(mine, rows, SlotWidth);
+            object[,] theirValues = TableMapper.GetRange2DValues(theirs, rows, SlotWidth);
+            mine.Value2 = theirValues;
+            theirs.Value2 = mineValues;
+            SheetOperations.ShowStatusConfirmation($"{pickedProjectId} was already in {band.Label} slot {otherSlot + 1}; slots {loc.Slot + 1} and {otherSlot + 1} were swapped.");
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn($"[ScheduleBoard] slot swap failed: {ex.Message}");
+            cell.Value2 = pickedProjectId;
         }
     }
 
