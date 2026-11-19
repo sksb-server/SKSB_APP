@@ -15,12 +15,12 @@ public class SaveNotificationDialog : Form
 {
     public SaveNotificationDialog(string moduleName, string message, SaveNotificationType type = SaveNotificationType.Success)
     {
+        SuspendLayout();
         Text = $"{moduleName} - Save Status";
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
-        AutoScaleMode = AutoScaleMode.Dpi;
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
         Padding = new Padding(24, 20, 24, 20);
@@ -45,6 +45,7 @@ public class SaveNotificationDialog : Form
         pnlIndicator.Paint += (s, e) =>
         {
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            e.Graphics.ScaleTransform(pnlIndicator.ClientSize.Width / 36f, pnlIndicator.ClientSize.Height / 36f);
             Color iconColor = type switch
             {
                 SaveNotificationType.Success => Color.FromArgb(16, 149, 193),
@@ -131,6 +132,11 @@ public class SaveNotificationDialog : Form
         layout.Controls.Add(pnlIndicator, 0, 0);
         layout.Controls.Add(pnlContent, 1, 0);
         Controls.Add(layout);
+
+        AutoScaleDimensions = new SizeF(96f, 96f);
+        AutoScaleMode = AutoScaleMode.Dpi;
+        ResumeLayout(false);
+        PerformLayout();
     }
 
     public static void ShowSuccess(string moduleName, string message = "All records have been safely synchronized to the system.")

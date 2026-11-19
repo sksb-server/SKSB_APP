@@ -123,12 +123,12 @@ public class DuplicateSkippedSummaryDialog : Form
         int cleanCount,
         List<string> skippedWarnings)
     {
+        SuspendLayout();
         Text = $"{entityLabel} Import - Duplicates Excluded";
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
-        AutoScaleMode = AutoScaleMode.Dpi;
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
         Padding = new Padding(24, 20, 24, 20);
@@ -152,6 +152,7 @@ public class DuplicateSkippedSummaryDialog : Form
         pnlIndicator.Paint += (s, e) =>
         {
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            e.Graphics.ScaleTransform(pnlIndicator.ClientSize.Width / 38f, pnlIndicator.ClientSize.Height / 38f);
             using var brush = new SolidBrush(Color.FromArgb(217, 119, 6)); // Amber Warning
             e.Graphics.FillEllipse(brush, 2, 2, 34, 34);
 
@@ -255,5 +256,10 @@ public class DuplicateSkippedSummaryDialog : Form
 
         AcceptButton = btnProceed;
         CancelButton = btnCancel;
+
+        AutoScaleDimensions = new SizeF(96f, 96f);
+        AutoScaleMode = AutoScaleMode.Dpi;
+        ResumeLayout(false);
+        PerformLayout();
     }
 }

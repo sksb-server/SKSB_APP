@@ -106,7 +106,11 @@ public class SaveContract<T> : ISaveContract
         {
             dynamic xlApp = ExcelDnaUtil.Application;
             if (xlApp?.ActiveWindow == null) return;
+#if DEBUG
+            xlApp.ActiveWindow.Caption = ServerEnvironment.IsOffline ? $"{WindowCaption} [DEBUG - OFFLINE MODE]" : $"{WindowCaption} [DEBUG SERVER]";
+#else
             xlApp.ActiveWindow.Caption = ServerEnvironment.IsOffline ? $"{WindowCaption} [OFFLINE MODE]" : WindowCaption;
+#endif
         }
         catch { }
     }

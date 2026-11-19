@@ -28,7 +28,7 @@ public class Events : ManagerEventsBase<List<ProjectRecord>>
             typeof(Shifts)
         },
         ExtractAndValidate = () => SheetMapper.ExtractProjectRecordsWithDiagnostics(),
-        IsDatasetEmpty = list => list == null || list.Count == 0,
+        IsDatasetEmpty = list => (list == null || list.Count == 0) && !SheetMapper.HasExtractedCompanies,
         // Companies and the summary selector must populate even before the first project exists.
         PopulateStartupWhenEmpty = true,
         SaveToServer = list => (ServerSyncCommands.SaveProjectsSilent(list, out string err), err),

@@ -22,6 +22,7 @@ public class ExitConflictDialog : Form
         bool isClosing = true,
         bool isDebugPrompt = false)
     {
+        SuspendLayout();
         Text = isDebugPrompt
             ? $"[DEBUG MODE] {moduleName} - Save & Exit Options"
             : $"{moduleName} - Synchronization Alert";
@@ -30,7 +31,6 @@ public class ExitConflictDialog : Form
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
-        AutoScaleMode = AutoScaleMode.Dpi;
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
         Padding = new Padding(24, 20, 24, 20);
@@ -55,6 +55,7 @@ public class ExitConflictDialog : Form
         pnlIndicator.Paint += (s, e) =>
         {
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            e.Graphics.ScaleTransform(pnlIndicator.ClientSize.Width / 36f, pnlIndicator.ClientSize.Height / 36f);
             Color iconColor = isDebugPrompt ? Color.FromArgb(79, 70, 229) : Color.FromArgb(217, 119, 6);
             using var brush = new SolidBrush(iconColor);
             e.Graphics.FillEllipse(brush, 2, 2, 32, 32);
@@ -184,5 +185,10 @@ public class ExitConflictDialog : Form
         layout.Controls.Add(pnlIndicator, 0, 0);
         layout.Controls.Add(pnlContent, 1, 0);
         Controls.Add(layout);
+
+        AutoScaleDimensions = new SizeF(96f, 96f);
+        AutoScaleMode = AutoScaleMode.Dpi;
+        ResumeLayout(false);
+        PerformLayout();
     }
 }

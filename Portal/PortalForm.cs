@@ -13,9 +13,11 @@ using SKSB_App.Core.Bootstrap.Storage;
 public class PortalForm : Form
 {
     private readonly string _currentVersion;
+    private TableLayoutPanel _layout = null!;
 
     public PortalForm()
     {
+        SuspendLayout();
         _currentVersion = ResolveAppVersion();
 
 #if DEBUG
@@ -24,31 +26,56 @@ public class PortalForm : Form
         Text = $"SKSB Operations Portal - v{_currentVersion}";
 #endif
         StartPosition = FormStartPosition.CenterScreen;
-        FormBorderStyle = FormBorderStyle.FixedSingle;
-        MaximizeBox = false;
+        FormBorderStyle = FormBorderStyle.Sizable;
+        MaximizeBox = true;
         BackColor = Color.FromArgb(248, 250, 252);
 
-        // Enable automated DPI scaling
-        AutoScaleMode = AutoScaleMode.Dpi;
         Font = new Font("Segoe UI", 9f, FontStyle.Regular);
-        AutoSize = true;
-        AutoSizeMode = AutoSizeMode.GrowAndShrink;
         Padding = new Padding(24, 20, 24, 20);
 
         InitializeLayout();
+
+        // Enable automated DPI scaling from a 96-DPI design baseline (Designer order: after controls are added).
+        AutoScaleDimensions = new SizeF(96f, 96f);
+        AutoScaleMode = AutoScaleMode.Dpi;
+        ResumeLayout(false);
+        PerformLayout();
+    }
+
+    protected override void OnLoad(EventArgs e)
+    {
+        base.OnLoad(e);
+        FitClientSizeToLayout();
+        CenterToScreen();
+    }
+
+    protected override void OnDpiChanged(DpiChangedEventArgs e)
+    {
+        base.OnDpiChanged(e);
+        FitClientSizeToLayout();
+    }
+
+    private void FitClientSizeToLayout()
+    {
+        MinimumSize = Size.Empty;
+        _layout.PerformLayout();
+        Size pref = _layout.GetPreferredSize(Size.Empty);
+        ClientSize = new Size(pref.Width + Padding.Horizontal, pref.Height + Padding.Vertical);
+        MinimumSize = Size;
     }
 
     private void InitializeLayout()
     {
         var layout = new TableLayoutPanel
         {
-            Dock = DockStyle.Fill,
+            Dock = DockStyle.Top,
             ColumnCount = 1,
             AutoSize = true,
             AutoSizeMode = AutoSizeMode.GrowAndShrink,
             Margin = new Padding(0),
             Padding = new Padding(0)
         };
+        _layout = layout;
         layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100f));
 
         // Header Panel: Title + Version Badge
@@ -143,6 +170,7 @@ public class PortalForm : Form
         {
             Width = 360,
             Height = 64,
+            Anchor = AnchorStyles.Left | AnchorStyles.Right,
             BackColor = Color.White,
             FlatStyle = FlatStyle.Flat,
             Cursor = Cursors.Hand,
@@ -155,16 +183,24 @@ public class PortalForm : Form
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
             e.Graphics.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
 
+            float scale = btn.DeviceDpi / 96f;
+            float x = 14f * scale;
+            float titleY = 8f * scale;
+            float subY;
+
             using (var titleFont = new Font("Segoe UI", 10.5f, FontStyle.Bold))
             using (var titleBrush = new SolidBrush(Color.FromArgb(30, 41, 59)))
             {
-                e.Graphics.DrawString(title, titleFont, titleBrush, 14, 8);
+                e.Graphics.DrawString(title, titleFont, titleBrush, x, titleY);
+                // Place subtitle below the measured title so they never overlap at any DPI.
+                float titleH = e.Graphics.MeasureString(title, titleFont).Height;
+                subY = Math.Max(32f * scale, titleY + titleH + (2f * scale));
             }
 
             using (var subFont = new Font("Segoe UI", 8.5f, FontStyle.Regular))
             using (var subBrush = new SolidBrush(Color.FromArgb(100, 116, 139)))
             {
-                e.Graphics.DrawString(subtitle, subFont, subBrush, 14, 32);
+                e.Graphics.DrawString(subtitle, subFont, subBrush, x, subY);
             }
         };
         btn.Click += (s, e) =>

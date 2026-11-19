@@ -36,7 +36,12 @@ public static class SaveEntry
                         return;
                     }
                 }
+#if DEBUG
+                // Debug: empty datasets still reach the Debug Save Intercept; only a null dataset bails out.
+                if (data == null)
+#else
                 if (data == null || contract.IsDatasetEmpty(data))
+#endif
                 {
                     SaveNotificationDialog.ShowSuccess(contract.ModuleName, "The worksheet contains no records to save.");
                     return;
@@ -187,9 +192,15 @@ public static class SaveEntry
                     }
                 }
 
+#if DEBUG
+                // Debug: empty datasets still reach the Debug Save Intercept; only a null dataset exits early.
+                if (data == null)
+#else
                 if (data == null || contract.IsDatasetEmpty(data))
+#endif
                 {
                     isExiting = true;
+                    unEventHooks();
                     wb.Saved = true;
                     cancel = false;
                     QuitExcelIfLastWorkbook(wb);

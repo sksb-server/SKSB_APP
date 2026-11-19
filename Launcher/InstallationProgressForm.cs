@@ -12,6 +12,7 @@ public class InstallationProgressForm : Form
 
     public InstallationProgressForm()
     {
+        SuspendLayout();
         Text = "SKSB Operations Hub Setup";
         Size = new Size(440, 150);
         StartPosition = FormStartPosition.CenterScreen;
@@ -51,6 +52,11 @@ public class InstallationProgressForm : Form
         Controls.Add(_lblTitle);
         Controls.Add(_lblStatus);
         Controls.Add(_progressBar);
+
+        AutoScaleDimensions = new SizeF(96f, 96f);
+        AutoScaleMode = AutoScaleMode.Dpi;
+        ResumeLayout(false);
+        PerformLayout();
     }
 
     public void UpdateStatus(string message)

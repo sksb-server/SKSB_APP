@@ -465,12 +465,21 @@ static class Program
             string fileName = Path.GetFileName(file);
             string ext = Path.GetExtension(file).ToLowerInvariant();
 
-            string destinationPath = ext switch
-            {
-                ".xltx" or ".xltm" => Path.Combine(TemplatesFolder, fileName),
-                ".xll" or ".dna" => Path.Combine(AddInsFolder, fileName),
-                _ => Path.Combine(RootPath, fileName)
-            };
+            string relative = Path.GetRelativePath(sourceFolder, file);
+            string topDir = relative.Split(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)[0];
+
+            string destinationPath;
+            if (relative.Contains(Path.DirectorySeparatorChar) && topDir.Equals("templates", StringComparison.OrdinalIgnoreCase))
+                destinationPath = Path.Combine(TemplatesFolder, fileName);
+            else if (relative.Contains(Path.DirectorySeparatorChar) && topDir.Equals("addins", StringComparison.OrdinalIgnoreCase))
+                destinationPath = Path.Combine(AddInsFolder, fileName);
+            else
+                destinationPath = ext switch
+                {
+                    ".xltx" or ".xltm" => Path.Combine(TemplatesFolder, fileName),
+                    ".xll" or ".dna" => Path.Combine(AddInsFolder, fileName),
+                    _ => Path.Combine(RootPath, fileName)
+                };
 
             for (int i = 0; i < 3; i++)
             {

@@ -731,7 +731,7 @@ ALTER TABLE vehicle_maintenance ADD COLUMN IF NOT EXISTS workshop_address TEXT D
     public static void PersistProjects(IList<ProjectRecord> projects, bool isFullBatch)
     {
         var items = projects.Where(p => !string.IsNullOrWhiteSpace(p.ProjectCode)).ToList();
-        if (!items.Any()) return;
+        if (!items.Any() && !isFullBatch) return;
 
         static DateTime? ToDt(DateOnly? d) => d.HasValue ? d.Value.ToDateTime(TimeOnly.MinValue) : null;
 
@@ -816,6 +816,8 @@ ALTER TABLE project_master ADD COLUMN IF NOT EXISTS profit_margin       NUMERIC(
                 conn.Execute("DELETE FROM project_master WHERE project_id != ALL(@ActiveIds);", new { ActiveIds = activeIds }, trans);
             }
 
+            if (masterRecords.Count == 0) return;
+
             conn.Execute(@"
 INSERT INTO project_master (
     project_id, category, reference_no, project_type, priority, status, company_id, company_name, staff_id, pic,
@@ -865,7 +867,7 @@ ON CONFLICT (project_id) DO UPDATE SET
     public static void PersistCompanies(IList<CompanyRecord> companies, bool isFullBatch)
     {
         var items = companies.Where(c => c.CompanyID > 0).ToList();
-        if (!items.Any()) return;
+        if (!items.Any() && !isFullBatch) return;
 
         var activeIds = items.Select(c => c.CompanyID).ToArray();
         var records = items.Select(c => new
@@ -891,6 +893,8 @@ ALTER TABLE company_master ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAU
             {
                 conn.Execute("DELETE FROM company_master WHERE company_id != ALL(@ActiveIds);", new { ActiveIds = activeIds }, trans);
             }
+
+            if (records.Count == 0) return;
 
             conn.Execute(@"
                 INSERT INTO company_master (company_id, legal_company_name, short_company_name)

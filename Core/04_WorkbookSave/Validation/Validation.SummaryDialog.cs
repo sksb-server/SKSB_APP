@@ -19,12 +19,12 @@ public class SummaryDialog : Form
 
     public SummaryDialog(string moduleName, List<string> errors, List<string> warnings)
     {
+        SuspendLayout();
         Text = $"{moduleName} - Data Integrity Check";
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
-        AutoScaleMode = AutoScaleMode.Dpi;
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
         Padding = new Padding(24, 20, 24, 20);
@@ -52,6 +52,7 @@ public class SummaryDialog : Form
         pnlIndicator.Paint += (s, e) =>
         {
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            e.Graphics.ScaleTransform(pnlIndicator.ClientSize.Width / 38f, pnlIndicator.ClientSize.Height / 38f);
             Color iconColor = hasErrors ? Color.FromArgb(220, 38, 38) : Color.FromArgb(217, 119, 6);
             using var brush = new SolidBrush(iconColor);
             e.Graphics.FillEllipse(brush, 2, 2, 34, 34);
@@ -211,6 +212,11 @@ public class SummaryDialog : Form
         layout.Controls.Add(pnlIndicator, 0, 0);
         layout.Controls.Add(pnlContent, 1, 0);
         Controls.Add(layout);
+
+        AutoScaleDimensions = new SizeF(96f, 96f);
+        AutoScaleMode = AutoScaleMode.Dpi;
+        ResumeLayout(false);
+        PerformLayout();
     }
 
     private void ShowDetailsModal(string title, List<string> items)
@@ -224,6 +230,7 @@ public class SummaryDialog : Form
             MinimizeBox = false,
             MaximizeBox = true
         };
+        detailsForm.SuspendLayout();
 
         var txtLog = new TextBox
         {
@@ -248,6 +255,10 @@ public class SummaryDialog : Form
 
         txtLog.Text = sb.ToString();
         detailsForm.Controls.Add(txtLog);
+        detailsForm.AutoScaleDimensions = new SizeF(96f, 96f);
+        detailsForm.AutoScaleMode = AutoScaleMode.Dpi;
+        detailsForm.ResumeLayout(false);
+        detailsForm.PerformLayout();
         detailsForm.ShowDialog(this);
     }
 }

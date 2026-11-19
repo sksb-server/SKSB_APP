@@ -37,6 +37,25 @@ public static class Arrow
     [return: MarshalAs(UnmanagedType.Bool)]
     private static extern bool ReleaseCapture();
 
+    [DllImport("user32.dll")]
+    private static extern uint GetDpiForWindow(IntPtr hWnd);
+
+    // DPI scale (1.0 = 96 DPI) of the monitor hosting the Excel window; refreshed on every show/open.
+    private static double _currentDpiScale = 1.0;
+
+    private static double GetDpiScale(IntPtr hwnd)
+    {
+        if (hwnd == IntPtr.Zero) return 1.0;
+        try
+        {
+            uint dpi = GetDpiForWindow(hwnd);
+            return dpi == 0 ? 1.0 : dpi / 96.0;
+        }
+        catch { return 1.0; }
+    }
+
+    private static int ScalePx(int px, double dpiScale) => Math.Max(1, (int)Math.Round(px * dpiScale));
+
     [DllImport("user32.dll", EntryPoint = "SetWindowLongPtr")]
     private static extern IntPtr SetWindowLongPtr64(IntPtr hWnd, int nIndex, IntPtr dwNewLong);
 
@@ -122,11 +141,14 @@ public static class Arrow
             e.Graphics.SmoothingMode = System.Drawing.Drawing2D.SmoothingMode.AntiAlias;
             int cx = _arrowButton.ClientSize.Width / 2;
             int cy = _arrowButton.ClientSize.Height / 2;
+            int dx = ScalePx(4, _currentDpiScale);
+            int dyTop = ScalePx(2, _currentDpiScale);
+            int dyBot = ScalePx(3, _currentDpiScale);
             Point[] triangle =
             {
-                new(cx - 4, cy - 2),
-                new(cx + 4, cy - 2),
-                new(cx, cy + 3)
+                new(cx - dx, cy - dyTop),
+                new(cx + dx, cy - dyTop),
+                new(cx, cy + dyBot)
             };
             using var brush = new SolidBrush(Color.FromArgb(70, 70, 70));
             e.Graphics.FillPolygon(brush, triangle);
@@ -208,11 +230,18 @@ public static class Arrow
     {
         if (e.Index < 0 || e.Index >= _listBox!.Items.Count) return;
         object rawObj = _listBox.Items[e.Index];
-        if (rawObj is not DropdownOption item)
+        var (label, isOption) = FormatItemLabel(rawObj);
+
+        // Full item height (no vertical inset) so VerticalCenter never clips glyphs at high DPI.
+        int padX = ScalePx(6, _currentDpiScale);
+        var textBounds = new Rectangle(e.Bounds.X + padX, e.Bounds.Y, Math.Max(1, e.Bounds.Width - (padX * 2)), e.Bounds.Height);
+        const TextFormatFlags flags = TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.NoPrefix |
+                                      TextFormatFlags.SingleLine | TextFormatFlags.EndEllipsis;
+
+        if (!isOption || rawObj is not DropdownOption item)
         {
             e.DrawBackground();
-            TextRenderer.DrawText(e.Graphics, rawObj.ToString() ?? string.Empty, e.Font!, new Rectangle(e.Bounds.X + 6, e.Bounds.Y + 2, e.Bounds.Width - 8, e.Bounds.Height - 4),
-                Color.Gray, TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+            TextRenderer.DrawText(e.Graphics, label, e.Font!, textBounds, Color.Gray, flags);
             return;
         }
 
@@ -228,13 +257,21 @@ public static class Arrow
         using var bgBrush = new SolidBrush(backColor);
         e.Graphics.FillRectangle(bgBrush, e.Bounds);
 
-        var textBounds = new Rectangle(e.Bounds.X + 6, e.Bounds.Y + 2, e.Bounds.Width - 8, e.Bounds.Height - 4);
-        string label = _isMultiSelectSession && item.IsValid
-            ? (isChecked ? "\u2713  " : "     ") + item.Display
-            : item.Display;
         // GDI text (not GDI+ DrawString) so Windows font-linking falls back to Segoe UI Emoji / Symbol for icons.
-        TextRenderer.DrawText(e.Graphics, label, e.Font!, textBounds, foreColor,
-            TextFormatFlags.VerticalCenter | TextFormatFlags.Left | TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+        TextRenderer.DrawText(e.Graphics, label, e.Font!, textBounds, foreColor, flags);
+    }
+
+    /// <summary>Single source of truth for the rendered item text (incl. multi-select tick / indent) used by drawing and width measurement.</summary>
+    private static (string Label, bool IsOption) FormatItemLabel(object rawObj)
+    {
+        if (rawObj is not DropdownOption item) return (rawObj?.ToString() ?? string.Empty, false);
+
+        if (_isMultiSelectSession && item.IsValid)
+        {
+            bool isChecked = _checkedTokens.Contains(item.Display);
+            return ((isChecked ? "\u2713  " : "     ") + item.Display, true);
+        }
+        return (item.Display, true);
     }
 
     public static void ShowArrowForCell(dynamic cell)
@@ -277,14 +314,18 @@ public static class Arrow
                 return;
             }
 
+            double dpiScale = GetDpiScale(excelHwnd);
+            _currentDpiScale = dpiScale;
+
             int cellHeightPx = cellBottomPx - cellTopPx;
-            int arrowWidthPx = 18;
+            int arrowWidthPx = ScalePx(18, dpiScale);
             int arrowHeightPx = cellHeightPx;
-            int arrowXPx = cellRightPx + 1;
+            int arrowXPx = cellRightPx + ScalePx(1, dpiScale);
             int arrowYPx = cellTopPx;
 
             if (!_arrowHost!.Visible) _arrowHost.Show();
             SetWindowPos(_arrowHost.Handle, HWND_TOP, arrowXPx, arrowYPx, arrowWidthPx, arrowHeightPx, SWP_SHOWWINDOW | SWP_NOACTIVATE);
+            _arrowButton?.Invalidate();
             HidePopup();
         }
         catch (Exception ex)
@@ -521,18 +562,55 @@ public static class Arrow
             int cellTopPx = targetPane.PointsToScreenPixelsY((double)singleCell.Top);
             int cellBottomPx = targetPane.PointsToScreenPixelsY((double)singleCell.Top + (double)singleCell.Height);
 
-            int popupWidthPx = Math.Max((cellRightPx - cellLeftPx) + 19, 160);
-            int calculatedHeightPx = Math.Min(240, Math.Max(38, (_listBox.Items.Count * _listBox.ItemHeight) + 4));
+            // =========================================================================
+            // DPI-AWARE SIZING (measure rendered labels on the Excel window's monitor)
+            // =========================================================================
+            IntPtr excelHwnd = GetExcelHwnd(xlApp);
+            double dpiScale = GetDpiScale(excelHwnd);
+            _currentDpiScale = dpiScale;
+
+            int maxTextWidth = 0;
+            int maxTextHeight = 0;
+            using (var g = Graphics.FromHwnd(excelHwnd != IntPtr.Zero ? excelHwnd : _listBox.Handle))
+            {
+                double gScale = g.DpiY > 0 ? g.DpiY / 96.0 : 1.0;
+                // Mixed-DPI: if the measuring surface reports a lower DPI than the target monitor, scale up so we never underestimate.
+                double measureAdjust = dpiScale > gScale ? dpiScale / gScale : 1.0;
+                var unbounded = new Size(int.MaxValue, int.MaxValue);
+
+                foreach (object rawObj in _listBox.Items)
+                {
+                    string label = FormatItemLabel(rawObj).Label;
+                    Size measured = TextRenderer.MeasureText(g, label, _listBox.Font, unbounded, TextFormatFlags.NoPrefix | TextFormatFlags.SingleLine);
+                    maxTextWidth = Math.Max(maxTextWidth, (int)Math.Ceiling(measured.Width * measureAdjust));
+                    maxTextHeight = Math.Max(maxTextHeight, (int)Math.Ceiling(measured.Height * measureAdjust));
+                }
+            }
+
+            int itemHeightPx = Math.Clamp(Math.Max(maxTextHeight + ScalePx(6, dpiScale), ScalePx(24, dpiScale)), 18, 255);
+            if (_listBox.ItemHeight != itemHeightPx) _listBox.ItemHeight = itemHeightPx;
 
             // Fit to the working area of the monitor hosting the cell (coordinates may be negative
             // on secondary monitors); flip above the cell / shift left only when it would overflow.
             Rectangle workArea = Screen.FromPoint(new Point(cellLeftPx, cellBottomPx)).WorkingArea;
+
+            int maxPopupHeightPx = Math.Min(workArea.Height / 2, (_listBox.ItemHeight * 10) + ScalePx(4, dpiScale));
+            int contentHeightPx = (_listBox.Items.Count * _listBox.ItemHeight) + ScalePx(4, dpiScale);
+            int calculatedHeightPx = Math.Min(maxPopupHeightPx, Math.Max(_listBox.ItemHeight + ScalePx(8, dpiScale), contentHeightPx));
+
+            bool needsVScroll = contentHeightPx > calculatedHeightPx;
+            int scrollBarPx = needsVScroll ? Math.Max(SystemInformation.VerticalScrollBarWidth, ScalePx(18, dpiScale)) : 0;
+            int hPadPx = ScalePx(16, dpiScale);
+            int cellWidthPx = (cellRightPx - cellLeftPx) + ScalePx(19, dpiScale);
+            int desiredWidthPx = Math.Max(cellWidthPx, Math.Max(ScalePx(160, dpiScale), maxTextWidth + hPadPx + scrollBarPx));
+            int popupWidthPx = Math.Min(desiredWidthPx, Math.Max(ScalePx(160, dpiScale), workArea.Width - ScalePx(16, dpiScale)));
+
             int popupXPx = cellLeftPx;
             int popupYPx = cellBottomPx;
             if (popupYPx + calculatedHeightPx > workArea.Bottom && cellTopPx - calculatedHeightPx >= workArea.Top)
                 popupYPx = cellTopPx - calculatedHeightPx;
-            if (popupXPx + popupWidthPx > workArea.Right)
-                popupXPx = Math.Max(workArea.Left, workArea.Right - popupWidthPx);
+            popupXPx = Math.Max(workArea.Left, Math.Min(popupXPx, workArea.Right - popupWidthPx));
+            popupYPx = Math.Max(workArea.Top, Math.Min(popupYPx, workArea.Bottom - calculatedHeightPx));
 
             if (!_popupHost!.Visible) _popupHost.Show();
             SetWindowPos(_popupHost.Handle, HWND_TOP, popupXPx, popupYPx, popupWidthPx, calculatedHeightPx, SWP_SHOWWINDOW | SWP_NOACTIVATE);

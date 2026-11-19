@@ -14,6 +14,8 @@ internal static partial class SheetMapper
     /// <summary>Companies read during the latest extract; used by the project validators.</summary>
     private static List<CompanyRecord>? _extractedCompanies;
 
+    internal static bool HasExtractedCompanies => (_extractedCompanies?.Count ?? 0) > 0;
+
     // =========================================================================
     // 1. EXTRACTION & VALIDATION
     // =========================================================================

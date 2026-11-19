@@ -11,7 +11,13 @@ using System.Text;
 
 public class PostgreSqlService
 {
-    public const string DefaultConnectionString = "Host=192.168.0.20;Port=5432;Database=sksb_db;Username=sksb_server;Password=sksb7811;Timeout=5;";
+    public const string ReleaseConnectionString = "Host=192.168.0.20;Port=5432;Database=sksb_db;Username=sksb_server;Password=sksb7811;Timeout=5;";
+    public const string DebugConnectionString = "Host=192.168.0.20;Port=5432;Database=sksb_db;Username=sksb_server;Password=sksb7811;Timeout=5;SearchPath=debug;";
+#if DEBUG
+    public const string DefaultConnectionString = DebugConnectionString;
+#else
+    public const string DefaultConnectionString = ReleaseConnectionString;
+#endif
 
     private readonly string _connectionString;
 
@@ -23,6 +29,10 @@ public class PostgreSqlService
     private NpgsqlConnection CreateConnection()
     {
         ServerEnvironment.GuardConnection();
+#if DEBUG
+        if (string.Equals(_connectionString, DefaultConnectionString, StringComparison.Ordinal))
+            ServerEnvironment.EnsureDebugSchemaBootstrapped();
+#endif
         return new NpgsqlConnection(_connectionString);
     }
 

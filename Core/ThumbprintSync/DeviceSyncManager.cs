@@ -8,6 +8,7 @@ using System.Linq;
 using System.Text.Json;
 using System.Threading.Tasks;
 using ExcelDna.Integration;
+using SKSB_App.Core.Bootstrap.Storage;
 using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.Types;
 
@@ -89,10 +90,26 @@ public static class DeviceSyncManager
             try { addinDirectory = Path.GetDirectoryName(ExcelDnaUtil.XllPath); } catch { }
         }
         if (string.IsNullOrWhiteSpace(addinDirectory)) addinDirectory = AppContext.BaseDirectory;
-        string bridgePath = Path.Combine(addinDirectory, "ZkBridge.exe");
-        if (!File.Exists(bridgePath)) bridgePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ZkBridge.exe");
-        if (!File.Exists(bridgePath))
-            throw new FileNotFoundException($"Cannot locate ZkBridge.exe next to the add-in ({addinDirectory}).");
+        string? parentDirectory = null;
+        try { parentDirectory = Path.GetDirectoryName(addinDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar)); } catch { }
+        string? rootDirectory = null;
+        try { rootDirectory = FolderRegistry.SKSB_App.GetPath(); } catch { }
+
+        string? bridgePath = null;
+        var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (string? dir in new[] { addinDirectory, parentDirectory, rootDirectory, AppDomain.CurrentDomain.BaseDirectory })
+        {
+            if (string.IsNullOrWhiteSpace(dir) || !seen.Add(dir)) continue;
+            string candidate = Path.Combine(dir, "ZkBridge.exe");
+            if (File.Exists(candidate)) { bridgePath = candidate; break; }
+        }
+        if (bridgePath == null)
+        {
+            string where = !string.IsNullOrWhiteSpace(rootDirectory) && !string.Equals(rootDirectory, addinDirectory, StringComparison.OrdinalIgnoreCase)
+                ? $"{addinDirectory} or {rootDirectory}"
+                : addinDirectory;
+            throw new FileNotFoundException($"Cannot locate ZkBridge.exe next to the add-in ({where}).");
+        }
 
         var startInfo = new ProcessStartInfo
         {

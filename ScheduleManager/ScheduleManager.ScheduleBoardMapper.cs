@@ -457,13 +457,68 @@ internal static class ScheduleBoardMapper
                 {
                     dynamic cell = ws.Cells[band.HeaderRow, SlotColumn(slot)];
                     cell.ClearComments();
-                    if (!string.IsNullOrEmpty(comments[slot])) cell.AddComment(comments[slot]);
+                    if (!string.IsNullOrEmpty(comments[slot])) ApplySizedComment(cell, comments[slot]!);
                 }
                 catch { /* comments are advisory */ }
             }
         }
 
         EnsureConditionalFormats(ws, cutOffText, slotCount);
+    }
+
+    // Excel does not reflow AutoSize for hidden comments while ScreenUpdating = false, so the box
+    // is sized deterministically from text metrics (points), padded for >100% DPI font scaling.
+    private static void ApplySizedComment(dynamic cell, string text)
+    {
+        string normalized = text.Replace("\r\n", "\n");
+        dynamic comment = cell.AddComment(normalized);
+
+        double maxLinePt = 0.0;
+        var linePts = new List<double>();
+        double maxLineHeightPt = 0.0;
+
+        // Exact GDI measurement with Excel's classic Note font (Tahoma 9pt).
+        using (var bmp = new System.Drawing.Bitmap(1, 1))
+        using (var g = System.Drawing.Graphics.FromImage(bmp))
+        using (var noteFont = new System.Drawing.Font("Tahoma", 9f))
+        {
+            double ptPerPxX = 72.0 / (g.DpiX > 0 ? g.DpiX : 96f);
+            double ptPerPxY = 72.0 / (g.DpiY > 0 ? g.DpiY : 96f);
+            var unbounded = new System.Drawing.Size(int.MaxValue, int.MaxValue);
+            const System.Windows.Forms.TextFormatFlags flags =
+                System.Windows.Forms.TextFormatFlags.NoPrefix | System.Windows.Forms.TextFormatFlags.SingleLine;
+
+            foreach (string line in normalized.Split('\n'))
+            {
+                string sample = line.Length == 0 ? " " : line;
+                var measured = System.Windows.Forms.TextRenderer.MeasureText(g, sample, noteFont, unbounded, flags);
+                double linePt = measured.Width * ptPerPxX * 1.08;
+                linePts.Add(linePt);
+                if (linePt > maxLinePt) maxLinePt = linePt;
+                maxLineHeightPt = Math.Max(maxLineHeightPt, measured.Height * ptPerPxY);
+            }
+        }
+
+        double lineHeightPt = Math.Max(11.5, maxLineHeightPt);
+        const double padX = 16.0, padY = 12.0;
+        double targetWidth = Math.Clamp(maxLinePt + padX, 110.0, 380.0);
+        double innerWidth = Math.Max(90.0, targetWidth - padX);
+        int wrappedLines = 0;
+        foreach (double lp in linePts)
+            wrappedLines += Math.Max(1, (int)Math.Ceiling(lp / innerWidth));
+        double targetHeight = Math.Max(36.0, (wrappedLines * lineHeightPt * 1.12) + padY);
+
+        try
+        {
+            dynamic shape = comment.Shape;
+            shape.TextFrame.AutoSize = false;
+            shape.Width = targetWidth;
+            shape.Height = targetHeight;
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn($"[ScheduleBoard] ApplySizedComment sizing failed: {ex.Message}");
+        }
     }
 
     private static void WriteBlock(dynamic ws, int firstRow, int lastRow, object?[,] values)

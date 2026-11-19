@@ -31,13 +31,13 @@ public class ImportResultDialog : Form
 
     public ImportResultDialog(ImportSummaryReport report, string fileName)
     {
+        SuspendLayout();
         _report = report;
         Text = $"{report.SourceSystemName} Import Summary";
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
         MinimizeBox = false;
-        AutoScaleMode = AutoScaleMode.Dpi;
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
         Padding = new Padding(24, 20, 24, 20);
@@ -64,6 +64,7 @@ public class ImportResultDialog : Form
         pnlIndicator.Paint += (s, e) =>
         {
             e.Graphics.SmoothingMode = SmoothingMode.AntiAlias;
+            e.Graphics.ScaleTransform(pnlIndicator.ClientSize.Width / 36f, pnlIndicator.ClientSize.Height / 36f);
             Color iconColor = hasErrors ? Color.FromArgb(217, 119, 6) : Color.FromArgb(16, 149, 193);
             using var brush = new SolidBrush(iconColor);
             e.Graphics.FillEllipse(brush, 2, 2, 32, 32);
@@ -176,6 +177,11 @@ public class ImportResultDialog : Form
         layout.Controls.Add(pnlIndicator, 0, 0);
         layout.Controls.Add(pnlContent, 1, 0);
         Controls.Add(layout);
+
+        AutoScaleDimensions = new SizeF(96f, 96f);
+        AutoScaleMode = AutoScaleMode.Dpi;
+        ResumeLayout(false);
+        PerformLayout();
     }
 
     private void ShowDetailedErrors()
@@ -189,6 +195,7 @@ public class ImportResultDialog : Form
             MinimizeBox = false,
             MaximizeBox = true
         };
+        errForm.SuspendLayout();
 
         var txtLog = new TextBox
         {
@@ -218,6 +225,10 @@ public class ImportResultDialog : Form
 
         txtLog.Text = sb.ToString();
         errForm.Controls.Add(txtLog);
+        errForm.AutoScaleDimensions = new SizeF(96f, 96f);
+        errForm.AutoScaleMode = AutoScaleMode.Dpi;
+        errForm.ResumeLayout(false);
+        errForm.PerformLayout();
         errForm.ShowDialog(this);
     }
 }

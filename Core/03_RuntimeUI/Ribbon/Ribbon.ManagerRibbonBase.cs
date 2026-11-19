@@ -185,6 +185,13 @@ public abstract class ManagerRibbonBase : ExcelRibbon
                                 imageMso='HighImportance'
                                 getPressed='GetSimulateOfflinePressed'
                                 onAction='OnToggleOfflineClicked' />
+                  <button id='btnMirrorReleaseData'
+                          label='Mirror Data from Release'
+                          size='large'
+                          imageMso='DatabaseCopyDatabaseFile'
+                          screentip='Mirror Release Data to Debug Server'
+                          supertip='Resets the isolated Debug schema (debug.*) to an exact copy of the live Release database (public.*) and reloads this workbook.'
+                          onAction='OnMirrorReleaseDataClicked' />
                 </group>";
 #else
         return string.Empty;
@@ -227,7 +234,11 @@ public abstract class ManagerRibbonBase : ExcelRibbon
         => ServerEnvironment.IsOffline ? "STATUS: OFFLINE MODE" : "STATUS: ONLINE";
 
     public string GetServerSourceLabel(IRibbonControl control)
+#if DEBUG
+        => ServerEnvironment.IsOffline ? "Source: Local Offline Snapshot" : "Source: Debug Server (debug)";
+#else
         => ServerEnvironment.IsOffline ? "Source: Local Offline Snapshot" : "Source: PostgreSQL Server";
+#endif
 
     public string GetServerPendingLabel(IRibbonControl control)
         => Contract.HasPendingUpload ? "Pending Upload: YES (Uncommitted)" : "Pending Upload: None";
@@ -550,6 +561,36 @@ public abstract class ManagerRibbonBase : ExcelRibbon
 
     public void OnToggleOfflineClicked(IRibbonControl control, bool pressed)
         => ServerEnvironment.ToggleSimulatedOffline(RibbonUi, control.Id, pressed);
+
+    public void OnMirrorReleaseDataClicked(IRibbonControl control)
+    {
+        if (ServerEnvironment.IsOffline)
+        {
+            MessageBox.Show("The server is offline. Disable 'Simulate Server Offline' or Ping Server first.",
+                "Mirror Data from Release", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            return;
+        }
+
+        var answer = MessageBox.Show(
+            "Reset the Debug database (schema 'debug') to an exact mirror of the live Release database (schema 'public')?\n\nAll current Debug-only database changes across all tables will be overwritten with live Release data, and this workbook will reload.",
+            "Mirror Data from Release", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+        if (answer != DialogResult.Yes) return;
+
+        if (!ServerEnvironment.MirrorReleaseToDebug(out int tables, out int rows, out string err))
+        {
+            MessageBox.Show($"Failed to mirror Release database:\n\n{err}", "Mirror Failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
+
+        AppLogger.Info($"[Debug Server] Mirrored {tables} tables ({rows} total rows) from 'public' to 'debug'.");
+        Contract.ClearPendingUpload();
+        OnLoadClicked(control);
+        ExcelAsyncUtil.QueueAsMacro(() =>
+        {
+            try { SheetOperations.ShowStatusConfirmation($"[DEBUG SERVER] Mirrored {rows} row(s) across {tables} table(s) from Release and reloaded {Contract.ModuleName}."); }
+            catch { }
+        });
+    }
 
 #endif
 }

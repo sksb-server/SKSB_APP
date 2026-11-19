@@ -55,23 +55,27 @@ public static class FolderRegistry
 #if DEBUG
     private static string ResolveDebugSolutionRoot()
     {
-        try
+        var startDirs = new List<string?>();
+        try { startDirs.Add(Path.GetDirectoryName(ExcelDna.Integration.ExcelDnaUtil.XllPath)); } catch { }
+        startDirs.Add(AppContext.BaseDirectory);
+
+        foreach (var startDir in startDirs)
         {
-            string? startDir = AppContext.BaseDirectory;
-            if (!string.IsNullOrWhiteSpace(startDir))
+            if (string.IsNullOrWhiteSpace(startDir)) continue;
+            try
             {
                 var dir = new DirectoryInfo(startDir);
                 while (dir != null)
                 {
-                    if (dir.GetFiles("*.sln").Length > 0 || dir.GetDirectories(".git").Length > 0)
+                    if (dir.GetFiles("*.sln").Length > 0 || dir.GetFiles("*.slnx").Length > 0 || dir.GetDirectories(".git").Length > 0)
                     {
                         return dir.FullName;
                     }
                     dir = dir.Parent;
                 }
             }
+            catch { }
         }
-        catch { }
 
         // Hard fallback to codes repository root
         if (Directory.Exists(CodesRootPath))

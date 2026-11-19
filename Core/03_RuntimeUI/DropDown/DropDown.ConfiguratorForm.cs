@@ -19,6 +19,7 @@ public class ConfiguratorForm : Form
 
     public ConfiguratorForm(dynamic singleCell)
     {
+        SuspendLayout();
         _singleCell = singleCell;
         string cellAddress = _singleCell.Address?.ToString() ?? "Selected Cell";
 
@@ -28,7 +29,6 @@ public class ConfiguratorForm : Form
         MaximizeBox = false;
         MinimizeBox = false;
         TopMost = true;
-        AutoScaleMode = AutoScaleMode.Dpi;
         Font = new Font("Segoe UI", 9.5f, FontStyle.Regular);
         AutoSize = true;
         AutoSizeMode = AutoSizeMode.GrowAndShrink;
@@ -177,6 +177,12 @@ public class ConfiguratorForm : Form
         Controls.Add(layout);
         AcceptButton = _btnConfirm;
         CancelButton = _btnCancel;
+
+        // Declare 96-DPI design baseline so WinForms scales hardcoded sizes/margins/paddings at >100% DPI.
+        AutoScaleDimensions = new SizeF(96f, 96f);
+        AutoScaleMode = AutoScaleMode.Dpi;
+        ResumeLayout(false);
+        PerformLayout();
     }
 
     private void OnConfirmClicked(object? sender, EventArgs e)
