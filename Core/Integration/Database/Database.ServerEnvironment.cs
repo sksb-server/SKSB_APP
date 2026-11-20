@@ -204,7 +204,7 @@ public static class ServerEnvironment
         Exec("DROP SCHEMA IF EXISTS debug CASCADE; CREATE SCHEMA debug;", out _);
 
         var tables = new System.Collections.Generic.List<string>();
-        using (var cmd = new NpgsqlCommand("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE' ORDER BY table_name;", conn, trans))
+        using (var cmd = new NpgsqlCommand("SELECT table_name FROM information_schema.tables WHERE table_schema = 'public' AND table_type = 'BASE TABLE' AND table_name NOT IN ('bug_reports', 'bug_report_attachments') ORDER BY table_name;", conn, trans))
         using (var r = cmd.ExecuteReader())
             while (r.Read()) tables.Add(r.GetString(0));
 
@@ -215,7 +215,8 @@ JOIN pg_namespace n ON n.oid = c.relnamespace AND n.nspname = 'public'
 JOIN pg_depend d ON d.objid = c.oid
 JOIN pg_class t ON d.refobjid = t.oid
 JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = d.refobjsubid
-WHERE c.relkind = 'S';";
+WHERE c.relkind = 'S'
+  AND t.relname NOT IN ('bug_reports', 'bug_report_attachments');";
         using (var cmd = new NpgsqlCommand(seqSql, conn, trans))
         using (var r = cmd.ExecuteReader())
             while (r.Read()) seqs.Add((r.GetString(0), r.GetString(1), r.GetString(2)));

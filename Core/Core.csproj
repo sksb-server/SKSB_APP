@@ -14,6 +14,7 @@
 
 	<ItemGroup>
 	  <EmbeddedResource Include="Integration\Database\Schema\schedule_schema.sql" LogicalName="schedule_schema.sql" />
+	  <EmbeddedResource Include="Integration\Database\Schema\bug_report_schema.sql" LogicalName="bug_report_schema.sql" />
 	</ItemGroup>
 
 	<ItemGroup>

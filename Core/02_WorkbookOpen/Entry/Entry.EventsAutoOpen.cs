@@ -7,6 +7,9 @@ using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.RuntimeUI.DropDown;
 using SKSB_App.Core.RuntimeUI.RuleEngine;
 using SKSB_App.Core.RuntimeUI.TableRowManager;
+#if DEBUG
+using SKSB_App.Core.RuntimeUI.TemplateEditor.RulesAudit;
+#endif
 using SKSB_App.Core.WorkbookOpen.Sheet;
 using SKSB_App.Core.WorkbookOpen.Sync;
 using SKSB_App.Core.WorkbookSave.SheetMapper;
@@ -22,6 +25,11 @@ public class EventsAutoOpen : IExcelAddIn
 
     private delegate void WindowActivateDelegate(dynamic wb, dynamic wn);
     private static WindowActivateDelegate? _windowActivateHandler;
+
+#if DEBUG
+    private delegate void WorkbookAfterSaveDelegate(dynamic wb, bool success);
+    private static WorkbookAfterSaveDelegate? _afterSaveHandler;
+#endif
 
     private static SheetDoubleClickDelegate? _doubleClickHandler;
     private static SheetSelectionChangeDelegate? _selectionHandler;
@@ -131,7 +139,6 @@ public class EventsAutoOpen : IExcelAddIn
                     SheetOperations.SetAuxiliarySheetsVisibility(visible: true);
                     EnumList.SyncAllCoreEnums();
                     DataList.SyncAllTemplateData();
-                    SKSB_App.Core.RuntimeUI.TemplateEditor.RibbonController.RefreshRibbonUI();
                 }
                 else
                 {
@@ -176,7 +183,6 @@ public class EventsAutoOpen : IExcelAddIn
                 Environment.SetEnvironmentVariable(LastTemplateModeKey, isTemplate ? "1" : "0");
                 AppLogger.Info($"WindowActivate mode switch: IsTemplateEditMode -> {isTemplate}");
                 SheetOperations.SetAuxiliarySheetsVisibility(visible: isTemplate);
-                SKSB_App.Core.RuntimeUI.TemplateEditor.RibbonController.RefreshRibbonUI();
             }
         }
         catch (Exception ex)
@@ -213,6 +219,11 @@ public class EventsAutoOpen : IExcelAddIn
             _changeHandler = new SheetChangeDelegate(OnSheetChange);
             _xlAppRoot.SheetChange += _changeHandler;
 
+#if DEBUG
+            _afterSaveHandler = new WorkbookAfterSaveDelegate(OnWorkbookAfterSave);
+            _xlAppRoot.WorkbookAfterSave += _afterSaveHandler;
+#endif
+
             AppLogger.Info("Application Sheet Events hooked successfully with full navigation diagnostics.");
         }
         catch (Exception ex)
@@ -232,11 +243,34 @@ public class EventsAutoOpen : IExcelAddIn
                 if (_doubleClickHandler != null) { _xlAppRoot.SheetBeforeDoubleClick -= _doubleClickHandler; _doubleClickHandler = null; }
                 if (_selectionHandler != null) { _xlAppRoot.SheetSelectionChange -= _selectionHandler; _selectionHandler = null; }
                 if (_changeHandler != null) { _xlAppRoot.SheetChange -= _changeHandler; _changeHandler = null; }
+#if DEBUG
+                if (_afterSaveHandler != null) { _xlAppRoot.WorkbookAfterSave -= _afterSaveHandler; _afterSaveHandler = null; }
+#endif
                 _xlAppRoot = null;
             }
         }
         catch { }
     }
+
+#if DEBUG
+    private static void OnWorkbookAfterSave(dynamic wb, bool success)
+    {
+        try
+        {
+            if (!success || wb == null) return;
+
+            bool isTemplate = SheetOperations.IsTemplateEditMode || SheetOperations.IsMasterTemplateFile(wb);
+            if (!isTemplate) return;
+
+            ExcelAsyncUtil.QueueAsMacro(() => RulesAuditExporter.ExportAuditReport(targetWorkbook: wb, silent: true));
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("OnWorkbookAfterSave error", ex);
+        }
+    }
+
+#endif
 
     private static void OnSheetSelectionChange(dynamic sh, dynamic target)
     {

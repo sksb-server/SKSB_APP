@@ -4,6 +4,7 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Linq;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Windows.Forms;
@@ -62,7 +63,7 @@ public static class PortalRouter
     private static readonly Dictionary<string, (Process Process, DateTime LaunchedAtUtc)> _activeLaunches
         = new(StringComparer.OrdinalIgnoreCase);
 
-    public static void Launch(TemplateAddInPair pair)
+    public static void Launch(TemplateAddInPair pair, bool editTemplate = false)
     {
         string excelPath = ExcelRegistry.ExcelPath;
         if (string.IsNullOrEmpty(excelPath) || !File.Exists(excelPath))
@@ -79,14 +80,16 @@ public static class PortalRouter
             string templateFileName = pair.Template();
             string templateBaseName = Path.GetFileNameWithoutExtension(templateFileName);
 
+            string launchKey = editTemplate ? $"{templateBaseName}::edit" : templateBaseName;
+
             // 1. Check if an Excel window with this specific workbook is already open
-            if (TryFocusExistingWorkbook(templateBaseName))
+            if (TryFocusExistingWorkbook(templateBaseName, editTemplate))
             {
                 return; // Module already active and brought to front
             }
 
             // 1b. Guard against a launch still booting (workbook window not yet visible)
-            if (_activeLaunches.TryGetValue(templateBaseName, out var entry))
+            if (_activeLaunches.TryGetValue(launchKey, out var entry))
             {
                 bool exited;
                 try { exited = entry.Process.HasExited; }
@@ -105,11 +108,11 @@ public static class PortalRouter
                 }
 
                 try { entry.Process.Dispose(); } catch { }
-                _activeLaunches.Remove(templateBaseName);
+                _activeLaunches.Remove(launchKey);
             }
 
             // 2. Resolve Template & Target Add-In paths
-            string templatePath = ResolveTemplatePath(templateFileName);
+            string templatePath = ResolveTemplatePath(templateFileName, editTemplate);
             string addInPath = TemplateAddInPair.ResolveAddInPath(pair.AddIn());
 
             // 3. Resolve Core Add-In path so it loads alongside every manager
@@ -133,13 +136,15 @@ public static class PortalRouter
             var startInfo = new ProcessStartInfo
             {
                 FileName = excelPath,
-                Arguments = $"/x /t \"{templatePath}\" \"{coreAddInPath}\" \"{addInPath}\"",
+                Arguments = editTemplate
+                    ? $"/x \"{templatePath}\" \"{coreAddInPath}\" \"{addInPath}\""
+                    : $"/x /t \"{templatePath}\" \"{coreAddInPath}\" \"{addInPath}\"",
                 UseShellExecute = true
             };
 
             Process? started = Process.Start(startInfo);
             if (started != null)
-                _activeLaunches[templateBaseName] = (started, DateTime.UtcNow);
+                _activeLaunches[launchKey] = (started, DateTime.UtcNow);
             }
         }
         catch (FileNotFoundException fnf)
@@ -248,7 +253,7 @@ public static class PortalRouter
     }
 #endif
 
-    private static string ResolveTemplatePath(string templateFileName)
+    private static string ResolveTemplatePath(string templateFileName, bool editTemplate)
     {
 #if DEBUG
         // 1. Check Codes Root: Documents\codes\SKSB_App\Templates\<file>
@@ -267,12 +272,67 @@ public static class PortalRouter
 
         return codesTemplates;
 #else
-        // Release: Always Documents\SKSB_App\Templates\<file>
-        return FolderRegistry.Templates.GetFilePath(templateFileName, mustExist: true);
+        // Release: personal copy in Templates\Custom overrides the company default.
+        string defaultPath = FolderRegistry.Templates.GetFilePath(templateFileName, mustExist: true);
+        string customDir = CustomTemplatesDirectory;
+        string customPath = Path.Combine(customDir, templateFileName);
+        if (editTemplate)
+        {
+            Directory.CreateDirectory(customDir);
+            if (!File.Exists(customPath) && File.Exists(defaultPath))
+                File.Copy(defaultPath, customPath);
+            return customPath;
+        }
+        return File.Exists(customPath) ? customPath : defaultPath;
 #endif
     }
 
-    private static bool TryFocusExistingWorkbook(string targetWorkbookName)
+    public static string CustomTemplatesDirectory => Path.Combine(FolderRegistry.Templates.GetPath(), "Custom");
+
+    public static bool HasAnyCustomTemplates()
+    {
+#if DEBUG
+        return false;
+#else
+        try
+        {
+            return Directory.Exists(CustomTemplatesDirectory)
+                && Directory.EnumerateFiles(CustomTemplatesDirectory, "*.xlt*").Any();
+        }
+        catch { return false; }
+#endif
+    }
+
+    public static int ResetCustomTemplates(out string? error)
+    {
+        error = null;
+        int deleted = 0;
+        bool locked = false;
+        try
+        {
+            if (!Directory.Exists(CustomTemplatesDirectory)) return 0;
+            foreach (string file in Directory.GetFiles(CustomTemplatesDirectory, "*.xlt*"))
+            {
+                try { File.Delete(file); deleted++; }
+                catch (IOException) { locked = true; }
+                catch (UnauthorizedAccessException) { locked = true; }
+            }
+        }
+        catch (Exception ex)
+        {
+            error = $"Could not reset templates:\n{ex.Message}";
+            return deleted;
+        }
+        if (locked)
+            error = "Some templates are in use and could not be reset. Please close Excel and try again.";
+        return deleted;
+    }
+
+    private static bool IsTemplateWindowName(string name) =>
+        name.IndexOf(".xltx", StringComparison.OrdinalIgnoreCase) >= 0
+        || name.IndexOf(".xltm", StringComparison.OrdinalIgnoreCase) >= 0;
+
+    private static bool TryFocusExistingWorkbook(string targetWorkbookName, bool editTemplate)
     {
         try
         {
@@ -283,7 +343,8 @@ public static class PortalRouter
                 foreach (dynamic wb in xlApp.Workbooks)
                 {
                     string wbName = wb.Name?.ToString() ?? string.Empty;
-                    if (wbName.IndexOf(targetWorkbookName, StringComparison.OrdinalIgnoreCase) >= 0)
+                    if (wbName.IndexOf(targetWorkbookName, StringComparison.OrdinalIgnoreCase) >= 0
+                        && IsTemplateWindowName(wbName) == editTemplate)
                     {
                         wb.Activate();
                         xlApp.Visible = true;
@@ -310,7 +371,8 @@ public static class PortalRouter
                 GetWindowText(hWnd, sb, sb.Capacity);
                 string title = sb.ToString();
 
-                if (title.IndexOf(targetWorkbookName, StringComparison.OrdinalIgnoreCase) >= 0)
+                if (title.IndexOf(targetWorkbookName, StringComparison.OrdinalIgnoreCase) >= 0
+                    && IsTemplateWindowName(title) == editTemplate)
                 {
                     bool isExcel = false;
                     try

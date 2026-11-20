@@ -45,7 +45,7 @@ Quick feature, Excel table, C# record, and PostgreSQL table index for translatin
 - **Row Add/Delete & Duplicate Import Guard**: `Core/03_RuntimeUI/TableRowManager/TableRowManager.cs`, `TableRowManager.ImportDuplicates.cs`
 - **Animated Loading Progress Overlay (`ScreenUpdating = false`)**: `Core/03_RuntimeUI/Progress/Progress.LoadingOverlay.cs`
 - **Shared Ribbon & Offline Mode Status / Reconnect Button**: `Core/03_RuntimeUI/Ribbon/Ribbon.ManagerRibbonBase.cs`, `Core/Integration/Database/Database.ServerEnvironment.cs`
-- **Template Rules Audit / Exporter / Importer**: `Core/03_RuntimeUI/TemplateEditor/TemplateEditor.RibbonController.cs`, `RulesAudit/RulesAudit.*.cs`
+- **Template Rules Audit / Exporter / Importer**: `Core/03_RuntimeUI/TemplateEditor/RulesAudit/RulesAudit.*.cs` (auto-exports `*_Rules.md` silently on template save via `Entry.EventsAutoOpen.cs` `WorkbookAfterSave`)
 - **Save Pipeline, DEBUG Save Intercept, Offline Snapshot**: `Core/04_WorkbookSave/Entry/Save.Contract.cs`, `Save.Entry.cs`, `Save.ExitConflictDialog.cs`, `Storage/Storage.OfflineSnapshot.cs`, `Storage.SaveNotificationDialog.cs`
 - **2D Array Table Read/Write & Lookups**: `Core/04_WorkbookSave/SheetMapper/SheetMapper.TableMapper.cs`, `SheetMapperHelper.cs`, `WorkbookMapper.cs`, `StaffLookupHelper.cs`, `VehiclePlateHelper.cs`
 - **Save Validation & Historical/Past-Record Guard**: `Core/04_WorkbookSave/Validation/Validation.RulesExtractor.cs`, `Validation.SummaryDialog.cs`, `Validation.PastRecordGuard.cs`

@@ -1,4 +1,4 @@
-﻿namespace SKSB_App.ScheduleManager;
+namespace SKSB_App.ScheduleManager;
 
 using System;
 using System.Collections.Generic;
@@ -122,6 +122,8 @@ public class RibbonController : ManagerRibbonBase
     // =========================================================================
     // 5. ATTENDANCE
     // =========================================================================
+    protected override void OnAfterPurgeSheetData() => ScheduleBoardMapper.ResetSlotCount();
+
     protected override void OnAfterDuplicateRowsCleaned(int removedCount) => SheetMapper.OnDuplicateRowsCleaned();
 
     public void OnRollupClicked(IRibbonControl control) =>

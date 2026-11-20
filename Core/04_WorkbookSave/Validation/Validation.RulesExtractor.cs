@@ -266,11 +266,13 @@ public static class RulesExtractor
 
         // Pre-build O(1) HashSet per column for allowed picklist options
         var allowedSetByCol = new HashSet<string>?[columnSpan];
+        var hasTableSourceByCol = new bool[columnSpan];
         for (int c = 0; c < columnSpan; c++)
         {
             var cRule = rules.ColumnRules[c].CSharpRule;
             if (cRule != null && cRule.Sources.Length > 0 && !cRule.IsWarningOnly)
             {
+                hasTableSourceByCol[c] = cRule.Sources.Any(s => !string.IsNullOrWhiteSpace(s) && s.Contains('['));
                 var set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 foreach (var src in cRule.Sources)
                 {
@@ -405,8 +407,9 @@ public static class RulesExtractor
 
                 // O(1) HashSet Picklist Lookup
                 var allowedSet = allowedSetByCol[c];
-                if (allowedSet != null && allowedSet.Count > 0 && !cRule.IsWarningOnly)
+                if (allowedSet != null && (allowedSet.Count > 0 || hasTableSourceByCol[c]) && !cRule.IsWarningOnly)
                 {
+                    string emptyNote = allowedSet.Count == 0 ? " (source table is empty)" : string.Empty;
                     if (cRule.IsMultiSelect)
                     {
                         // Every comma separated token is checked on its own against the allowed set.
@@ -415,7 +418,7 @@ public static class RulesExtractor
                         {
                             if (!IsTokenInNormalizedSet(allowedSet, token))
                             {
-                                errors.Add($"  Row {excelRow} [{sheetName}]: '{token}' is not a valid option for '{rule.Header}'.");
+                                errors.Add($"  Row {excelRow} [{sheetName}]: '{token}' is not a valid option for '{rule.Header}'{emptyNote}.");
                             }
                         }
                     }
@@ -424,7 +427,7 @@ public static class RulesExtractor
                         if (!IsTokenInNormalizedSet(allowedSet, strVal))
                         {
                             string displayVal = RuleEvaluator.FormatDisplayValue(rawVal, cRule);
-                            errors.Add($"  Row {excelRow} [{sheetName}]: '{displayVal}' is not a valid option for '{rule.Header}'.");
+                            errors.Add($"  Row {excelRow} [{sheetName}]: '{displayVal}' is not a valid option for '{rule.Header}'{emptyNote}.");
                         }
                     }
                 }

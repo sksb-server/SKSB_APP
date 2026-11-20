@@ -7,6 +7,8 @@
   <PropertyGroup>
     <SourceAddInsDir>$(MSBuildThisFileDirectory)AddIns</SourceAddInsDir>
     <ReleaseDeploymentDir>$(UserProfile)\Documents\SKSB_App</ReleaseDeploymentDir>
+    <!-- Prevent Excel-DNA from auto-exporting public static helper methods as UDFs -->
+    <ExcelAddInExplicitExports>true</ExcelAddInExplicitExports>
   </PropertyGroup>
 
   <!-- ============================================================= -->

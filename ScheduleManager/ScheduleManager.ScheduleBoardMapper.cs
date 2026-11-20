@@ -44,6 +44,7 @@ internal static class ScheduleBoardMapper
 
     /// <summary>Slots currently drawn across the board (refreshed by <see cref="Read"/> / <see cref="Render"/>).</summary>
     private static int _slotCount = 1;
+    internal static void ResetSlotCount() => _slotCount = 1;
     private static int LastBoardColumn => FirstSlotColumn + (_slotCount * SlotWidth) - 1;
 
     private sealed record Band(Shifts Shift, string Label, int HeaderRow, int FirstWorkerRow, int FirstVehicleRow)

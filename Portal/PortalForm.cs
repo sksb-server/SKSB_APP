@@ -1,4 +1,4 @@
-﻿namespace SKSB_App.Portal;
+namespace SKSB_App.Portal;
 
 using System;
 using System.Drawing;
@@ -7,13 +7,25 @@ using System.Drawing.Text;
 using System.IO;
 using System.Reflection;
 using System.Text.Json;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 using SKSB_App.Core.Bootstrap.Storage;
+using SKSB_App.Core.Integration.Database;
+using SKSB_App.Core.RuntimeUI.BugReport;
 
 public class PortalForm : Form
 {
     private readonly string _currentVersion;
     private TableLayoutPanel _layout = null!;
+    private Label _lblSubheader = null!;
+    private Button _btnEditTemplate = null!;
+    private bool _editTemplateMode;
+#if !DEBUG
+    private Button? _btnResetTemplates;
+#endif
+#if DEBUG
+    private Button? _btnBugInbox;
+#endif
 
     public PortalForm()
     {
@@ -24,7 +36,7 @@ public class PortalForm : Form
         string branchLabel = ResolveDebugBranchLabel();
         Text = string.IsNullOrWhiteSpace(branchLabel)
             ? $"SKSB Operations Portal (Debug) - v{_currentVersion}"
-            : $"SKSB Operations Portal (Debug • {branchLabel}) - v{_currentVersion}";
+            : $"SKSB Operations Portal (Debug � {branchLabel}) - v{_currentVersion}";
 #else
         Text = $"SKSB Operations Portal - v{_currentVersion}";
 #endif
@@ -88,6 +100,9 @@ public class PortalForm : Form
         base.OnLoad(e);
         FitClientSizeToLayout();
         CenterToScreen();
+#if DEBUG
+        _ = RefreshBugInboxCountAsync();
+#endif
     }
 
     protected override void OnDpiChanged(DpiChangedEventArgs e)
@@ -154,7 +169,7 @@ public class PortalForm : Form
         headerPanel.Controls.Add(lblHeader);
         headerPanel.Controls.Add(lblVersion);
 
-        var lblSubheader = new Label
+        _lblSubheader = new Label
         {
             Text = "Select an operational module to launch in Excel:",
             Font = new Font("Segoe UI", 9.5f, FontStyle.Regular),
@@ -167,26 +182,73 @@ public class PortalForm : Form
         var btnScheduler = CreateModuleButton(
             "Schedule Manager",
             "Biometric logs, shifts & job site allocations",
-            Color.FromArgb(0xF3, 0xA4, 0x47), // Paper Accent 2 — Warm Amber
-            () => PortalRouter.Launch(ModuleRegistry.ScheduleManager));
+            Color.FromArgb(0xF3, 0xA4, 0x47), // Paper Accent 2 � Warm Amber
+            () => LaunchModule(ModuleRegistry.ScheduleManager));
 
         var btnProject = CreateModuleButton(
             "Project Manager",
             "iJob / PVT sites, CIDB compliance & client scopes",
-            Color.FromArgb(0xA5, 0xB5, 0x92), // Paper Accent 1 — Sage Green
-            () => PortalRouter.Launch(ModuleRegistry.ProjectManager));
+            Color.FromArgb(0xA5, 0xB5, 0x92), // Paper Accent 1 � Sage Green
+            () => LaunchModule(ModuleRegistry.ProjectManager));
 
         var btnStaff = CreateModuleButton(
             "Staff Manager",
             "Profiles, vehicle & skill licenses, SQL Payroll import",
-            Color.FromArgb(0x80, 0x9E, 0xC2), // Paper Accent 6 — Steel Blue
-            () => PortalRouter.Launch(ModuleRegistry.StaffManager));
+            Color.FromArgb(0x80, 0x9E, 0xC2), // Paper Accent 6 � Steel Blue
+            () => LaunchModule(ModuleRegistry.StaffManager));
 
         var btnVehicle = CreateModuleButton(
             "Vehicle Manager",
             "Fleet tracking, Puspakom, road tax & workshop repairs",
-            Color.FromArgb(0xE7, 0xBC, 0x29), // Paper Accent 3 — Mustard Gold
-            () => PortalRouter.Launch(ModuleRegistry.VehicleManager));
+            Color.FromArgb(0xE7, 0xBC, 0x29), // Paper Accent 3 � Mustard Gold
+            () => LaunchModule(ModuleRegistry.VehicleManager));
+
+        // Utility action row: bug reporting (+ Debug-only inbox)
+        var actionRow = new FlowLayoutPanel
+        {
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            Margin = new Padding(0, 4, 0, 0)
+        };
+
+        var btnReportBug = CreateUtilityButton("Report a Bug");
+        btnReportBug.Click += (s, e) => OpenBugReportDialog();
+        actionRow.Controls.Add(btnReportBug);
+
+#if DEBUG
+        _btnBugInbox = CreateUtilityButton("Bug Inbox");
+        _btnBugInbox.Margin = new Padding(8, 0, 0, 0);
+        _btnBugInbox.Click += async (s, e) =>
+        {
+            using (var inbox = new BugReportInboxDialog())
+            {
+                inbox.ShowDialog(this);
+            }
+            await RefreshBugInboxCountAsync();
+        };
+        actionRow.Controls.Add(_btnBugInbox);
+#endif
+
+        _btnEditTemplate = CreateUtilityButton("Edit Template Mode");
+        _btnEditTemplate.Margin = new Padding(8, 0, 0, 0);
+        _btnEditTemplate.Click += (s, e) =>
+        {
+            _editTemplateMode = !_editTemplateMode;
+            UpdateEditTemplateVisuals();
+        };
+        actionRow.Controls.Add(_btnEditTemplate);
+        UpdateEditTemplateVisuals();
+
+
+#if !DEBUG
+        _btnResetTemplates = CreateUtilityButton("Reset Templates");
+        _btnResetTemplates.Margin = new Padding(8, 0, 0, 0);
+        _btnResetTemplates.Enabled = PortalRouter.HasAnyCustomTemplates();
+        _btnResetTemplates.Click += (s, e) => ResetTemplatesClicked();
+        actionRow.Controls.Add(_btnResetTemplates);
+#endif
 
         // Footer: Runtime Status
         var lblFooter = new Label
@@ -199,15 +261,133 @@ public class PortalForm : Form
         };
 
         layout.Controls.Add(headerPanel);
-        layout.Controls.Add(lblSubheader);
+        layout.Controls.Add(_lblSubheader);
         layout.Controls.Add(btnScheduler);
         layout.Controls.Add(btnProject);
         layout.Controls.Add(btnStaff);
         layout.Controls.Add(btnVehicle);
+        layout.Controls.Add(actionRow);
         layout.Controls.Add(lblFooter);
 
         Controls.Add(layout);
     }
+
+    private void LaunchModule(TemplateAddInPair pair)
+    {
+        bool edit = _editTemplateMode;
+        PortalRouter.Launch(pair, editTemplate: edit);
+#if !DEBUG
+        if (edit && _btnResetTemplates != null)
+            _btnResetTemplates.Enabled = PortalRouter.HasAnyCustomTemplates();
+#endif
+    }
+
+    private void UpdateEditTemplateVisuals()
+    {
+        if (_editTemplateMode)
+        {
+            _btnEditTemplate.Text = "Edit Template Mode: ON";
+            _btnEditTemplate.BackColor = Color.FromArgb(254, 243, 199);
+            _btnEditTemplate.ForeColor = Color.FromArgb(180, 83, 9);
+            _btnEditTemplate.FlatAppearance.BorderColor = Color.FromArgb(245, 158, 11);
+            _btnEditTemplate.FlatAppearance.MouseOverBackColor = Color.FromArgb(253, 230, 138);
+#if DEBUG
+            _lblSubheader.Text = "EDIT TEMPLATE MODE: Opens repo .xltx directly (no DB load/save).";
+#else
+            _lblSubheader.Text = "EDIT TEMPLATE MODE: Opens your personal template copy (local only, never saved to server).";
+#endif
+            _lblSubheader.ForeColor = Color.FromArgb(180, 83, 9);
+        }
+        else
+        {
+            _btnEditTemplate.Text = "Edit Template Mode";
+            _btnEditTemplate.BackColor = Color.White;
+            _btnEditTemplate.ForeColor = Color.FromArgb(79, 70, 229);
+            _btnEditTemplate.FlatAppearance.BorderColor = Color.FromArgb(226, 232, 240);
+            _btnEditTemplate.FlatAppearance.MouseOverBackColor = Color.FromArgb(238, 242, 255);
+            _lblSubheader.Text = "Select an operational module to launch in Excel:";
+            _lblSubheader.ForeColor = Color.FromArgb(100, 116, 139);
+        }
+        if (_layout != null && IsHandleCreated) FitClientSizeToLayout();
+    }
+
+#if !DEBUG
+    private void ResetTemplatesClicked()
+    {
+        var confirm = MessageBox.Show(this,
+            "All your personal template customizations in Templates\\Custom will be removed and reset to the latest company defaults.\n\nContinue?",
+            "Reset Templates", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+        if (confirm == DialogResult.Yes)
+        {
+            int count = PortalRouter.ResetCustomTemplates(out string? err);
+            if (err != null)
+                MessageBox.Show(this, err, "Reset Templates", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            else
+                MessageBox.Show(this, $"Reset complete. {count} personal template(s) removed.", "Reset Templates", MessageBoxButtons.OK, MessageBoxIcon.Information);
+        }
+        if (_btnResetTemplates != null) _btnResetTemplates.Enabled = PortalRouter.HasAnyCustomTemplates();
+    }
+#endif
+
+    private static Button CreateUtilityButton(string text)
+    {
+        var btn = new Button
+        {
+            Text = text,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            MinimumSize = new Size(0, 30),
+            Padding = new Padding(8, 0, 8, 0),
+            BackColor = Color.White,
+            ForeColor = Color.FromArgb(79, 70, 229),
+            FlatStyle = FlatStyle.Flat,
+            Font = new Font("Segoe UI", 9f, FontStyle.Bold),
+            Cursor = Cursors.Hand,
+            Margin = new Padding(0)
+        };
+        btn.FlatAppearance.BorderColor = Color.FromArgb(226, 232, 240);
+        btn.FlatAppearance.MouseOverBackColor = Color.FromArgb(238, 242, 255);
+        return btn;
+    }
+
+    private void OpenBugReportDialog()
+    {
+        try
+        {
+            // Capture the portal as the user currently sees it, before the dialog covers it.
+            byte[]? screenshot = BugReportRepository.CaptureScreenPng();
+            var context = new BugReportContext
+            {
+                SourceModule = "Portal",
+                AppVersion = _currentVersion,
+                IsOffline = ServerEnvironment.IsOffline,
+                InitialScreenshotPng = screenshot
+            };
+            using var dialog = new BugReportSubmitDialog(context);
+            dialog.ShowDialog(this);
+        }
+        catch (Exception ex)
+        {
+            MessageBox.Show(this, $"Could not open the bug report form:\n{ex.Message}", "Report a Bug", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+#if DEBUG
+        _ = RefreshBugInboxCountAsync();
+#endif
+    }
+
+#if DEBUG
+    private async Task RefreshBugInboxCountAsync()
+    {
+        if (_btnBugInbox == null) return;
+        try
+        {
+            int count = await Task.Run(BugReportRepository.GetOpenBugCount);
+            if (_btnBugInbox.IsDisposed) return;
+            _btnBugInbox.Text = count > 0 ? $"Bug Inbox ({count} open)" : "Bug Inbox";
+        }
+        catch { /* never block or crash the portal over the inbox badge */ }
+    }
+#endif
 
     private Button CreateModuleButton(string title, string subtitle, Color accentColor, Action onClick)
     {

@@ -61,6 +61,7 @@ public class Events : ManagerEventsBase<List<StaffRecord>>
     {
         base.AutoOpen();
         SheetMapper.RegisterSummaryHooks();
+        SheetMapper.RegisterSkillTypeCascadeHooks();
     }
 
     public override void AutoClose()
@@ -68,6 +69,7 @@ public class Events : ManagerEventsBase<List<StaffRecord>>
         ExcelAsyncUtil.QueueAsMacro(() =>
         {
             SheetMapper.UnregisterSummaryHooks();
+            SheetMapper.UnregisterSkillTypeCascadeHooks();
             CustomDropdowns.Clear();
         });
         base.AutoClose();

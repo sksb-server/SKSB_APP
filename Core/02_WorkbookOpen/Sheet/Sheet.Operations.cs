@@ -41,12 +41,17 @@ public static class SheetOperations
         return defaultFallback;
     }
 
-    public static bool IsMasterTemplateFile()
+    public static bool IsMasterTemplateFile() => IsMasterTemplateFile(null);
+
+    public static bool IsMasterTemplateFile(dynamic? wb)
     {
         try
         {
-            dynamic xlApp = ExcelDnaUtil.Application;
-            dynamic? wb = xlApp.ActiveWorkbook;
+            if (wb == null)
+            {
+                dynamic xlApp = ExcelDnaUtil.Application;
+                wb = xlApp.ActiveWorkbook;
+            }
             if (wb == null) return false;
 
             string fileName = wb.Name?.ToString() ?? string.Empty;
@@ -262,15 +267,37 @@ public static class SheetOperations
                     continue;
                 }
 
+                bool isBoard = sheetName.Equals("Daily Schedule", StringComparison.OrdinalIgnoreCase) ||
+                               sheetName.Equals("Daily_Schedule", StringComparison.OrdinalIgnoreCase) ||
+                               sheetName.Equals("Schedule", StringComparison.OrdinalIgnoreCase);
+                if (isBoard)
+                {
+                    try { PurgeScheduleBoard(ws); }
+                    catch (Exception ex) { AppLogger.Error($"PurgeScheduleBoard failed for '{sheetName}'", ex); }
+                }
+
                 int tableCount = 0;
                 try { tableCount = (int)ws.ListObjects.Count; } catch { }
+
+                if (!isBoard && tableCount > 0)
+                {
+                    int minHeaderRow = int.MaxValue;
+                    for (int t = 1; t <= tableCount; t++)
+                    {
+                        try { minHeaderRow = Math.Min(minHeaderRow, (int)ws.ListObjects[t].HeaderRowRange.Row); } catch { }
+                    }
+                    if (minHeaderRow != int.MaxValue && minHeaderRow >= 3)
+                    {
+                        try { PurgeTopBarRow(ws, minHeaderRow - 1); }
+                        catch (Exception ex) { AppLogger.Error($"PurgeTopBarRow failed for '{sheetName}'", ex); }
+                    }
+                }
 
                 for (int t = 1; t <= tableCount; t++)
                 {
                     dynamic table = ws.ListObjects[t];
                     PurgeSingleTable(ws, table);
-                }
-            }
+                }            }
         }
         catch (Exception ex)
         {
@@ -283,12 +310,104 @@ public static class SheetOperations
         }
     }
 
+    private static bool IsFormulaCell(dynamic cell)
+    {
+        string formula = string.Empty;
+        try { formula = cell.Formula2?.ToString() ?? string.Empty; } catch { }
+        if (string.IsNullOrWhiteSpace(formula))
+        {
+            try { formula = cell.Formula?.ToString() ?? string.Empty; } catch { }
+        }
+        return formula.StartsWith("=");
+    }
+
+    private static int GetLastUsedColumn(dynamic ws)
+    {
+        try
+        {
+            dynamic used = ws.UsedRange;
+            return (int)used.Column + (int)used.Columns.Count - 1;
+        }
+        catch { return 1; }
+    }
+
+    private static void PurgeTopBarRow(dynamic ws, int topBarMaxRow)
+    {
+        int lastCol = Math.Min(GetLastUsedColumn(ws), 50);
+        for (int r = 2; r <= topBarMaxRow; r++)
+        {
+            for (int c = 1; c <= lastCol; c++)
+            {
+                try
+                {
+                    dynamic cell = ws.Cells[r, c];
+                    object? v = cell.Value2;
+                    if (v == null || string.IsNullOrWhiteSpace(v.ToString())) continue;
+                    if (IsFormulaCell(cell)) continue;
+
+                    bool hasLabel = false;
+                    try
+                    {
+                        object? label = ws.Cells[1, c].Value2;
+                        hasLabel = label != null && !string.IsNullOrWhiteSpace(label.ToString());
+                    }
+                    catch { }
+
+                    bool hasValidation = false;
+                    try { var vt = cell.Validation.Type; hasValidation = true; } catch { }
+
+                    bool isDropDown = false;
+                    try { isDropDown = string.Equals(cell.Style.Name?.ToString(), "DropDown", StringComparison.OrdinalIgnoreCase); } catch { }
+
+                    if (hasLabel || hasValidation || isDropDown)
+                        cell.Value2 = null;
+                }
+                catch { }
+            }
+        }
+    }
+
+    private static void PurgeScheduleBoard(dynamic ws)
+    {
+        PurgeTopBarRow(ws, 2);
+
+        // Slot 0 (B:D) for Day Work (4..18) and Night Work (20..34): keep formatting, clear values/comments
+        int[][] blocks = { new[] { 4, 18 }, new[] { 20, 34 } };
+        foreach (var blk in blocks)
+        {
+            dynamic slotRange = ws.Range[ws.Cells[blk[0], 2], ws.Cells[blk[1], 4]];
+            try { slotRange.ClearComments(); } catch { }
+            for (int r = blk[0]; r <= blk[1]; r++)
+            {
+                for (int c = 2; c <= 4; c++)
+                {
+                    try
+                    {
+                        dynamic cell = ws.Cells[r, c];
+                        if (!IsFormulaCell(cell)) cell.Value2 = null;
+                    }
+                    catch { }
+                }
+            }
+        }
+
+        // Extra dynamic slots (Column E onwards)
+        int lastCol = GetLastUsedColumn(ws);
+        if (lastCol >= 5)
+        {
+            dynamic extra = ws.Range[ws.Cells[4, 5], ws.Cells[34, lastCol]];
+            try { extra.ClearComments(); } catch { }
+            try { extra.Clear(); } catch { }
+        }
+    }
     private static void PurgeSingleTable(dynamic ws, dynamic table)
     {
         if (table == null) return;
 
         bool hadTotals = false;
         try { hadTotals = (bool)table.ShowTotals; } catch { }
+
+        try { if (table.AutoFilter != null && (bool)table.AutoFilter.FilterMode) table.AutoFilter.ShowAllData(); } catch { }
 
         try
         {

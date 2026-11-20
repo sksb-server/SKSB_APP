@@ -9,6 +9,8 @@ using ExcelDna.Integration;
 using ExcelDna.Integration.CustomUI;
 using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.Integration.Database;
+using SKSB_App.Core.RuntimeUI.BugReport;
+using SKSB_App.Core.RuntimeUI.DropDown;
 using SKSB_App.Core.RuntimeUI.Progress;
 using SKSB_App.Core.RuntimeUI.TableRowManager;
 using SKSB_App.Core.WorkbookOpen.Sheet;
@@ -73,8 +75,9 @@ public abstract class ManagerRibbonBase : ExcelRibbon
                 {PersistenceGroupXml}
                 {GetCustomGroupsXml()}
                 {(ShowRowManagementGroup ? BuildRowManagementGroupXml() : string.Empty)}
-                {BuildDebugGroupXml()}
+                {BuildSupportGroupXml()}
               </tab>
+              {BuildDebugTabXml()}
             </tabs>
           </ribbon>
         </customUI>";
@@ -182,11 +185,26 @@ public abstract class ManagerRibbonBase : ExcelRibbon
                 </group>";
     }
 
-    protected static string BuildDebugGroupXml()
+    protected static string BuildSupportGroupXml()
+    {
+        return @"
+                <group id='grpSupport' label='Support'>
+                  <button id='btnReportBug'
+                          label='Report Bug'
+                          size='large'
+                          imageMso='ReviewNewComment'
+                          screentip='Report a Bug'
+                          supertip='Captures a screenshot of the current screen and opens a form to describe the problem. Attach screenshots, pasted images or screen recordings and send them to the developer.'
+                          onAction='OnReportBugClicked' />
+                </group>";
+    }
+
+    protected static string BuildDebugTabXml()
     {
 #if DEBUG
         return @"
-                <group id='grpDebugControls' label='Debug Controls'>
+              <tab id='tabSksbDebug' label='Debug'>
+                <group id='grpDebugServer' label='Server &amp; Database'>
                   <toggleButton id='btnToggleOffline'
                                 label='Simulate Server Offline'
                                 size='large'
@@ -200,7 +218,17 @@ public abstract class ManagerRibbonBase : ExcelRibbon
                           screentip='Mirror Release Data to Debug Server'
                           supertip='Resets the isolated Debug schema (debug.*) to an exact copy of the live Release database (public.*) and reloads this workbook.'
                           onAction='OnMirrorReleaseDataClicked' />
-                </group>";
+                </group>
+                <group id='grpDebugTemplate' label='Template Tools'>
+                  <button id='btnPurgeSheetData'
+                          label='Purge Sheet Data'
+                          size='large'
+                          imageMso='ClearAll'
+                          screentip='Purge All Sheet Data'
+                          supertip='Clears all operational table rows, top-bar parameter values, and extra Daily Schedule board slots while preserving headers, formulas, formatting, and Lookups/Data sheets.'
+                          onAction='OnPurgeSheetDataClicked' />
+                </group>
+              </tab>";
 #else
         return string.Empty;
 #endif
@@ -586,8 +614,52 @@ public abstract class ManagerRibbonBase : ExcelRibbon
     }
 
     // =========================================================================
-    // 5. DEBUG CALLBACKS
+    // 5. SUPPORT CALLBACKS
     // =========================================================================
+    public void OnReportBugClicked(IRibbonControl control)
+    {
+        ExcelAsyncUtil.QueueAsMacro(() =>
+        {
+            try
+            {
+                dynamic xlApp = ExcelDnaUtil.Application;
+
+                string activeSheet = string.Empty;
+                try { activeSheet = Convert.ToString(xlApp.ActiveSheet?.Name) ?? string.Empty; } catch { }
+
+                // Capture while the workbook is still unobstructed by the dialog.
+                byte[]? screenshot = BugReportRepository.CaptureScreenPng();
+
+                // Modal dialog exception (CLAUDE.md Rule 5.2): Excel must repaint & respond while the dialog is open.
+                try { xlApp.ScreenUpdating = true; } catch { }
+                try { xlApp.EnableEvents = true; } catch { }
+                try { Arrow.HideAll(); } catch { }
+
+                var context = new BugReportContext
+                {
+                    SourceModule = Contract.ModuleName,
+                    ActiveSheet = activeSheet,
+                    AppVersion = BugReportRepository.ResolveAppVersion(),
+                    IsOffline = ServerEnvironment.IsOffline,
+                    InitialScreenshotPng = screenshot
+                };
+
+                using var dialog = new BugReportSubmitDialog(context);
+                dialog.ShowDialog(new BugReportOwnerWindow(ExcelDnaUtil.WindowHandle));
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error($"[{Contract.ModuleName}] Report Bug dialog failed", ex);
+                MessageBox.Show($"Could not open the bug report form:\n{ex.Message}", "Report Bug", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        });
+    }
+
+    // =========================================================================
+    // 6. DEBUG CALLBACKS
+    // =========================================================================
+    protected virtual void OnAfterPurgeSheetData() { }
+
 #if DEBUG
     public bool GetSimulateOfflinePressed(IRibbonControl control)
         => ServerEnvironment.SimulateOffline;
@@ -625,5 +697,19 @@ public abstract class ManagerRibbonBase : ExcelRibbon
         });
     }
 
+    public void OnPurgeSheetDataClicked(IRibbonControl control)
+    {
+        var answer = MessageBox.Show(
+            "Purge all sheet data?\n\nCLEARED: table rows (reduced to 1 clean row), top-bar parameter values, and extra Daily Schedule board slots.\nPRESERVED: headers, labels, formulas, formatting, validations, and the Lookups/Data sheets.",
+            "Purge Sheet Data", MessageBoxButtons.YesNo, MessageBoxIcon.Warning);
+        if (answer != DialogResult.Yes) return;
+
+        ExcelAsyncUtil.QueueAsMacro(() =>
+        {
+            SheetOperations.PurgeAllSheetsData();
+            OnAfterPurgeSheetData();
+            SheetOperations.ShowStatusConfirmation("Purged all sheet data (tables, top bars, and schedule board reset to clean template state).");
+        });
+    }
 #endif
 }

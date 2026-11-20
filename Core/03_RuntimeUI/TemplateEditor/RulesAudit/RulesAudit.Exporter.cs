@@ -8,22 +8,29 @@ using System.Text;
 using System.Windows.Forms;
 using ExcelDna.Integration;
 using SKSB_App.Core.Bootstrap.Storage;
+using SKSB_App.Core.Diagnostics;
+using SKSB_App.Core.WorkbookOpen.Sheet;
 using SKSB_App.Core.RuntimeUI.DropDown;
 using SKSB_App.Core.RuntimeUI.RuleEngine;
 
 public static class RulesAuditExporter
 {
     [ExcelCommand(Name = "ExportTemplateRulesToMarkdown")]
-    public static void ExportAuditReport()
+    public static void ExportAuditReport() => ExportAuditReport(targetWorkbook: null, silent: false);
+
+    public static void ExportAuditReport(dynamic? targetWorkbook, bool silent)
     {
         try
         {
             RuleRegistry.EnsureInitialized();
             dynamic xlApp = ExcelDnaUtil.Application;
-            dynamic wb = xlApp.ActiveWorkbook;
+            dynamic? wb = targetWorkbook ?? xlApp.ActiveWorkbook;
             if (wb == null)
             {
-                MessageBox.Show("No active workbook found.", "Export Rules Audit", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                if (!silent)
+                    MessageBox.Show("No active workbook found.", "Export Rules Audit", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                else
+                    AppLogger.Warn("Silent rules export skipped: no workbook found.");
                 return;
             }
 
@@ -269,22 +276,36 @@ public static class RulesAuditExporter
 
             if (tableCount == 0 && sheetHeaderCellCount == 0)
             {
-                MessageBox.Show("No ListObjects or configured template cells found.", "Export Rules", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                if (!silent)
+                    MessageBox.Show("No ListObjects or configured template cells found.", "Export Rules", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                else
+                    AppLogger.Info("Silent rules export skipped: no ListObjects or configured template cells found.");
                 return;
             }
 
             string exportPath = FolderRegistry.Data.GetFilePath(targetFileName);
             FolderRegistry.Data.EnsureExists();
             File.WriteAllText(exportPath, sb.ToString(), Encoding.UTF8);
-            Clipboard.SetText(sb.ToString());
-            MessageBox.Show(
-                $"Audit export complete!\n\n  Tables: {tableCount}\n  Header/Date Parameter Cells: {sheetHeaderCellCount}\n  Saved file: {exportPath}\n  Copied to Clipboard.",
-                "Export Complete", MessageBoxButtons.OK, MessageBoxIcon.Information
-            );
+
+            if (silent)
+            {
+                AppLogger.Info($"Template rules exported to {exportPath} ({tableCount} tables, {sheetHeaderCellCount} header cells).");
+                SheetOperations.ShowStatusConfirmation($"Template rules exported to {targetFileName} ({tableCount} tables).");
+            }
+            else
+            {
+                Clipboard.SetText(sb.ToString());
+                MessageBox.Show(
+                    $"Audit export complete!\n\n  Tables: {tableCount}\n  Header/Date Parameter Cells: {sheetHeaderCellCount}\n  Saved file: {exportPath}\n  Copied to Clipboard.",
+                    "Export Complete", MessageBoxButtons.OK, MessageBoxIcon.Information
+                );
+            }
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Failed to export audit report:\n{ex.Message}", "Export Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            AppLogger.Error("Failed to export template rules audit report", ex);
+            if (!silent)
+                MessageBox.Show($"Failed to export audit report:\n{ex.Message}", "Export Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 
