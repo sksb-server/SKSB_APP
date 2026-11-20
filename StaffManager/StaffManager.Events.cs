@@ -1,6 +1,8 @@
 namespace SKSB_App.StaffManager;
 
+using ExcelDna.Integration;
 using SKSB_App.Core.Diagnostics;
+using SKSB_App.Core.RuntimeUI.DropDown;
 using SKSB_App.Core.Integration.Database;
 using SKSB_App.Core.WorkbookSave.Storage;
 using System;
@@ -55,17 +57,41 @@ public class Events : ManagerEventsBase<List<StaffRecord>>
 
     protected override SaveContract<List<StaffRecord>> Contract => StaffSyncDescriptor;
 
+    public override void AutoOpen()
+    {
+        base.AutoOpen();
+        SheetMapper.RegisterSummaryHooks();
+    }
+
+    public override void AutoClose()
+    {
+        ExcelAsyncUtil.QueueAsMacro(() =>
+        {
+            SheetMapper.UnregisterSummaryHooks();
+            CustomDropdowns.Clear();
+        });
+        base.AutoClose();
+    }
+
     // =========================================================================
     // 2. LOOKUP SYNCHRONISATION (runs on the Excel macro thread via the base class)
     // =========================================================================
     protected override void SyncCustomLookups(bool isInteractive)
     {
         // External Vehicle Plates -> 'Data' sheet. Online Mode: PostgreSQL only; Offline Mode: local snapshot only.
-        DataList.SyncProperty<VehicleRecord, string>(
-            v => v.VehiclePlate,
-            LoadVehiclePlates(),
-            customListName: "VehiclePlateList"
-        );
+        // VehiclePlateList and VehiclePlateTypeList stay index-aligned ("PLATE — Type" dropdown labels).
+        var vehicles = LoadVehiclePlates()
+            .Where(v => !string.IsNullOrWhiteSpace(v.VehiclePlate))
+            .OrderBy(v => v.VehiclePlate.Trim(), StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (vehicles.Count > 0)
+        {
+            DataList.SyncAlignedLists(new Dictionary<string, IEnumerable<string>>
+            {
+                ["VehiclePlateList"] = vehicles.Select(v => v.VehiclePlate.Trim()).ToList(),
+                ["VehiclePlateTypeList"] = vehicles.Select(v => v.VehicleDetail.Type == VehicleType.None ? string.Empty : v.VehicleDetail.Type.ToString()).ToList(),
+            });
+        }
 
         // Emoji palette behind SkillLicenseTypesTable[Display Icon]
         DataList.SyncValues("DisplayIconList", SkillCatalog.DisplayIcons);
@@ -81,8 +107,14 @@ public class Events : ManagerEventsBase<List<StaffRecord>>
             try
             {
                 return new PostgreSqlService()
-                    .Query<string>("SELECT vehicle_plate FROM vehicle_master ORDER BY vehicle_plate;")
-                    .Select(p => new VehicleRecord { VehiclePlate = p })
+                    .Query<dynamic>("SELECT vehicle_plate, COALESCE(vehicle_type, '') AS vehicle_type FROM vehicle_master ORDER BY vehicle_plate;")
+                    .Select(r =>
+                    {
+                        var rec = new VehicleRecord { VehiclePlate = (string?)r.vehicle_plate ?? string.Empty };
+                        if (Enum.TryParse<VehicleType>((string?)r.vehicle_type, true, out var t)) rec.VehicleDetail.Type = t;
+                        else rec.VehicleDetail.Type = VehicleType.None;
+                        return rec;
+                    })
                     .ToList();
             }
             catch (Exception ex)

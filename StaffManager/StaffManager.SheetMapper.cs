@@ -9,7 +9,7 @@ using SKSB_App.Core.WorkbookOpen.Sync;
 using SKSB_App.Core.WorkbookSave.SheetMapper;
 using SKSB_App.Core.WorkbookSave.Storage;
 
-public static class SheetMapper
+public static partial class SheetMapper
 {
     public const string MasterSheetName = "All Staffs";
     public const string MasterTableName = "AllStaffsTable";
@@ -84,7 +84,11 @@ public static class SheetMapper
             .ThenBy(s => s.StaffID)
             .ToList(),
 
-        OnPopulateAuxiliaryTables = (wb, masters) => PopulateSkillLicenseTypesFromCache((object)wb),
+        OnPopulateAuxiliaryTables = (wb, masters) =>
+        {
+            PopulateSkillLicenseTypesFromCache((object)wb);
+            InitializeStaffSummaryContext((object)wb, masters);
+        },
 
         AuditTitle = "Staff Manager Populate Audit",
         MasterLabel = "Staff Profiles",

@@ -681,6 +681,46 @@ public static class RuleEvaluator
         return allNotices;
     }
 
+    /// <summary>Maps a Vehicle Plate / Staff ID source to its index-aligned companion list (Type / Name) for enriched dropdown labels.</summary>
+    private static Dictionary<string, string>? BuildCompanionLabelMap(dynamic wb, string sourceName, out bool isStaffId)
+    {
+        isStaffId = false;
+        string key = (sourceName ?? string.Empty).Trim();
+        string[] companionSources;
+        if (key.Equals("AllVehiclesTable[Vehicle Plate]", StringComparison.OrdinalIgnoreCase))
+            companionSources = new[] { "AllVehiclesTable[Vehicle Type]" };
+        else if (key.Equals("VehiclePlateList", StringComparison.OrdinalIgnoreCase))
+            companionSources = new[] { "VehiclePlateTypeList" };
+        else if (key.Equals("AllStaffsTable[Staff ID]", StringComparison.OrdinalIgnoreCase))
+        { isStaffId = true; companionSources = new[] { "AllStaffsTable[Staff Name]" }; }
+        else if (key.Equals("StaffIDList", StringComparison.OrdinalIgnoreCase))
+        { isStaffId = true; companionSources = new[] { "StaffShortNameList", "StaffNameList" }; }
+        else if (key.Equals("AllFieldStaffIDList", StringComparison.OrdinalIgnoreCase))
+        { isStaffId = true; companionSources = new[] { "AllFieldStaffNameList" }; }
+        else return null;
+
+        try
+        {
+            var keys = RuleDataCache.GetSourceItems(wb, sourceName!, preserveDuplicates: true);
+            foreach (var comp in companionSources)
+            {
+                var vals = RuleDataCache.GetSourceItems(wb, comp, preserveDuplicates: true);
+                if (vals.Count == 0) continue;
+                var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                int len = Math.Min(keys.Count, vals.Count);
+                for (int i = 0; i < len; i++)
+                {
+                    string v = (vals[i] ?? string.Empty).Trim();
+                    if (v.Length == 0 || v.Equals("None", StringComparison.OrdinalIgnoreCase)) continue;
+                    if (!string.IsNullOrWhiteSpace(keys[i])) map.TryAdd(keys[i].Trim(), v);
+                }
+                if (map.Count > 0) return map;
+            }
+        }
+        catch { }
+        return null;
+    }
+
     /// <summary>
     /// Builds the interactive dropdown menu options for a cell, including section grouping and gray-out validation.
     /// </summary>
@@ -699,12 +739,25 @@ public static class RuleEvaluator
             for (int sec = 0; sec < rule.Sources.Length; sec++)
             {
                 var items = RuleDataCache.GetSourceItems(wb, rule.Sources[sec], preserveDuplicates: false);
+                var companions = BuildCompanionLabelMap(wb, rule.Sources[sec], out bool isStaffId);
                 foreach (var rawItem in items)
                 {
-                    string display = ApplyTextTransform(FormatIfDate(rawItem), rule.Transform);
+                    string transformed = ApplyTextTransform(FormatIfDate(rawItem), rule.Transform);
+                    string display = transformed;
+                    string raw = rawItem;
+                    string? label = null;
+                    if (companions != null &&
+                        (companions.TryGetValue(rawItem, out label) || companions.TryGetValue(transformed, out label)) &&
+                        !string.IsNullOrWhiteSpace(label))
+                    {
+                        raw = transformed;
+                        display = isStaffId && long.TryParse(transformed, out long sid)
+                            ? $"{sid:D4} — {label}"
+                            : $"{transformed} — {label}";
+                    }
                     options.Add(new DropdownOption
                     {
-                        Raw = rawItem,
+                        Raw = raw,
                         Display = display,
                         Section = sec,
                         IsValid = true

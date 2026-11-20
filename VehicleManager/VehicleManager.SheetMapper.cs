@@ -67,16 +67,11 @@ internal static partial class SheetMapper
             warnings.AddRange(auxWarnings);
         },
 
-        OnBeforeMasterPopulate = masterWs =>
+        OnPopulateAuxiliaryTables = (wb, masters) =>
         {
-            if (masterWs.Cells[2, 2].Value2 == null)
-                masterWs.Cells[2, 2].Value2 = DateTime.Today.ToOADate();
-
-            if (string.IsNullOrWhiteSpace(masterWs.Cells[1, 3].Value2?.ToString()))
-                masterWs.Cells[2, 3].Value2 = "All_Time";
+            PopulateAuxiliaryTables((object)wb);
+            InitializeVehicleSummaryContext((object)wb, masters);
         },
-
-        OnPopulateAuxiliaryTables = (wb, masters) => PopulateAuxiliaryTables((object)wb),
 
         ApplyMasterCalculations = ApplyVehicleCalculations,
 

@@ -220,11 +220,27 @@ internal static class ServerSyncCommands
     {
         var plates = LookupFromServerOrSnapshot(
             "vehicle_master",
-            db => db.Query<string>("SELECT vehicle_plate FROM vehicle_master ORDER BY vehicle_plate;").ToList(),
-            () => (OfflineSnapshot.Load<List<VehicleRecord>>() ?? new List<VehicleRecord>()).Select(v => v.VehiclePlate).ToList());
+            db => db.Query<dynamic>("SELECT vehicle_plate, COALESCE(vehicle_type, '') AS vehicle_type FROM vehicle_master ORDER BY vehicle_plate;")
+                .Select(r => (Plate: (string?)r.vehicle_plate ?? string.Empty, Type: (string?)r.vehicle_type ?? string.Empty))
+                .ToList(),
+            () => (OfflineSnapshot.Load<List<VehicleRecord>>() ?? new List<VehicleRecord>())
+                .Select(v => (Plate: v.VehiclePlate ?? string.Empty,
+                              Type: v.VehicleDetail.Type == VehicleType.None ? string.Empty : v.VehicleDetail.Type.ToString()))
+                .ToList());
 
-        var clean = plates.Where(pl => !string.IsNullOrWhiteSpace(pl)).Select(pl => pl.Trim().ToUpperInvariant()).Distinct().OrderBy(pl => pl).ToList();
-        if (clean.Count > 0) DataList.SyncValues("VehiclePlateList", clean);
+        // VehiclePlateList and VehiclePlateTypeList stay index-aligned ("PLATE — Type" dropdown labels).
+        var clean = plates
+            .Where(p => !string.IsNullOrWhiteSpace(p.Plate))
+            .Select(p => (Plate: p.Plate.Trim().ToUpperInvariant(), Type: p.Type.Trim()))
+            .GroupBy(p => p.Plate, StringComparer.OrdinalIgnoreCase).Select(g => g.First())
+            .OrderBy(p => p.Plate, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+        if (clean.Count == 0) return;
+        DataList.SyncAlignedLists(new Dictionary<string, IEnumerable<string>>
+        {
+            ["VehiclePlateList"] = clean.Select(p => p.Plate).ToList(),
+            ["VehiclePlateTypeList"] = clean.Select(p => p.Type).ToList(),
+        });
     }
 
     private static void SyncCompanyLists()

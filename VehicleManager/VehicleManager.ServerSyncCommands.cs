@@ -422,6 +422,186 @@ internal static class ServerSyncCommands
         return new List<VehicleRecord>();
     }
 
+    // =========================================================================
+    // VEHICLE SUMMARY (READ-ONLY BUILD & SCHEDULE FETCH)
+    // =========================================================================
+    private static DateOnly ToDateOnly(object? v) => v switch
+    {
+        DateOnly d => d,
+        DateTime dt => DateOnly.FromDateTime(dt),
+        _ => default
+    };
+
+    private static string JoinDistinct(IEnumerable<string> items) =>
+        string.Join(", ", items.Where(i => !string.IsNullOrWhiteSpace(i)).Select(i => i.Trim()).Distinct(StringComparer.OrdinalIgnoreCase));
+
+    /// <summary>Project codes scheduled for the plate, keyed by schedule date.</summary>
+    private static Dictionary<DateOnly, List<string>> FetchScheduledProjectsByDate(string plateUpper)
+    {
+        var result = new Dictionary<DateOnly, List<string>>();
+        void Add(DateOnly d, string project)
+        {
+            if (d.Year <= 1900 || string.IsNullOrWhiteSpace(project)) return;
+            if (!result.TryGetValue(d, out var list)) result[d] = list = new List<string>();
+            list.Add(project.Trim());
+        }
+
+        if (ServerEnvironment.IsOnline)
+        {
+            try
+            {
+                var db = new PostgreSqlService();
+                var rows = db.Query<dynamic>(
+                    "SELECT schedule_date, COALESCE(project_id, '') AS project_id FROM daily_project_schedules WHERE EXISTS (SELECT 1 FROM unnest(vehicles) v WHERE upper(trim(v)) = @PlateUpper) ORDER BY schedule_date ASC;",
+                    new { PlateUpper = plateUpper });
+                foreach (var r in rows) Add(ToDateOnly((object?)r.schedule_date), (string)(r.project_id ?? string.Empty));
+                return result;
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Warn($"[VehicleManager] Vehicle summary schedule query failed: {ex.Message}");
+                if (!ServerEnvironment.IsOffline) return result;
+                result.Clear();
+            }
+        }
+
+        try
+        {
+            var snap = OfflineSnapshot.Load<ScheduleRecord>();
+            if (snap == null) return result;
+            foreach (var p in snap.Projects)
+                if ((p.Vehicles ?? new List<string>()).Any(v => string.Equals(v?.Trim(), plateUpper, StringComparison.OrdinalIgnoreCase)))
+                    Add(snap.DailyScheduleDate, p.ProjectID);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn($"[VehicleManager] Vehicle summary offline schedule load failed: {ex.Message}");
+        }
+        return result;
+    }
+
+    internal static VehicleStatus GetVehicleStatusOn(VehicleRecord vehicle, DateOnly date)
+    {
+        DateOnly today = DateOnly.FromDateTime(DateTime.Today);
+
+        if (vehicle.VehicleDetail.SoldDate.HasValue && date >= vehicle.VehicleDetail.SoldDate.Value)
+            return VehicleStatus.Decommissioned;
+
+        if (vehicle.Maintenances.Any(m => m.MaintenanceStatus != MaintenanceStatus.Cancelled && m.DateIn <= date
+            && (m.DateCompleted.HasValue
+                ? date <= m.DateCompleted.Value
+                : m.MaintenanceStatus == MaintenanceStatus.In_Progress && date <= today)))
+            return VehicleStatus.In_Shop;
+
+        static bool Lapsed(IEnumerable<(DateOnly Start, DateOnly Expiry)> items, DateOnly on)
+        {
+            var started = items.Where(i => i.Start <= on).ToList();
+            return started.Count > 0 && started.Max(i => i.Expiry) < on;
+        }
+
+        if (Lapsed(vehicle.Insurances.Select(i => (i.RenewDate, i.ExpiryDate)), date)
+            || Lapsed(vehicle.Permits.Select(p => (p.RenewDate, p.ExpiryDate)), date)
+            || Lapsed(vehicle.RoadTaxes.Select(r => (r.RenewDate, r.ExpiryDate)), date)
+            || Lapsed(vehicle.Inspections.Select(i => (i.ScheduleDateIn, i.ExpiryDate)), date))
+            return VehicleStatus.Expired;
+
+        if (vehicle.VehicleStatus == VehicleStatus.Suspended && date >= today)
+            return VehicleStatus.Suspended;
+
+        return VehicleStatus.Active;
+    }
+
+    private static decimal? SumOrNull(IEnumerable<decimal?> values)
+    {
+        var list = values.Where(v => v.HasValue).Select(v => v!.Value).ToList();
+        return list.Count == 0 ? null : list.Sum();
+    }
+
+    internal static List<VehicleSummaryRow> BuildVehicleSummaryRows(VehicleRecord vehicle)
+    {
+        var rows = new List<VehicleSummaryRow>();
+        string plateUpper = (vehicle.VehiclePlate ?? string.Empty).Trim().ToUpperInvariant();
+        if (plateUpper.Length == 0) return rows;
+
+        var scheduled = FetchScheduledProjectsByDate(plateUpper);
+
+        var staffMap = new Dictionary<long, string>();
+        try
+        {
+            foreach (var s in StaffLookupHelper.LoadCachedStaff() ?? new List<StaffRecord>())
+            {
+                string name = !string.IsNullOrWhiteSpace(s.StaffDetails.StaffShortName) ? s.StaffDetails.StaffShortName : s.StaffDetails.StaffName;
+                if (!string.IsNullOrWhiteSpace(name)) staffMap[s.StaffID] = name.Trim();
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn($"[VehicleManager] Vehicle summary staff lookup failed: {ex.Message}");
+        }
+
+        string StaffLabel(string? name, long id) =>
+            !string.IsNullOrWhiteSpace(name) ? name.Trim() : staffMap.TryGetValue(id, out var n) ? n : string.Empty;
+
+        var dates = new HashSet<DateOnly>();
+        dates.UnionWith(vehicle.OdometerLogs.Select(o => o.Date));
+        dates.UnionWith(vehicle.Maintenances.Select(m => m.DateIn));
+        dates.UnionWith(vehicle.Insurances.Select(i => i.RenewDate));
+        dates.UnionWith(vehicle.Permits.Select(p => p.RenewDate));
+        dates.UnionWith(vehicle.RoadTaxes.Select(r => r.RenewDate));
+        dates.UnionWith(vehicle.Inspections.Select(i => i.ScheduleDateIn));
+        dates.UnionWith(vehicle.InsuranceClaims.Select(c => c.ClaimDate));
+        dates.UnionWith(scheduled.Keys);
+
+        foreach (var date in dates.Where(d => d.Year > 1900).OrderBy(d => d))
+        {
+            var odos = vehicle.OdometerLogs.Where(o => o.Date == date).ToList();
+            var claims = vehicle.InsuranceClaims.Where(c => c.ClaimDate == date).ToList();
+
+            var drivers = odos.Select(o => StaffLabel(o.StaffName, o.StaffID))
+                .Concat(claims.Select(c => StaffLabel(c.StaffName, c.StaffID)));
+            var projects = (scheduled.TryGetValue(date, out var sp) ? sp : new List<string>())
+                .Concat(odos.Select(o => o.Project));
+
+            var deltas = new List<decimal>();
+            foreach (var o in odos)
+            {
+                if (o.OdometerDifference.HasValue) deltas.Add(o.OdometerDifference.Value);
+                else if (o.OdometerBefore.HasValue && o.OdometerBefore.Value > 0m)
+                    deltas.Add(o.CurrentOdometer > o.OdometerBefore.Value ? o.CurrentOdometer - o.OdometerBefore.Value : 0m);
+            }
+
+            decimal? fuel = odos.Count > 0 ? odos.Sum(o => o.Amount) : null;
+            decimal? maint = SumOrNull(vehicle.Maintenances.Where(m => m.DateIn == date).Select(m => m.RepairCost));
+            decimal? ins = SumOrNull(vehicle.Insurances.Where(i => i.RenewDate == date).Select(i => i.Amount));
+            decimal? permit = SumOrNull(vehicle.Permits.Where(p => p.RenewDate == date).Select(p => p.Amount));
+            decimal? roadInspect = SumOrNull(vehicle.RoadTaxes.Where(r => r.RenewDate == date).Select(r => r.Amount)
+                .Concat(vehicle.Inspections.Where(i => i.ScheduleDateIn == date).Select(i => i.Amount)));
+            decimal? claim = SumOrNull(claims.Select(c => c.ClaimAmount));
+
+            decimal? total = null;
+            if (fuel.HasValue || maint.HasValue || ins.HasValue || permit.HasValue || roadInspect.HasValue || claim.HasValue)
+                total = (fuel ?? 0m) + (maint ?? 0m) + (ins ?? 0m) + (permit ?? 0m) + (roadInspect ?? 0m)
+                        - ((claim ?? 0m) > 0m ? claim!.Value : 0m);
+
+            rows.Add(new VehicleSummaryRow
+            {
+                Date = date,
+                Status = GetVehicleStatusOn(vehicle, date),
+                DrivenBy = JoinDistinct(drivers),
+                UsedAt = JoinDistinct(projects),
+                OdometerUsed = deltas.Count > 0 ? Math.Round(deltas.Sum(), 1) : null,
+                FuelCost = fuel,
+                MaintenanceCost = maint,
+                InsuranceCost = ins,
+                PermitCost = permit,
+                RoadTaxAndInspectionCost = roadInspect,
+                InsuranceClaimAmount = claim,
+                TotalCost = total
+            });
+        }
+        return rows;
+    }
+
     private const string Module = "VehicleManager";
 
     internal static List<Workshop> FetchWorkshops() => ServerSyncHelper.FetchAuxiliaryTable<Workshop>(Module, "WorkshopsTable", @"

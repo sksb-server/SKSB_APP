@@ -406,8 +406,18 @@ internal static class ServerSyncCommands
 
     private static void SyncOtherLookupLists()
     {
-        var plates = Roster.Vehicles.Select(v => v.Plate).Where(p => p.Length > 0).Distinct().OrderBy(p => p).ToList();
-        if (plates.Count > 0) DataList.SyncValues("VehiclePlateList", plates);
+        // VehiclePlateList and VehiclePlateTypeList stay index-aligned ("PLATE — Type" dropdown labels).
+        var vehicles = Roster.Vehicles.Where(v => v.Plate.Length > 0)
+            .GroupBy(v => v.Plate, StringComparer.OrdinalIgnoreCase).Select(g => g.First())
+            .OrderBy(v => v.Plate, StringComparer.OrdinalIgnoreCase).ToList();
+        if (vehicles.Count > 0)
+        {
+            DataList.SyncAlignedLists(new Dictionary<string, IEnumerable<string>>
+            {
+                ["VehiclePlateList"] = vehicles.Select(v => v.Plate).ToList(),
+                ["VehiclePlateTypeList"] = vehicles.Select(v => v.Type == VehicleType.None ? string.Empty : v.Type.ToString()).ToList(),
+            });
+        }
 
         var projects = Roster.Projects.Select(p => p.Id).Where(p => p.Length > 0).Distinct().ToList();
         if (!projects.Contains(AttendanceRollupService.OfficeProjectName, StringComparer.OrdinalIgnoreCase))

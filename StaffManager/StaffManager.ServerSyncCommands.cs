@@ -229,4 +229,139 @@ public static class ServerSyncCommands
         // Server reachable but staff_master is empty: the (empty) result is authoritative.
         return new List<StaffRecord>();
     }
+
+    // =========================================================================
+    // STAFF SUMMARY (READ-ONLY FETCHES)
+    // =========================================================================
+    public static Dictionary<long, string> FetchWorkerPrimarySkills()
+    {
+        var result = new Dictionary<long, string>();
+        if (ServerEnvironment.IsOnline)
+        {
+            try
+            {
+                var rows = new PostgreSqlService().Query<dynamic>(
+                    "SELECT staff_id, COALESCE(primary_skill, '') AS primary_skill FROM worker_preferences WHERE COALESCE(trim(primary_skill), '') <> '';");
+                foreach (var r in rows)
+                    result[Convert.ToInt64(r.staff_id)] = ((string)(r.primary_skill ?? string.Empty)).Trim();
+                return result;
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Warn($"[StaffManager] worker_preferences query failed: {ex.Message}");
+                if (!ServerEnvironment.IsOffline) return result;
+            }
+        }
+
+        var prefs = OfflineSnapshot.Load<ScheduleRecord>()?.Preferences;
+        if (prefs != null)
+            foreach (var p in prefs)
+                if (!string.IsNullOrWhiteSpace(p.PrimarySkill)) result[p.StaffID] = p.PrimarySkill.Trim();
+        return result;
+    }
+
+    private static string FormatClock(TimeOnly? t) => t.HasValue ? t.Value.ToString("HH:mm") : "—";
+
+    private static string FormatTimeRange(TimeOnly? inT, TimeOnly? outT) =>
+        !inT.HasValue && !outT.HasValue ? "—" : $"{FormatClock(inT)} - {FormatClock(outT)}";
+
+    private static TimeOnly? ToTimeOnly(object? v) => v switch
+    {
+        TimeOnly t => t,
+        TimeSpan ts => TimeOnly.FromTimeSpan(ts),
+        DateTime dt => TimeOnly.FromDateTime(dt),
+        _ => null
+    };
+
+    private static DateOnly ToDateOnly(object? v) => v switch
+    {
+        DateOnly d => d,
+        DateTime dt => DateOnly.FromDateTime(dt),
+        _ => default
+    };
+
+    private static string JoinDistinct(IEnumerable<string> items) =>
+        string.Join(", ", items.Where(i => !string.IsNullOrWhiteSpace(i)).Select(i => i.Trim()).Distinct(StringComparer.OrdinalIgnoreCase));
+
+    public static List<StaffSummaryRow> FetchStaffSummaryRows(StaffRecord staff)
+    {
+        var rows = new List<StaffSummaryRow>();
+        var names = new[] { staff.StaffDetails.StaffShortName, staff.StaffDetails.StaffName }
+            .Where(n => !string.IsNullOrWhiteSpace(n)).Select(n => n.Trim().ToLowerInvariant()).Distinct().ToArray();
+
+        if (ServerEnvironment.IsOnline)
+        {
+            try
+            {
+                var db = new PostgreSqlService();
+                var att = db.Query<dynamic>(
+                    "SELECT schedule_date, attendance_status, clock_in_time, clock_out_time, COALESCE(project_check_ins, '') AS project_check_ins, projects_done, regular_shift, additional_shifts, ot_hours, additional_ot_hours, total_flattened_hours FROM daily_attendances WHERE staff_id = @StaffId ORDER BY schedule_date ASC;",
+                    new { StaffId = staff.StaffID }).ToList();
+
+                var vehicles = new Dictionary<DateOnly, List<string>>();
+                if (names.Length > 0)
+                {
+                    var veh = db.Query<dynamic>(
+                        "SELECT schedule_date, vehicles FROM daily_project_schedules WHERE COALESCE(array_length(vehicles, 1), 0) > 0 AND EXISTS (SELECT 1 FROM unnest(workers) w WHERE lower(trim(w)) = ANY(@NamesLower)) ORDER BY schedule_date ASC;",
+                        new { NamesLower = names });
+                    foreach (var v in veh)
+                    {
+                        DateOnly d = ToDateOnly((object?)v.schedule_date);
+                        if (!vehicles.TryGetValue(d, out var list)) vehicles[d] = list = new List<string>();
+                        if ((object?)v.vehicles is IEnumerable<string> plates) list.AddRange(plates);
+                    }
+                }
+
+                foreach (var a in att)
+                {
+                    DateOnly date = ToDateOnly((object?)a.schedule_date);
+                    string projects = ((string)(a.project_check_ins ?? string.Empty)).Trim();
+                    if (projects.Length == 0 && (object?)a.projects_done is IEnumerable<string> done) projects = string.Join(", ", done);
+                    rows.Add(new StaffSummaryRow
+                    {
+                        Date = date,
+                        Time = FormatTimeRange(ToTimeOnly((object?)a.clock_in_time), ToTimeOnly((object?)a.clock_out_time)),
+                        Status = Enum.TryParse<AttendanceStatus>((string)(a.attendance_status ?? "Absence"), true, out AttendanceStatus st) ? st : AttendanceStatus.Absence,
+                        Projects = projects,
+                        VehicleDriven = vehicles.TryGetValue(date, out var vl) ? JoinDistinct(vl) : string.Empty,
+                        RegularShift = a.regular_shift != null ? Convert.ToDecimal(a.regular_shift) : 0m,
+                        AdditionalShifts = a.additional_shifts != null ? Convert.ToDecimal(a.additional_shifts) : 0m,
+                        OTHours = a.ot_hours != null ? Convert.ToDecimal(a.ot_hours) : 0m,
+                        AdditionalOTHours = a.additional_ot_hours != null ? Convert.ToDecimal(a.additional_ot_hours) : 0m,
+                        FlattenHours = a.total_flattened_hours != null ? Convert.ToDecimal(a.total_flattened_hours) : 0m
+                    });
+                }
+                return rows;
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Warn($"[StaffManager] Staff summary query failed: {ex.Message}");
+                if (!ServerEnvironment.IsOffline) return rows;
+                rows.Clear();
+            }
+        }
+
+        var snap = OfflineSnapshot.Load<ScheduleRecord>();
+        if (snap == null) return rows;
+        foreach (var w in snap.WorkerAttendance.Where(w => w.StaffID == staff.StaffID))
+        {
+            var plates = snap.Projects
+                .Where(p => p.Workers.Any(x => names.Contains((x ?? string.Empty).Trim().ToLowerInvariant())))
+                .SelectMany(p => p.Vehicles);
+            rows.Add(new StaffSummaryRow
+            {
+                Date = w.DailyScheduleDate == default ? snap.DailyScheduleDate : w.DailyScheduleDate,
+                Time = FormatTimeRange(w.ClockInTime, w.ClockOutTime),
+                Status = w.AttendanceStatus,
+                Projects = !string.IsNullOrWhiteSpace(w.ProjectCheckIns) ? w.ProjectCheckIns.Trim() : string.Join(", ", w.ProjectsDone),
+                VehicleDriven = JoinDistinct(plates),
+                RegularShift = w.RegularShift,
+                AdditionalShifts = w.AdditionalShifts,
+                OTHours = w.OTHours,
+                AdditionalOTHours = w.AdditionalOTHours,
+                FlattenHours = w.TotalFlattenedHours
+            });
+        }
+        return rows.OrderBy(r => r.Date).ToList();
+    }
 }

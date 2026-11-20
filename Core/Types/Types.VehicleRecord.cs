@@ -162,7 +162,7 @@ public record VehicleDetail
     public string UsedAt { get; set; } = string.Empty;
 
     // ---- UI-only calculated / rollup columns of 'AllVehiclesTable' (never persisted) ----
-    // Cost rollups honour the date filter on 'All Vehicles' (B2 anchor date + C2 scope).
+    // Cost rollups are All-Time totals; the per-date breakdown lives on the 'Vehicle Summary' sheet.
 
     [JsonIgnore]
     [ExcelColumn("Years Old")]
@@ -713,4 +713,68 @@ public record FuelCompanyNameRecord
     [DataList("FuelCompanyNameList")]
     [ExcelColumn("Fuel Company Names", isRequired: true)]
     public string FuelCompanyName { get; set; } = string.Empty;
+}
+
+// =========================================================================
+// 8. VEHICLE SUMMARY (read-only "VehicleSummaryTable"; never saved)
+// =========================================================================
+
+[ExcelTable("VehicleSummaryTable")]
+public record VehicleSummaryRow
+{
+    [ExcelColumn("Date")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
+    public DateOnly Date { get; set; }
+
+    [ExcelColumn("Status")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
+    public VehicleStatus Status { get; set; } = VehicleStatus.Active;
+
+    [ExcelColumn("Driven By")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
+    public string DrivenBy { get; set; } = string.Empty;
+
+    [ExcelColumn("Used At")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
+    public string UsedAt { get; set; } = string.Empty;
+
+    [ExcelColumn("Odometer Used")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
+    [ColumnFormat(ColumnFormatKind.OdometerDynamic)]
+    public decimal? OdometerUsed { get; set; }
+
+    [ExcelColumn("Fuel Cost")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
+    [ColumnFormat(ColumnFormatKind.Currency)]
+    public decimal? FuelCost { get; set; }
+
+    [ExcelColumn("Maintenance Cost")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
+    [ColumnFormat(ColumnFormatKind.Currency)]
+    public decimal? MaintenanceCost { get; set; }
+
+    [ExcelColumn("Insurance Cost")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
+    [ColumnFormat(ColumnFormatKind.Currency)]
+    public decimal? InsuranceCost { get; set; }
+
+    [ExcelColumn("Permit Cost")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
+    [ColumnFormat(ColumnFormatKind.Currency)]
+    public decimal? PermitCost { get; set; }
+
+    [ExcelColumn("Road Tax and Inspection Cost")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
+    [ColumnFormat(ColumnFormatKind.Currency)]
+    public decimal? RoadTaxAndInspectionCost { get; set; }
+
+    [ExcelColumn("Insurance Claim")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
+    [ColumnFormat(ColumnFormatKind.Currency)]
+    public decimal? InsuranceClaimAmount { get; set; }
+
+    [ExcelColumn("Total Cost")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
+    [ColumnFormat(ColumnFormatKind.Currency)]
+    public decimal? TotalCost { get; set; }
 }

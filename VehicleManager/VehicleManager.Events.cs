@@ -1,6 +1,8 @@
 namespace SKSB_App.VehicleManager;
 
+using ExcelDna.Integration;
 using SKSB_App.Core.RuntimeUI.DateFilter;
+using SKSB_App.Core.RuntimeUI.DropDown;
 using SKSB_App.Core.Types;
 using SKSB_App.Core.WorkbookOpen.Entry;
 using SKSB_App.Core.WorkbookOpen.Sync;
@@ -66,11 +68,17 @@ public class Events : ManagerEventsBase<List<VehicleRecord>>
     {
         base.AutoOpen();
         SheetMapper.RegisterRollupHooks();
+        SheetMapper.RegisterSummaryHooks();
     }
 
     public override void AutoClose()
     {
         SheetMapper.UnregisterRollupHooks();
+        ExcelAsyncUtil.QueueAsMacro(() =>
+        {
+            SheetMapper.UnregisterSummaryHooks();
+            CustomDropdowns.Clear();
+        });
         base.AutoClose();
     }
 

@@ -341,3 +341,72 @@ public static class SkillCatalog
     public static IReadOnlyList<string> VehicleLicenseRoleSkills { get; } =
         new[] { Driver, ExcavatorOperator, ForkliftOperator, MotorcycleRider };
 }
+
+// =========================================================================
+// STAFF SUMMARY (read-only "StaffSummaryTable"; never saved)
+// =========================================================================
+
+[ExcelTable("StaffSummaryTable")]
+public record StaffSummaryRow
+{
+    [ExcelColumn("Date")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
+    public DateOnly Date { get; set; }
+
+    [ExcelColumn("Time")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
+    [ColumnFormat(ColumnFormatKind.Text)]
+    public string Time { get; set; } = string.Empty;
+
+    [ExcelColumn("Salary Rate")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
+    [ColumnFormat(ColumnFormatKind.Currency)]
+    public decimal? SalaryRate { get; set; }
+
+    [ExcelColumn("Status")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
+    public AttendanceStatus Status { get; set; } = AttendanceStatus.Absence;
+
+    [ExcelColumn("Projects")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
+    public string Projects { get; set; } = string.Empty;
+
+    [ExcelColumn("Vehicle Driven")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
+    public string VehicleDriven { get; set; } = string.Empty;
+
+    [ExcelColumn("Regular Shift")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
+    [ColumnFormat(ColumnFormatKind.Shifts)]
+    public decimal RegularShift { get; set; }
+
+    [ExcelColumn("Additional Shifts")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
+    [ColumnFormat(ColumnFormatKind.Shifts)]
+    public decimal AdditionalShifts { get; set; }
+
+    [ExcelColumn("OT Hours")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
+    [ColumnFormat(ColumnFormatKind.Hours)]
+    public decimal OTHours { get; set; }
+
+    [ExcelColumn("Additional OT Hours")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
+    [ColumnFormat(ColumnFormatKind.Hours)]
+    public decimal AdditionalOTHours { get; set; }
+
+    [ExcelColumn("Flatten Hours")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
+    [ColumnFormat(ColumnFormatKind.Hours)]
+    public decimal FlattenHours { get; set; }
+
+    [ExcelColumn("Total Salary")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
+    [ColumnFormat(ColumnFormatKind.Currency)]
+    public decimal? TotalSalary { get; set; }
+
+    [ExcelColumn("Claim Made")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
+    [ColumnFormat(ColumnFormatKind.Currency)]
+    public decimal? ClaimMade { get; set; }
+}

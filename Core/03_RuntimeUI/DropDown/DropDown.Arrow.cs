@@ -281,7 +281,7 @@ public static class Arrow
         }
 
         bool isSelected = (e.State & DrawItemState.Selected) == DrawItemState.Selected;
-        bool isChecked = _isMultiSelectSession && item.IsValid && _checkedTokens.Contains(item.Display);
+        bool isChecked = _isMultiSelectSession && item.IsValid && (_checkedTokens.Contains(OptionValue(item)) || _checkedTokens.Contains(item.Display));
         Color backColor = !item.IsValid
             ? (isSelected ? Color.FromArgb(242, 242, 242) : Color.White)
             : isChecked
@@ -297,13 +297,22 @@ public static class Arrow
     }
 
     /// <summary>Single source of truth for the rendered item text (incl. multi-select tick / indent) used by drawing and width measurement.</summary>
+    // Enriched labels ("PLATE — Type", "0001 — Name") write the clean Raw value; all other options keep writing Display
+    // so text transforms and date formatting are preserved.
+    private static string OptionValue(DropdownOption item) =>
+        !string.IsNullOrEmpty(item.Raw)
+        && (item.Display.StartsWith(item.Raw + " — ", StringComparison.Ordinal)
+            || (long.TryParse(item.Raw, out long id) && item.Display.StartsWith($"{id:D4} — ", StringComparison.Ordinal)))
+            ? item.Raw
+            : item.Display;
+
     private static (string Label, bool IsOption) FormatItemLabel(object rawObj)
     {
         if (rawObj is not DropdownOption item) return (rawObj?.ToString() ?? string.Empty, false);
 
         if (_isMultiSelectSession && item.IsValid)
         {
-            bool isChecked = _checkedTokens.Contains(item.Display);
+            bool isChecked = _checkedTokens.Contains(OptionValue(item)) || _checkedTokens.Contains(item.Display);
             return ((isChecked ? "\u2713  " : "     ") + item.Display, true);
         }
         return (item.Display, true);
@@ -505,9 +514,10 @@ public static class Arrow
                     {
                         // Update in-memory state immediately so the tick shows without waiting for the COM write.
                         var tokens = RuleEvaluator.SplitMultiSelectTokens(prevText);
-                        int idx = tokens.FindIndex(t => t.Equals(targetItem.Display, StringComparison.OrdinalIgnoreCase));
+                        string val = OptionValue(targetItem);
+                        int idx = tokens.FindIndex(t => t.Equals(val, StringComparison.OrdinalIgnoreCase));
                         if (idx >= 0) tokens.RemoveAt(idx);
-                        else tokens.Add(targetItem.Display);
+                        else tokens.Add(val);
                         _checkedTokens = new HashSet<string>(tokens, StringComparer.OrdinalIgnoreCase);
                         inCellText = string.Join(", ", tokens);
                     }
@@ -613,8 +623,10 @@ public static class Arrow
                     string q = inCellText.Trim();
                     Func<DropdownOption, int> ranker = i =>
                     {
-                        if (i.Display.Equals(q, StringComparison.OrdinalIgnoreCase)) return 0;
-                        if (i.Display.StartsWith(q, StringComparison.OrdinalIgnoreCase)) return 1;
+                        if (i.Display.Equals(q, StringComparison.OrdinalIgnoreCase) ||
+                            (!string.IsNullOrEmpty(i.Raw) && i.Raw.Equals(q, StringComparison.OrdinalIgnoreCase))) return 0;
+                        if (i.Display.StartsWith(q, StringComparison.OrdinalIgnoreCase) ||
+                            (!string.IsNullOrEmpty(i.Raw) && i.Raw.StartsWith(q, StringComparison.OrdinalIgnoreCase))) return 1;
                         if (i.Display.IndexOf(q, StringComparison.OrdinalIgnoreCase) >= 0) return 2;
                         return 3;
                     };
@@ -716,11 +728,12 @@ public static class Arrow
         {
             var tokens = RuleEvaluator.SplitMultiSelectTokens(existingCellText);
 
-            int existingIdx = tokens.FindIndex(t => t.Equals(targetItem.Display, StringComparison.OrdinalIgnoreCase));
+            string val = OptionValue(targetItem);
+            int existingIdx = tokens.FindIndex(t => t.Equals(val, StringComparison.OrdinalIgnoreCase));
             if (existingIdx >= 0)
                 tokens.RemoveAt(existingIdx);
             else
-                tokens.Add(targetItem.Display);
+                tokens.Add(val);
 
             // An emptied selection clears the cell instead of leaving an empty-string text value.
             if (tokens.Count == 0) singleCell.ClearContents();
@@ -741,7 +754,7 @@ public static class Arrow
             return;
         }
 
-        singleCell.Value2 = targetItem.Display;
+        singleCell.Value2 = OptionValue(targetItem);
     }
 
     private static dynamic ResolveTargetPane(dynamic window, int targetRow, int targetCol)

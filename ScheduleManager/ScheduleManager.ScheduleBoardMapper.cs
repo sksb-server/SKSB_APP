@@ -442,6 +442,15 @@ internal static class ScheduleBoardMapper
         var layouts = Bands.ToDictionary(b => b.Shift, b => LayoutSlots(b.Shift, date, slots, autoPopulate));
         int slotCount = Math.Max(1, layouts.Values.Max(l => l.Count));
 
+        // Laid-out board (position = slot): feeds per-worker match breakdowns and the conflict checks below.
+        var board = new List<DailyProjectSchedule>();
+        foreach (var band in Bands)
+        {
+            var layout = layouts[band.Shift];
+            for (int i = 0; i < layout.Count; i++)
+                board.Add(new DailyProjectSchedule { DailyScheduleDate = date, Shift = band.Shift, SlotIndex = i, ProjectID = layout[i].ProjectID, Workers = layout[i].Workers, Vehicles = layout[i].Vehicles });
+        }
+
         int drawn = DetectSlotCount(wsObj);
         int previous = Math.Max(drawn, _slotCount);
 
@@ -472,6 +481,9 @@ internal static class ScheduleBoardMapper
             {
                 var data = slot < layout.Count ? layout[slot] : new DailyProjectSchedule { DailyScheduleDate = date, Shift = band.Shift };
                 int c0 = slot * SlotWidth;
+                SlotContext? slotContext = data.Workers.Count > 0
+                    ? ReadSlotContext(board, date, new CellLocation(CellKind.Worker, band.Shift, slot, 0))
+                    : null;
 
                 var assignedSkills = new List<string>();
                 for (int i = 0; i < WorkerRowsPerBand && i < data.Workers.Count; i++)
@@ -483,8 +495,11 @@ internal static class ScheduleBoardMapper
                     var skills = SkillsFor(staff, pref);
                     assignedSkills.AddRange(skills);
 
-                    if (pref != null && BoardContext.DescribeInactivePrimarySkillLicense(pref, date) is { } inactive)
-                        workerComments[i, slot] = $"⚠ {inactive.Detail}\nNot counted as a qualified {pref.PrimarySkill.Trim()} on {date:dd/MM/yyyy}.";
+                    if (staff != null && slotContext != null)
+                    {
+                        var profile = new WorkerProfile(staff, pref, BoardContext.DaysWorkedEarlierThisWeek(staff.Id, date), false);
+                        workerComments[i, slot] = ScheduleMatchEngine.FormatBreakdown(profile, slotContext);
+                    }
 
                     workers[i, c0] = name;
                     workers[i, c0 + 1] = string.Join(" ", skills.Select(BoardContext.IconFor).Where(s => s.Length > 0));
@@ -569,14 +584,6 @@ internal static class ScheduleBoardMapper
         }
 
         // Conflicts are computed from the laid-out board (position = slot), reusing the save-time logic.
-        var board = new List<DailyProjectSchedule>();
-        foreach (var band in Bands)
-        {
-            var layout = layouts[band.Shift];
-            for (int i = 0; i < layout.Count; i++)
-                board.Add(new DailyProjectSchedule { DailyScheduleDate = date, Shift = band.Shift, SlotIndex = i, ProjectID = layout[i].ProjectID, Workers = layout[i].Workers });
-        }
-
         var workerCells = new HashSet<(int Row, int Col)>();
         foreach (var c in ComputeWorkerConflicts(board, spans))
         {
