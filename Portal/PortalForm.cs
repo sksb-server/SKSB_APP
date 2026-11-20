@@ -163,25 +163,29 @@ public class PortalForm : Form
             Margin = new Padding(0, 0, 0, 16)
         };
 
-        // Module Buttons wired to ModuleRegistry matching current architecture
+        // Module Buttons wired to ModuleRegistry with Office Paper theme manager accents
         var btnScheduler = CreateModuleButton(
             "Schedule Manager",
             "Biometric logs, shifts & job site allocations",
+            Color.FromArgb(0xF3, 0xA4, 0x47), // Paper Accent 2 — Warm Amber
             () => PortalRouter.Launch(ModuleRegistry.ScheduleManager));
 
         var btnProject = CreateModuleButton(
             "Project Manager",
             "iJob / PVT sites, CIDB compliance & client scopes",
+            Color.FromArgb(0xA5, 0xB5, 0x92), // Paper Accent 1 — Sage Green
             () => PortalRouter.Launch(ModuleRegistry.ProjectManager));
 
         var btnStaff = CreateModuleButton(
             "Staff Manager",
             "Profiles, vehicle & skill licenses, SQL Payroll import",
+            Color.FromArgb(0x80, 0x9E, 0xC2), // Paper Accent 6 — Steel Blue
             () => PortalRouter.Launch(ModuleRegistry.StaffManager));
 
         var btnVehicle = CreateModuleButton(
             "Vehicle Manager",
             "Fleet tracking, Puspakom, road tax & workshop repairs",
+            Color.FromArgb(0xE7, 0xBC, 0x29), // Paper Accent 3 — Mustard Gold
             () => PortalRouter.Launch(ModuleRegistry.VehicleManager));
 
         // Footer: Runtime Status
@@ -205,7 +209,7 @@ public class PortalForm : Form
         Controls.Add(layout);
     }
 
-    private Button CreateModuleButton(string title, string subtitle, Action onClick)
+    private Button CreateModuleButton(string title, string subtitle, Color accentColor, Action onClick)
     {
         var btn = new Button
         {
@@ -225,7 +229,13 @@ public class PortalForm : Form
             e.Graphics.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
 
             float scale = btn.DeviceDpi / 96f;
-            float x = 14f * scale;
+            int barWidth = Math.Max(4, (int)Math.Round(6f * scale));
+            using (var accentBrush = new SolidBrush(accentColor))
+            {
+                e.Graphics.FillRectangle(accentBrush, 1, 1, barWidth, Math.Max(0, btn.ClientSize.Height - 2));
+            }
+
+            float x = barWidth + (12f * scale);
             float titleY = 8f * scale;
             float subY;
 
