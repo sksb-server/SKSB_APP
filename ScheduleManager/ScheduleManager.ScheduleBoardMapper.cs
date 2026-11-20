@@ -239,19 +239,19 @@ internal static class ScheduleBoardMapper
 
     /// <summary>
     /// Two check-in spans conflict when they start together, are both still open, or their time ranges overlap.
-    /// Back-to-back spans (08:00-12:00, 12:00-17:00) do not conflict. Times are compared as offsets from the working-day
-    /// start so night spans crossing midnight (22:00-02:00) compare correctly.
+    /// Back-to-back spans (08:00-12:00, 12:00-17:00) do not conflict. Times are compared as exact (date-aware) offsets
+    /// from the working-day start so night spans crossing midnight (22:00-02:00) and >24 h working days compare correctly.
     /// </summary>
-    private static bool SpansConflict(WorkerProjectSpan a, WorkerProjectSpan b, TimeOnly dayStartTime)
+    private static bool SpansConflict(WorkerProjectSpan a, WorkerProjectSpan b)
     {
-        TimeSpan aIn = AttendanceRollupService.ShiftOffset(a.In, dayStartTime);
-        TimeSpan bIn = AttendanceRollupService.ShiftOffset(b.In, dayStartTime);
+        TimeSpan aIn = a.InOffset;
+        TimeSpan bIn = b.InOffset;
         if (aIn == bIn) return true;
-        if (a.Out == null && b.Out == null) return true;
-        if (a.Out == null) return aIn < AttendanceRollupService.ShiftOffset(b.Out!.Value, dayStartTime);
-        TimeSpan aOut = AttendanceRollupService.ShiftOffset(a.Out.Value, dayStartTime);
-        if (b.Out == null) return bIn < aOut;
-        TimeSpan bOut = AttendanceRollupService.ShiftOffset(b.Out.Value, dayStartTime);
+        if (a.OutOffset == null && b.OutOffset == null) return true;
+        if (a.OutOffset == null) return aIn < b.OutOffset!.Value;
+        TimeSpan aOut = a.OutOffset.Value;
+        if (b.OutOffset == null) return bIn < aOut;
+        TimeSpan bOut = b.OutOffset.Value;
         return aIn < bOut && bIn < aOut;
     }
 
@@ -288,7 +288,7 @@ internal static class ScheduleBoardMapper
                         .Where(x => x.Spans.Count > 0).ToList();
                     for (int i = 0; i < withSpans.Count; i++)
                         for (int j = i + 1; j < withSpans.Count; j++)
-                            if (withSpans[i].Spans.Any(a => withSpans[j].Spans.Any(b => SpansConflict(a, b, BoardContext.DayStartTime))))
+                            if (withSpans[i].Spans.Any(a => withSpans[j].Spans.Any(b => SpansConflict(a, b))))
                             {
                                 hit.Add(withSpans[i].Slot);
                                 hit.Add(withSpans[j].Slot);
@@ -307,7 +307,7 @@ internal static class ScheduleBoardMapper
     internal static List<string> FindDuplicateWorkers(IEnumerable<DailyProjectSchedule> slots, DateOnly date, IEnumerable<AttendanceEntry> entries)
     {
         var list = slots.ToList();
-        var spans = AttendanceRollupService.BuildSpans(entries, date, BoardContext.DayStartTime);
+        var spans = AttendanceRollupService.BuildSpans(entries, date, BoardContext.DayStartTime, BoardContext.NextDayStartTime);
         var messages = new List<string>();
         foreach (var c in ComputeWorkerConflicts(list, spans))
         {
@@ -436,7 +436,7 @@ internal static class ScheduleBoardMapper
     internal static void Render(object wsObj, DateOnly date, IReadOnlyList<DailyProjectSchedule> slots, IReadOnlyList<AttendanceEntry> entries, bool autoPopulate = false)
     {
         dynamic ws = wsObj;
-        var spans = AttendanceRollupService.BuildSpans(entries, date, BoardContext.DayStartTime);
+        var spans = AttendanceRollupService.BuildSpans(entries, date, BoardContext.DayStartTime, BoardContext.NextDayStartTime);
         string cutOffText = BoardContext.LateCutOff.ToString("HH:mm", CultureInfo.InvariantCulture);
 
         var layouts = Bands.ToDictionary(b => b.Shift, b => LayoutSlots(b.Shift, date, slots, autoPopulate));
@@ -740,7 +740,7 @@ internal static class ScheduleBoardMapper
     {
         if (data.ProjectID.Length == 0) return (EmptyHeaderText, null, null);
 
-        var window = AttendanceRollupService.WindowFor(data.ProjectID, spans, BoardContext.DayStartTime);
+        var window = AttendanceRollupService.WindowFor(data.ProjectID, spans);
         string windowText = FormatSpan(window.Start, window.End);
 
         var info = Roster.FindProject(data.ProjectID);
@@ -989,10 +989,19 @@ internal static class ScheduleBoardMapper
     private const string TeamPrefix = "T:";
     private const string StaffPrefix = "S:";
 
+    /// <summary>Icon of the worker's first available skill (falls back to General Worker); used in the Staff Name dropdown.</summary>
+    private static string PrimarySkillIconFor(StaffInfo staff, WorkerPreference? pref)
+    {
+        var skills = SkillsFor(staff, pref);
+        string skill = skills.Count > 0 ? skills[0] : SkillCatalog.GeneralWorker;
+        string icon = BoardContext.IconFor(skill);
+        return icon.Length > 0 ? icon : SkillCatalog.GeneralWorkerIcon;
+    }
+
     private static CustomDropdownResult BuildWorkerDropdown(object wsObj, DateOnly date, CellLocation loc, int row, int col)
     {
         var slot = ReadSlotContext(wsObj, date, loc);
-        var scored = new List<(string Display, string Raw, int Percent, bool Blocked)>();
+        var scored = new List<(string Display, string Raw, int Percent, bool Blocked, string SortName)>();
 
         // Pending skill filter: Staff Skills (col + 1) holds a skill while Staff Name is still empty. Workers / teams
         // without that skill are greyed out and sorted last, but remain pickable.
@@ -1013,8 +1022,10 @@ internal static class ScheduleBoardMapper
             var r = ScheduleMatchEngine.Score(profiles[s.Id], slot);
             bool blocked = r.Blocked || (skillFilter != null && !MatchesSkillFilter(s, skillFilter));
             var inactive = BoardContext.DescribeInactivePrimarySkillLicense(profiles[s.Id].Preference, date);
-            string display = ScheduleMatchEngine.WithPercent(s.ShortName, r.Percent) + (inactive != null ? $" ({inactive.Value.ShortNote})" : string.Empty);
-            scored.Add((display, StaffPrefix + s.ShortName, r.Percent, blocked));
+            string icon = PrimarySkillIconFor(s, profiles[s.Id].Preference);
+            string label = icon.Length > 0 ? $"{icon} {s.ShortName}" : s.ShortName;
+            string display = ScheduleMatchEngine.WithPercent(label, r.Percent) + (inactive != null ? $" ({inactive.Value.ShortNote})" : string.Empty);
+            scored.Add((display, StaffPrefix + s.ShortName, r.Percent, blocked, s.ShortName));
         }
 
         foreach (var team in BoardContext.Teams.Where(t => !string.IsNullOrWhiteSpace(t.TeamName)))
@@ -1025,13 +1036,13 @@ internal static class ScheduleBoardMapper
                 .Where(wp => wp != null).Select(wp => wp!).ToList();
             var r = ScheduleMatchEngine.ScoreTeam(members, slot);
             bool blocked = r.Blocked || (skillFilter != null && !members.Any(m => MatchesSkillFilter(m.Staff, skillFilter)));
-            scored.Add((ScheduleMatchEngine.WithPercent(team.TeamName.Trim(), r.Percent), TeamPrefix + team.TeamName.Trim(), r.Percent, blocked));
+            scored.Add((ScheduleMatchEngine.WithPercent(team.TeamName.Trim(), r.Percent), TeamPrefix + team.TeamName.Trim(), r.Percent, blocked, team.TeamName.Trim()));
         }
 
         var ordered = scored
             .OrderBy(x => x.Blocked ? 1 : 0)
             .ThenByDescending(x => x.Percent)
-            .ThenBy(x => x.Display, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(x => x.SortName, StringComparer.OrdinalIgnoreCase)
             .Select((x, i) => new DropdownOption { Display = x.Display, Raw = x.Raw, Section = i, IsValid = !x.Blocked })
             .ToList();
 

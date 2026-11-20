@@ -23,7 +23,7 @@ CREATE TABLE IF NOT EXISTS attendance_entries (
     staff_id         BIGINT       NOT NULL,
     project_id       VARCHAR(50)  NOT NULL DEFAULT '',
     entry_type       VARCHAR(20)  NOT NULL,         -- CheckIn | CheckOut
-    source           VARCHAR(20)  NOT NULL,         -- Thumbprint | Manual | SKSB_App | WhatsApp
+    source           VARCHAR(20)  NOT NULL,         -- Thumbprint | Manual | SKSB_App | WhatsApp | Admin
     override_reason  TEXT         NOT NULL DEFAULT '',
     is_approved      BOOLEAN      NOT NULL DEFAULT TRUE,
     whatsapp_picture TEXT         NOT NULL DEFAULT '',

@@ -9,7 +9,7 @@ using SKSB_App.Core.Integration.Database;
 using SKSB_App.Core.Types;
 using SKSB_App.Core.WorkbookSave.Storage;
 
-/// <summary>A field worker with the dates needed to decide whether they were employed on a given day.</summary>
+/// <summary>An attendance-eligible staff member (Worker, Office or Admin) with the dates needed to decide whether they were employed on a given day.</summary>
 internal sealed record StaffInfo(
     long Id, string ShortName, string FullName,
     DateOnly? JoinDate, DateOnly? ResignDate, ContractStatus Status, string Department);
@@ -23,8 +23,10 @@ internal sealed record ProjectInfo(
 /// <summary>
 /// Read-only reference data the board needs while the user types: staff, vehicles and projects.
 /// <para>
-/// Staff are FIELD workers only (see <see cref="FieldDepartments"/>); office / admin / management staff never appear.
-/// The roster keeps the FULL field-worker history (resigned and terminated included) so any record can be resolved
+/// <see cref="Staff"/> are FIELD workers only (<see cref="Department.Worker"/>, see <see cref="FieldDepartments"/>); Office and
+/// Admin staff never appear there, so the Daily Schedule, preferences and teams exclude them.
+/// <see cref="AttendanceStaff"/> holds everyone who appears in attendance: Worker + Office + Admin (see <see cref="AttendanceDepartments"/>).
+/// The roster keeps the FULL staff history (resigned and terminated included) so any record can be resolved
 /// to a Staff ID / name. Whether a worker may be <i>suggested or newly assigned</i> is a separate, date-effective
 /// question answered by <see cref="IsActiveOn(StaffInfo, DateOnly)"/>.
 /// </para>
@@ -34,24 +36,48 @@ internal sealed record ProjectInfo(
 internal static class Roster
 {
     /// <summary>
-    /// Departments whose staff go on-site. Admin, Management, Office and None are deliberately absent.
+    /// Departments whose staff go on-site (Daily Schedule, Preference, Teams). Office, Admin and None are deliberately absent.
     /// Adjust here if a department stops (or starts) working in the field.
     /// </summary>
-    internal static readonly Department[] FieldDepartments =
-    {
-        Department.Worker, Department.Driver, Department.Operator,
-        Department.Foreman, Department.Supervisor, Department.Mechanic
-    };
+    internal static readonly Department[] FieldDepartments = { Department.Worker };
 
+    /// <summary>
+    /// Departments that appear in attendance (Daily Attendances / Attendance Entries): field workers, Office staff
+    /// (attendance only, never scheduled) and Admin staff (auto-attended on weekdays).
+    /// </summary>
+    internal static readonly Department[] AttendanceDepartments = { Department.Worker, Department.Office, Department.Admin };
+
+    private static readonly string[] AttendanceDepartmentNames = AttendanceDepartments.Select(d => d.ToString().ToLowerInvariant()).ToArray();
     private static readonly string[] FieldDepartmentNames = FieldDepartments.Select(d => d.ToString().ToLowerInvariant()).ToArray();
 
     internal static bool IsFieldDepartment(string? department) =>
         !string.IsNullOrWhiteSpace(department) && FieldDepartmentNames.Contains(department.Trim().ToLowerInvariant());
 
+    internal static bool IsAttendanceDepartment(string? department) =>
+        !string.IsNullOrWhiteSpace(department) && AttendanceDepartmentNames.Contains(department.Trim().ToLowerInvariant());
+
+    internal static bool IsOfficeDepartment(string? department) =>
+        !string.IsNullOrWhiteSpace(department) && string.Equals(department.Trim(), nameof(Department.Office), StringComparison.OrdinalIgnoreCase);
+
+    internal static bool IsAdminDepartment(string? department) =>
+        !string.IsNullOrWhiteSpace(department) && string.Equals(department.Trim(), nameof(Department.Admin), StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>Office staff are attendance-eligible but never scheduled; their attendance is booked to the "Office" project.</summary>
+    internal static bool IsOfficeStaff(StaffInfo? staff) => staff != null && IsOfficeDepartment(staff.Department);
+    internal static bool IsOfficeStaff(long staffId) => IsOfficeStaff(FindAttendanceStaff(staffId));
+
+    /// <summary>Admin staff are attendance-eligible but never scheduled; they are auto checked in / out on weekdays.</summary>
+    internal static bool IsAdminStaff(StaffInfo? staff) => staff != null && IsAdminDepartment(staff.Department);
+    internal static bool IsAdminStaff(long staffId) => IsAdminStaff(FindAttendanceStaff(staffId));
+
     private static readonly TimeSpan CacheLifetime = TimeSpan.FromMinutes(5);
     private static DateTime _loadedAt = DateTime.MinValue;
 
+    private static List<StaffInfo> _attendanceStaff = new();
     private static List<StaffInfo> _staff = new();
+    private static List<StaffInfo> _adminStaff = new();
+    private static Dictionary<string, StaffInfo> _attendanceByName = new(StringComparer.OrdinalIgnoreCase);
+    private static Dictionary<long, StaffInfo> _attendanceById = new();
     private static List<VehicleInfo> _vehicles = new();
     private static List<ProjectInfo> _projects = new();
     private static Dictionary<string, StaffInfo> _staffByName = new(StringComparer.OrdinalIgnoreCase);
@@ -59,8 +85,12 @@ internal static class Roster
     private static Dictionary<string, VehicleInfo> _vehicleByPlate = new(StringComparer.OrdinalIgnoreCase);
     private static Dictionary<string, ProjectInfo> _projectById = new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>Every field worker, past and present. Use for resolution; use <see cref="ActiveOn"/> for suggestions.</summary>
+    /// <summary>Every field worker (Worker), past and present. Use for resolution; use <see cref="ActiveOn"/> for suggestions.</summary>
     public static IReadOnlyList<StaffInfo> Staff { get { EnsureLoaded(); return _staff; } }
+    /// <summary>Every Worker, Office and Admin staff member, past and present (attendance resolution).</summary>
+    public static IReadOnlyList<StaffInfo> AttendanceStaff { get { EnsureLoaded(); return _attendanceStaff; } }
+    /// <summary>Every Admin staff member, past and present.</summary>
+    public static IReadOnlyList<StaffInfo> AdminStaff { get { EnsureLoaded(); return _adminStaff; } }
     public static IReadOnlyList<VehicleInfo> Vehicles { get { EnsureLoaded(); return _vehicles; } }
     public static IReadOnlyList<ProjectInfo> Projects { get { EnsureLoaded(); return _projects; } }
 
@@ -81,10 +111,17 @@ internal static class Roster
             : s.Status is not (ContractStatus.Resigned or ContractStatus.Terminated);
     }
 
+    /// <summary>Field workers only: false for Office / Admin staff and unknown IDs.</summary>
     internal static bool IsActiveOn(long staffId, DateOnly date) => FindStaff(staffId) is { } s && IsActiveOn(s, date);
 
     /// <summary>Field workers employed on <paramref name="date"/> - the only ones suggested or newly assignable that day.</summary>
     public static IReadOnlyList<StaffInfo> ActiveOn(DateOnly date) => Staff.Where(s => IsActiveOn(s, date)).ToList();
+
+    /// <summary>Worker, Office and Admin staff employed on <paramref name="date"/> - the people who appear in attendance that day.</summary>
+    public static IReadOnlyList<StaffInfo> ActiveAttendanceOn(DateOnly date) => AttendanceStaff.Where(s => IsActiveOn(s, date)).ToList();
+
+    /// <summary>Admin staff employed on <paramref name="date"/>.</summary>
+    public static IReadOnlyList<StaffInfo> ActiveAdminOn(DateOnly date) => AdminStaff.Where(s => IsActiveOn(s, date)).ToList();
 
     /// <summary>Why <paramref name="s"/> cannot work on <paramref name="date"/> (for validation messages).</summary>
     internal static string DescribeInactive(StaffInfo s, DateOnly date)
@@ -95,7 +132,7 @@ internal static class Roster
     }
 
     // =========================================================================
-    // 2. RESOLUTION (all field workers, any date)
+    // 2. RESOLUTION (FindStaff: field workers; FindAttendanceStaff: Worker + Office + Admin; any date)
     // =========================================================================
     public static StaffInfo? FindStaff(string? name)
     {
@@ -109,9 +146,21 @@ internal static class Roster
         return _staffById.TryGetValue(id, out var s) ? s : null;
     }
 
-    /// <summary>Display name for a Staff ID; resolves former field workers too so past dates keep their names.</summary>
+    public static StaffInfo? FindAttendanceStaff(string? name)
+    {
+        EnsureLoaded();
+        return !string.IsNullOrWhiteSpace(name) && _attendanceByName.TryGetValue(name.Trim(), out var s) ? s : null;
+    }
+
+    public static StaffInfo? FindAttendanceStaff(long id)
+    {
+        EnsureLoaded();
+        return _attendanceById.TryGetValue(id, out var s) ? s : null;
+    }
+
+    /// <summary>Display name for a Staff ID; resolves former workers, Office and Admin staff too so past dates keep their names.</summary>
     public static string NameOf(long id, string fallback = "") =>
-        FindStaff(id)?.ShortName is { Length: > 0 } n ? n : fallback;
+        FindAttendanceStaff(id)?.ShortName is { Length: > 0 } n ? n : fallback;
 
     public static VehicleInfo? FindVehicle(string? plate)
     {
@@ -150,12 +199,12 @@ internal static class Roster
             if (ServerEnvironment.IsOffline) throw new TimeoutException("Offline Mode: roster comes from the local snapshot.");
             var db = new PostgreSqlService();
 
-            _staff = new List<StaffInfo>();
+            _attendanceStaff = new List<StaffInfo>();
             foreach (var r in db.Query<dynamic>(
                 @"SELECT staff_id, staff_name, short_name, contract_status, join_date, resign_date, department FROM staff_master
                   WHERE LOWER(department) = ANY(@Departments)
                   ORDER BY staff_id;",
-                new { Departments = FieldDepartmentNames }))
+                new { Departments = AttendanceDepartmentNames }))
             {
                 long id = Convert.ToInt64(r.staff_id);
                 string? full = r.staff_name;
@@ -164,7 +213,7 @@ internal static class Roster
                 object? join = r.join_date;
                 object? resign = r.resign_date;
                 string? department = r.department;
-                _staff.Add(MakeStaff(id, full, shortName, status, ToDate(join), ToDate(resign), department));
+                _attendanceStaff.Add(MakeStaff(id, full, shortName, status, ToDate(join), ToDate(resign), department));
             }
 
             _vehicles = new List<VehicleInfo>();
@@ -207,12 +256,17 @@ internal static class Roster
             {
                 // Online + SQL error: never mix in offline data.
                 AppLogger.Error("[ScheduleManager.Roster] Server query failed while online; roster left empty", ex);
-                _staff = new List<StaffInfo>();
+                _attendanceStaff = new List<StaffInfo>();
                 _vehicles = new List<VehicleInfo>();
                 _projects = new List<ProjectInfo>();
             }
         }
 
+        _staff = _attendanceStaff.Where(s => IsFieldDepartment(s.Department)).ToList();
+        _adminStaff = _attendanceStaff.Where(s => IsAdminDepartment(s.Department)).ToList();
+        _attendanceByName = new Dictionary<string, StaffInfo>(StringComparer.OrdinalIgnoreCase);
+        foreach (var s in _attendanceStaff.Where(s => s.ShortName.Length > 0)) _attendanceByName.TryAdd(s.ShortName, s);
+        _attendanceById = _attendanceStaff.GroupBy(s => s.Id).ToDictionary(g => g.Key, g => g.First());
         _staffByName = new Dictionary<string, StaffInfo>(StringComparer.OrdinalIgnoreCase);
         foreach (var s in _staff.Where(s => s.ShortName.Length > 0)) _staffByName.TryAdd(s.ShortName, s);
         _staffById = _staff.GroupBy(s => s.Id).ToDictionary(g => g.Key, g => g.First());
@@ -223,8 +277,8 @@ internal static class Roster
 
     private static void LoadRosterFromSnapshots()
     {
-        _staff = (OfflineSnapshot.Load<List<StaffRecord>>() ?? new())
-            .Where(s => s.StaffID > 0 && IsFieldDepartment(s.StaffDetails.Department))
+        _attendanceStaff = (OfflineSnapshot.Load<List<StaffRecord>>() ?? new())
+            .Where(s => s.StaffID > 0 && IsAttendanceDepartment(s.StaffDetails.Department))
             .Select(s => MakeStaff(
                 s.StaffID, s.StaffDetails.StaffName, s.StaffDetails.StaffShortName, s.StaffDetails.ContractStatus.ToString(),
                 s.StaffDetails.JoinDate, s.StaffDetails.ResignDate, s.StaffDetails.Department))

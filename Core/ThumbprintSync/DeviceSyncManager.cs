@@ -42,9 +42,25 @@ public static class DeviceSyncManager
     public static DateOnly WorkingDate(DateOnly date, TimeOnly time, TimeOnly dayStartTime) =>
         time < dayStartTime ? date.AddDays(-1) : date;
 
-    /// <summary>True when the punch (real calendar date + time) belongs to <paramref name="workingDate"/>.</summary>
-    public static bool IsInWorkingDay(DateOnly punchDate, TimeOnly punchTime, DateOnly workingDate, TimeOnly dayStartTime) =>
-        WorkingDate(punchDate, punchTime, dayStartTime) == workingDate;
+    /// <summary>
+    /// Working date a punch belongs to when each calendar day has its own Day Start Time: before
+    /// <paramref name="dayStartFor"/>(<paramref name="date"/>) it rolls back to the previous day.
+    /// </summary>
+    public static DateOnly WorkingDate(DateOnly date, TimeOnly time, Func<DateOnly, TimeOnly> dayStartFor) =>
+        time < dayStartFor(date) ? date.AddDays(-1) : date;
+
+    /// <summary>
+    /// True when the punch (real calendar date + time) belongs to <paramref name="workingDate"/>: from
+    /// <paramref name="workingDate"/> @ <paramref name="dayStartTime"/> (inclusive) to (<paramref name="workingDate"/> + 1) @
+    /// <paramref name="nextDayStartTime"/> (exclusive; defaults to <paramref name="dayStartTime"/>, i.e. a 24 h day).
+    /// </summary>
+    public static bool IsInWorkingDay(DateOnly punchDate, TimeOnly punchTime, DateOnly workingDate, TimeOnly dayStartTime, TimeOnly? nextDayStartTime = null)
+    {
+        DateTime punch = punchDate.ToDateTime(punchTime);
+        DateTime start = workingDate.ToDateTime(dayStartTime);
+        DateTime end = workingDate.AddDays(1).ToDateTime(nextDayStartTime ?? dayStartTime);
+        return punch >= start && punch < end;
+    }
 
     // =========================================================================
     // 1. TERMINAL READ (background thread only - never touches Excel)
@@ -176,9 +192,18 @@ public static class DeviceSyncManager
     public static (List<AttendanceEntry> CleanEntries, int RemovedDuplicates) DeduplicateExisting(IReadOnlyCollection<AttendanceEntry> existing, TimeOnly? dayStartTime = null)
     {
         TimeOnly dayStart = dayStartTime ?? DefaultDayStartTime;
+        return DeduplicateExisting(existing, _ => dayStart);
+    }
+
+    /// <summary>
+    /// <see cref="DeduplicateExisting(IReadOnlyCollection{AttendanceEntry}, TimeOnly?)"/> with a per-calendar-day
+    /// Day Start Time (variable-length working days).
+    /// </summary>
+    public static (List<AttendanceEntry> CleanEntries, int RemovedDuplicates) DeduplicateExisting(IReadOnlyCollection<AttendanceEntry> existing, Func<DateOnly, TimeOnly> dayStartFor)
+    {
         var drop = new HashSet<AttendanceEntry>(ReferenceEqualityComparer.Instance);
 
-        foreach (var g in existing.Where(e => e.Source == AttendanceSource.Thumbprint).GroupBy(e => (e.StaffID, WorkingDate(e.Date, e.Time, dayStart))))
+        foreach (var g in existing.Where(e => e.Source == AttendanceSource.Thumbprint).GroupBy(e => (e.StaffID, WorkingDate(e.Date, e.Time, dayStartFor))))
         {
             var kept = new List<AttendanceEntry>();
             foreach (var e in g.OrderBy(e => e.Date).ThenBy(e => e.Time))   // stable sort
@@ -217,6 +242,19 @@ public static class DeviceSyncManager
         TimeOnly? dayStartTime = null)
     {
         TimeOnly dayStart = dayStartTime ?? DefaultDayStartTime;
+        return BuildEntries(punches, existing, isKnownStaff, _ => dayStart);
+    }
+
+    /// <summary>
+    /// <see cref="BuildEntries(IEnumerable{TerminalPunch}, IReadOnlyCollection{AttendanceEntry}, Func{long, bool}, TimeOnly?)"/>
+    /// with a per-calendar-day Day Start Time (variable-length working days).
+    /// </summary>
+    public static (List<AttendanceEntry> NewEntries, int Duplicates, int UnknownStaff) BuildEntries(
+        IEnumerable<TerminalPunch> punches,
+        IReadOnlyCollection<AttendanceEntry> existing,
+        Func<long, bool> isKnownStaff,
+        Func<DateOnly, TimeOnly> dayStartFor)
+    {
         var result = new List<AttendanceEntry>();
         int duplicates = 0;
         int unknown = 0;
@@ -224,14 +262,14 @@ public static class DeviceSyncManager
         // Existing thumbprint rows per (staff, working day), chronological: they seed the in/out alternation and the de-dup check.
         var history = existing
             .Where(e => e.Source == AttendanceSource.Thumbprint)
-            .GroupBy(e => (e.StaffID, WorkingDate(e.Date, e.Time, dayStart)))
+            .GroupBy(e => (e.StaffID, WorkingDate(e.Date, e.Time, dayStartFor)))
             .ToDictionary(g => g.Key, g => g.OrderBy(e => e.Date).ThenBy(e => e.Time).ToList());
 
         var parsed = punches
             .Select(p => (Ok: long.TryParse(p.EnrollNumber?.Trim(), out long id), Id: id, p.Timestamp))
             .ToList();
 
-        foreach (var staffDay in parsed.Where(p => p.Ok).GroupBy(p => (p.Id, WorkDate: WorkingDate(DateOnly.FromDateTime(p.Timestamp), TimeOnly.FromDateTime(p.Timestamp), dayStart))))
+        foreach (var staffDay in parsed.Where(p => p.Ok).GroupBy(p => (p.Id, WorkDate: WorkingDate(DateOnly.FromDateTime(p.Timestamp), TimeOnly.FromDateTime(p.Timestamp), dayStartFor))))
         {
             if (!isKnownStaff(staffDay.Key.Id)) { unknown += staffDay.Count(); continue; }
 

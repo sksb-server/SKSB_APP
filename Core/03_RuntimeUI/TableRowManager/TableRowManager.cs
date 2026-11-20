@@ -706,7 +706,7 @@ public static partial class TableRowManager
         return false;
     }
 
-    public static int CleanTableDuplicateRows(dynamic table, List<string> warnings, int[]? keyColumnIndices = null)
+    public static int CleanTableDuplicateRows(dynamic table, List<string> warnings, int[]? keyColumnIndices = null, Func<DateOnly, TimeOnly?, bool>? warningDateFilter = null)
     {
         if (table == null) return 0;
 
@@ -782,9 +782,13 @@ public static partial class TableRowManager
             bool isEntries = tableName.Equals("AttendanceEntriesTable", StringComparison.OrdinalIgnoreCase);
             int[]? effectiveKeys = keyColumnIndices;
             int sourceCol = -1, staffCol = -1, dateCol = -1, timeCol = -1;
+            if (isEntries || warningDateFilter != null)
+            {
+                dateCol = ColOf("Date"); timeCol = ColOf("Time");
+            }
             if (isEntries)
             {
-                dateCol = ColOf("Date"); timeCol = ColOf("Time"); staffCol = ColOf("Staff ID");
+                staffCol = ColOf("Staff ID");
                 int typeCol = ColOf("Entry Type"); sourceCol = ColOf("Source");
                 if (keyColumnIndices == null)
                 {
@@ -849,7 +853,10 @@ public static partial class TableRowManager
                 if (isDoubleScan || !seenSignatures.Add(signature))
                 {
                     duplicateIndices.Add(r);
-                    warnings.Add($"Table '{tableName}' Row {absRow}: Duplicate entry removed ({signature.Trim('|')}).");
+                    bool emitWarning = warningDateFilter == null || dateCol < 1 ||
+                        RuleDataCache.MatchesWarningDateFilter(dataGrid[r, dateCol], timeCol >= 1 ? dataGrid[r, timeCol] : null, warningDateFilter);
+                    if (emitWarning)
+                        warnings.Add($"Table '{tableName}' Row {absRow}: Duplicate entry removed ({signature.Trim('|')}).");
                 }
             }
 

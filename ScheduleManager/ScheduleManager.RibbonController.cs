@@ -51,6 +51,11 @@ public class RibbonController : ManagerRibbonBase
     // =========================================================================
     protected override string GetCustomGroupsXml() => @"
                 <group id='grpScheduleDay' label='Working Day'>
+                  <box id='boxWorkingDay' boxStyle='vertical'>
+                    <labelControl id='lblWorkingDate' getLabel='GetWorkingDateLabel' />
+                    <labelControl id='lblWorkingDayOfWeek' getLabel='GetWorkingDayOfWeekLabel' />
+                    <labelControl id='lblWorkingDayRelation' getLabel='GetWorkingDayRelationLabel' />
+                  </box>
                   <button id='btnPrevDay' label='Previous Day' size='large' imageMso='LeftArrow2' onAction='OnPreviousDayClicked'
                           screentip='Previous Day' supertip='Loads the schedule for the day before the one on the board.' />
                   <button id='btnToday' label='Today' size='large' imageMso='DateAndTimeInsert' onAction='OnTodayClicked'
@@ -88,13 +93,39 @@ public class RibbonController : ManagerRibbonBase
     public void OnTodayClicked(IRibbonControl control) =>
         ExcelAsyncUtil.QueueAsMacro(() => SheetMapper.GoToDate(DateOnly.FromDateTime(DateTime.Today)));
 
+    private static DateOnly DisplayedDate => SheetMapper.LoadedDate ?? DateOnly.FromDateTime(DateTime.Today);
+
+    public string GetWorkingDateLabel(IRibbonControl control) => $"Date: {DisplayedDate:dd MMM yyyy}";
+
+    public string GetWorkingDayOfWeekLabel(IRibbonControl control) => $"Day: {DisplayedDate:dddd}";
+
+    public string GetWorkingDayRelationLabel(IRibbonControl control)
+    {
+        int diff = DisplayedDate.DayNumber - DateOnly.FromDateTime(DateTime.Today).DayNumber;
+        return diff switch
+        {
+            0 => "Status: Today",
+            -1 => "Status: Yesterday (Past)",
+            < -1 => $"Status: Past ({-diff}d ago)",
+            1 => "Status: Tomorrow",
+            _ => $"Status: Upcoming (+{diff}d)"
+        };
+    }
+
+    internal static void RefreshWorkingDayDisplay()
+    {
+        try { RibbonUi?.InvalidateControl("lblWorkingDate"); } catch { }
+        try { RibbonUi?.InvalidateControl("lblWorkingDayOfWeek"); } catch { }
+        try { RibbonUi?.InvalidateControl("lblWorkingDayRelation"); } catch { }
+    }
+
     // =========================================================================
     // 5. ATTENDANCE
     // =========================================================================
     protected override void OnAfterDuplicateRowsCleaned(int removedCount) => SheetMapper.OnDuplicateRowsCleaned();
 
     public void OnRollupClicked(IRibbonControl control) =>
-        ExcelAsyncUtil.QueueAsMacro(() => SheetMapper.RefreshDerived(reloadContext: true, rollup: true));
+        ExcelAsyncUtil.QueueAsMacro(() => SheetMapper.RefreshDerived(reloadContext: true, rollup: true, ensureAdminEntries: true));
 
     public void OnSyncTerminalClicked(IRibbonControl control)
     {
@@ -108,9 +139,8 @@ public class RibbonController : ManagerRibbonBase
 
             if (!isOnline) { SyncTerminalOffline(date, addinDir); return; }
 
-            var knownStaffIds = Roster.Staff.Select(s => s.Id).ToHashSet();
+            var knownStaffIds = Roster.AttendanceStaff.Select(s => s.Id).ToHashSet();
             var sheetThumbprintEntries = SheetMapper.ReadCurrentSheetEntries().Where(e => e.Source == AttendanceSource.Thumbprint).ToList();
-            TimeOnly dayStart = DeviceSyncManager.DefaultDayStartTime;
             SetStatus($"Syncing all punches from thumbprint terminal ({DeviceSyncManager.DefaultIp})...");
             AppLogger.Info($"[ScheduleManager] Syncing all punches from thumbprint terminal ({DeviceSyncManager.DefaultIp})...");
 
@@ -130,17 +160,19 @@ public class RibbonController : ManagerRibbonBase
                         return;
                     }
 
-                    static DateOnly WorkDay(DateOnly d, TimeOnly t, TimeOnly start) => t < start ? d.AddDays(-1) : d;
                     DateOnly firstDate = DateOnly.FromDateTime(punches.Min(p => p.Timestamp));
                     DateOnly lastDate = DateOnly.FromDateTime(punches.Max(p => p.Timestamp));
+                    // Per-date Day Start Times: each working day runs from its own start to the next date's start.
+                    var dayStarts = ServerSyncCommands.FetchDayStartTimesSince(firstDate.AddDays(-1));
+                    TimeOnly DayStartFor(DateOnly d) => dayStarts.TryGetValue(d, out var t) ? t : DeviceSyncManager.DefaultDayStartTime;
                     var dbEntries = ServerSyncCommands.FetchThumbprintEntriesSince(firstDate.AddDays(-1));
                     var existing = dbEntries.Concat(sheetThumbprintEntries).ToList();
 
-                    var (newEntries, duplicates, unknown) = DeviceSyncManager.BuildEntries(punches, existing, id => knownStaffIds.Contains(id), dayStart);
+                    var (newEntries, duplicates, unknown) = DeviceSyncManager.BuildEntries(punches, existing, id => knownStaffIds.Contains(id), DayStartFor);
                     int savedToDb = newEntries.Count > 0 ? ServerDispatcher.InsertAttendanceEntries(newEntries) : 0;
 
-                    int totalDays = punches.Select(p => WorkDay(DateOnly.FromDateTime(p.Timestamp), TimeOnly.FromDateTime(p.Timestamp), dayStart)).Distinct().Count();
-                    int savedDays = newEntries.Select(e => WorkDay(e.Date, e.Time, dayStart)).Distinct().Count();
+                    int totalDays = punches.Select(p => DeviceSyncManager.WorkingDate(DateOnly.FromDateTime(p.Timestamp), TimeOnly.FromDateTime(p.Timestamp), DayStartFor)).Distinct().Count();
+                    int savedDays = newEntries.Select(e => DeviceSyncManager.WorkingDate(e.Date, e.Time, DayStartFor)).Distinct().Count();
 
                     ExcelAsyncUtil.QueueAsMacro(() =>
                     {

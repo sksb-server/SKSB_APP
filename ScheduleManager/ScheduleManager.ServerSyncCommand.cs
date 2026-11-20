@@ -89,11 +89,23 @@ internal static class ServerSyncCommands
         var record = new ScheduleRecord { DailyScheduleDate = date };
 
         // Per-date attendance parameters; no row => ScheduleRecord defaults (06:00 / 11:00 / 18:00).
-        foreach (var r in db.Query<dynamic>("SELECT day_start_time, late_cut_off_time, ot_start_time FROM daily_schedule_settings WHERE schedule_date = @D;", new { D = d }))
+        // The next date's Day Start Time is the exclusive end boundary of this working day.
+        DateTime dNext = date.AddDays(1).ToDateTime(TimeOnly.MinValue);
+        foreach (var r in db.Query<dynamic>(
+            "SELECT schedule_date, day_start_time, late_cut_off_time, ot_start_time FROM daily_schedule_settings WHERE schedule_date IN (@D, @DNext);",
+            new { D = d, DNext = dNext }))
         {
-            record.DayStartTime = Time(r.day_start_time) ?? record.DayStartTime;
-            record.LateCutOffTime = Time(r.late_cut_off_time) ?? record.LateCutOffTime;
-            record.OTStartTime = Time(r.ot_start_time) ?? record.OTStartTime;
+            DateOnly rowDate = DateOnly.FromDateTime(Convert.ToDateTime(r.schedule_date));
+            if (rowDate == date)
+            {
+                record.DayStartTime = Time(r.day_start_time) ?? record.DayStartTime;
+                record.LateCutOffTime = Time(r.late_cut_off_time) ?? record.LateCutOffTime;
+                record.OTStartTime = Time(r.ot_start_time) ?? record.OTStartTime;
+            }
+            else if (rowDate == date.AddDays(1))
+            {
+                record.NextDayStartTime = Time(r.day_start_time) ?? record.NextDayStartTime;
+            }
         }
 
         foreach (var r in db.Query<dynamic>("SELECT * FROM daily_project_schedules WHERE schedule_date = @D ORDER BY shift, slot_index;", new { D = d }))
@@ -123,7 +135,7 @@ internal static class ServerSyncCommands
                 Date = DateOnly.FromDateTime(Convert.ToDateTime(r.entry_date)),
                 Time = Time(r.entry_time) ?? TimeOnly.MinValue,
                 StaffID = Convert.ToInt64(r.staff_id),
-                ProjectID = Text(r.project_id),
+                ProjectID = AttendanceRollupService.NormalizeProjectId(Text(r.project_id)),
                 EntryType = Parse(r.entry_type, AttendanceEntryType.CheckIn),
                 Source = Parse(r.source, AttendanceSource.Manual),
                 OverrideReason = Text(r.override_reason),
@@ -359,8 +371,9 @@ internal static class ServerSyncCommands
     // 4. LOOKUP LISTS FOR THE 'Data' SHEET
     // =========================================================================
     /// <summary>
-    /// StaffIDList/StaffNameList offer strictly the workers employed on <paramref name="date"/> (resigned / not-yet-joined excluded);
-    /// AllFieldStaffIDList/AllFieldStaffNameList include every field worker, resigned included (Preference sheet).
+    /// StaffIDList/StaffNameList offer strictly the Worker, Office and Admin staff employed on <paramref name="date"/>
+    /// (resigned / not-yet-joined excluded; Daily Attendances / Attendance Entries);
+    /// AllFieldStaffIDList/AllFieldStaffNameList include every field worker (Office / Admin excluded), resigned included (Preference / Teams).
     /// </summary>
     internal static void SyncLookupLists(DateOnly date)
     {
@@ -372,10 +385,10 @@ internal static class ServerSyncCommands
     internal static void SyncStaffLookupLists(DateOnly date, bool synchronous = false)
     {
         // StaffIDList and StaffNameList stay index-aligned (Staff ID <-> Staff Name sync).
-        var staff = Roster.Staff
-            .Where(s => s.Id > 0 && s.ShortName.Length > 0 && Roster.IsActiveOn(s, date))
+        var staff = Roster.ActiveAttendanceOn(date)
+            .Where(s => s.Id > 0 && s.ShortName.Length > 0)
             .OrderBy(s => s.Id).ToList();
-        // AllFieldStaff* lists include resigned workers (used by the Preference sheet).
+        // AllFieldStaff* lists include resigned workers but never Office / Admin (used by the Preference sheet).
         var allStaff = Roster.Staff
             .Where(s => s.Id > 0 && s.ShortName.Length > 0)
             .OrderBy(s => s.Id).ToList();
@@ -397,7 +410,9 @@ internal static class ServerSyncCommands
         if (plates.Count > 0) DataList.SyncValues("VehiclePlateList", plates);
 
         var projects = Roster.Projects.Select(p => p.Id).Where(p => p.Length > 0).Distinct().ToList();
-        if (projects.Count > 0) DataList.SyncValues("ProjectIDList", projects);
+        if (!projects.Contains(AttendanceRollupService.OfficeProjectName, StringComparer.OrdinalIgnoreCase))
+            projects.Add(AttendanceRollupService.OfficeProjectName);
+        DataList.SyncValues("ProjectIDList", projects);
 
         // Emoji palette behind SkillsTable[Display Icon].
         DataList.SyncValues("DisplayIconList", SkillCatalog.DisplayIcons);
@@ -448,7 +463,7 @@ internal static class ServerSyncCommands
                 Date = DateOnly.FromDateTime(Convert.ToDateTime(r.entry_date)),
                 Time = Time(r.entry_time) ?? TimeOnly.MinValue,
                 StaffID = Convert.ToInt64(r.staff_id),
-                ProjectID = Text(r.project_id),
+                ProjectID = AttendanceRollupService.NormalizeProjectId(Text(r.project_id)),
                 EntryType = Parse(r.entry_type, AttendanceEntryType.CheckIn),
                 Source = Parse(r.source, AttendanceSource.Manual),
                 OverrideReason = Text(r.override_reason),
@@ -457,6 +472,56 @@ internal static class ServerSyncCommands
             });
         }
         return list;
+    }
+
+    /// <summary>
+    /// Day Start Time stored for <paramref name="date"/> (online only); no row, offline or error =>
+    /// <see cref="BoardContext.DefaultDayStartTime"/>.
+    /// </summary>
+    internal static TimeOnly FetchDayStartTime(DateOnly date)
+    {
+        if (!ServerEnvironment.IsOnline) return BoardContext.DefaultDayStartTime;
+        try
+        {
+            ServerDispatcher.EnsureScheduleSchema();
+            var db = new PostgreSqlService();
+            foreach (var r in db.Query<dynamic>(
+                "SELECT day_start_time FROM daily_schedule_settings WHERE schedule_date = @D;",
+                new { D = date.ToDateTime(TimeOnly.MinValue) }))
+            {
+                TimeOnly? t = Time(r.day_start_time);
+                if (t.HasValue) return t.Value;
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn($"[{Module}] Day Start Time for {date:yyyy-MM-dd} unavailable: {ex.Message}");
+        }
+        return BoardContext.DefaultDayStartTime;
+    }
+
+    /// <summary>Every stored Day Start Time from <paramref name="minDate"/> onwards (dates without a row are absent).</summary>
+    internal static Dictionary<DateOnly, TimeOnly> FetchDayStartTimesSince(DateOnly minDate)
+    {
+        var result = new Dictionary<DateOnly, TimeOnly>();
+        try
+        {
+            ServerDispatcher.EnsureScheduleSchema();
+            var db = new PostgreSqlService();
+            foreach (var r in db.Query<dynamic>(
+                "SELECT schedule_date, day_start_time FROM daily_schedule_settings WHERE schedule_date >= @MinDate;",
+                new { MinDate = minDate.ToDateTime(TimeOnly.MinValue) }))
+            {
+                TimeOnly? t = Time(r.day_start_time);
+                DateOnly rowDate = DateOnly.FromDateTime(Convert.ToDateTime(r.schedule_date));
+                if (t.HasValue) result[rowDate] = t.Value;
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn($"[{Module}] Day Start Times since {minDate:yyyy-MM-dd} unavailable: {ex.Message}");
+        }
+        return result;
     }
 
     // =========================================================================

@@ -101,6 +101,23 @@ public static class RulesExtractor
     public static (List<string> Errors, List<string> Warnings) ValidateAllWorkbookTables(
         object wbObj,
         params string[] excludeTableNames)
+        => ValidateAllWorkbookTables(wbObj, null, excludeTableNames);
+
+    public static (List<string> Errors, List<string> Warnings) ValidateAllWorkbookTables(
+        object wbObj,
+        IReadOnlyDictionary<string, Func<DateOnly, TimeOnly?, bool>>? warningDateFilters,
+        params string[] excludeTableNames)
+        => ValidateAllWorkbookTables(wbObj, warningDateFilters, null, excludeTableNames);
+
+    /// <param name="skipHealAndDedupeTables">
+    /// Tables the caller has already healed + deduplicated this save pass (e.g. via <c>TableMapper.ExtractFromTable</c>);
+    /// they are only validated, skipping the redundant <c>EvaluateAndHealTable</c> / <c>CleanTableDuplicateRows</c> pass.
+    /// </param>
+    public static (List<string> Errors, List<string> Warnings) ValidateAllWorkbookTables(
+        object wbObj,
+        IReadOnlyDictionary<string, Func<DateOnly, TimeOnly?, bool>>? warningDateFilters,
+        IReadOnlySet<string>? skipHealAndDedupeTables,
+        params string[] excludeTableNames)
     {
         using var _ = AppLogger.Scope("ValidateAllWorkbookTables");
         var errors = new List<string>();
@@ -149,7 +166,9 @@ public static class RulesExtractor
                     maxRows: rowCount,
                     startCol: startCol,
                     columnSpan: colSpan,
-                    sharedSourceCache: sharedSourceCache
+                    sharedSourceCache: sharedSourceCache,
+                    rowWarningFilter: warningDateFilters != null && warningDateFilters.TryGetValue(tableName, out var filter) ? filter : null,
+                    skipHealAndDedupe: skipHealAndDedupeTables != null && skipHealAndDedupeTables.Contains(tableName)
                 );
 
                 errors.AddRange(tblErrors);
@@ -168,7 +187,9 @@ public static class RulesExtractor
         int maxRows,
         int startCol,
         int columnSpan,
-        Dictionary<string, List<string>> sharedSourceCache)
+        Dictionary<string, List<string>> sharedSourceCache,
+        Func<DateOnly, TimeOnly?, bool>? rowWarningFilter = null,
+        bool skipHealAndDedupe = false)
     {
         var errors = new List<string>();
         var warnings = new List<string>();
@@ -179,10 +200,10 @@ public static class RulesExtractor
         dynamic? table = tableObj;
         string tableName = table?.Name?.ToString() ?? "Table";
 
-        if (table != null)
+        if (table != null && !skipHealAndDedupe)
         {
             // 1. In-memory cell healing
-            var healNotices = RuleEvaluator.EvaluateAndHealTable(wsDynamic, table);
+            var healNotices = RuleEvaluator.EvaluateAndHealTable(wsDynamic, table, rowWarningFilter);
             foreach (var notice in healNotices)
             {
                 warnings.Add($"  [{sheetName}] {notice}");
@@ -190,7 +211,7 @@ public static class RulesExtractor
 
             // 2. VALIDATION DEDUPLICATION: Detect, Warn, Delete, and Skip
             var dedupeWarnings = new List<string>();
-            int dupesRemoved = TableRowManager.CleanTableDuplicateRows(table, dedupeWarnings);
+            int dupesRemoved = TableRowManager.CleanTableDuplicateRows(table, dedupeWarnings, warningDateFilter: rowWarningFilter);
 
             if (dupesRemoved > 0)
             {
@@ -294,6 +315,9 @@ public static class RulesExtractor
         {
             colHeadersOneBased[c + 1] = rules.ColumnRules[c].Header;
         }
+
+        int dateCol = RuleEvaluator.FindColumnByHeader(colHeadersOneBased, "Date");
+        int timeCol = RuleEvaluator.FindColumnByHeader(colHeadersOneBased, "Time");
 
         for (int r = 1; r <= rowCount; r++)
         {
@@ -440,7 +464,11 @@ public static class RulesExtractor
                         {
                             string conflictMsg = $"  Row {excelRow} [{sheetName}]: '{strVal}' in '{rule.Header}' conflicts with '{partnerVal}' in '{colHeadersOneBased[partnerCol]}'.";
                             if (cRule.IsWarningOnly)
-                                warnings.Add(conflictMsg);
+                            {
+                                if (rowWarningFilter == null || dateCol < 1 ||
+                                    RuleDataCache.MatchesWarningDateFilter(rowObjectsOneBased[dateCol], timeCol >= 1 ? rowObjectsOneBased[timeCol] : null, rowWarningFilter))
+                                    warnings.Add(conflictMsg);
+                            }
                             else
                             {
                                 errors.Add(conflictMsg);

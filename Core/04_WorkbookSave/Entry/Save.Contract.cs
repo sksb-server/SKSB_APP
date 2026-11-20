@@ -78,6 +78,12 @@ public class SaveContract<T> : ISaveContract
     }
 
     public Action<T>? PopulateWorksheet { get; set; }
+
+    /// <summary>
+    /// Optional lightweight post-save refresh. When set, <see cref="SaveEntry"/> runs it after a successful save
+    /// instead of the full <see cref="PopulateWorksheet"/> (e.g. to avoid rewriting large append-only tables).
+    /// </summary>
+    public Action<T>? RefreshAfterSave { get; set; }
     public Func<T?>? FetchFromServer { get; set; }
     public Action<bool>? SyncLookups { get; set; }
     public Predicate<T>? ValidateOfflinePayload { get; set; }

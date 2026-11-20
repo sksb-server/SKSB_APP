@@ -7,13 +7,16 @@ using System.Linq;
 using System.Windows.Forms;
 using ExcelDna.Integration;
 using SKSB_App.Core.Diagnostics;
+using SKSB_App.Core.Integration.Database;
 using SKSB_App.Core.RuntimeUI.DropDown;
 using SKSB_App.Core.RuntimeUI.Progress;
 using SKSB_App.Core.RuntimeUI.RuleEngine;
 using SKSB_App.Core.ThumbprintSync;
 using SKSB_App.Core.Types;
 using SKSB_App.Core.WorkbookOpen.Sheet;
+using SKSB_App.Core.WorkbookSave.Entry;
 using SKSB_App.Core.WorkbookSave.SheetMapper;
+using SKSB_App.Core.WorkbookSave.Storage;
 using SKSB_App.Core.WorkbookSave.Validation;
 
 internal static partial class SheetMapper
@@ -42,6 +45,11 @@ internal static partial class SheetMapper
     // Fingerprints of the attendance entries as last loaded / saved: PastRecordGuard only flags entries not in this set.
     private static HashSet<string> _loadedEntryFingerprints = new(StringComparer.Ordinal);
 
+    // Fingerprints of entries known to match the PostgreSQL copy (excludes unpersisted Admin auto entries and
+    // auto-derived ProjectID changes). Save upserts only entries NOT in this set; without a baseline it upserts all.
+    private static HashSet<string> _persistedEntryFingerprints = new(StringComparer.Ordinal);
+    private static bool _hasPersistedBaseline;
+
     // Tracks entries whose ProjectID was auto-derived from the schedule (entry identity -> last auto-derived ProjectID).
     // Manual edits to a different ProjectID stop matching and are preserved; clearing ProjectID re-enables auto-derivation.
     private static readonly Dictionary<string, string> _autoDerivedEntryProjects = new(StringComparer.Ordinal);
@@ -49,9 +57,13 @@ internal static partial class SheetMapper
     private static string EntryIdentityKey(AttendanceEntry e) =>
         $"{e.Date:yyyy-MM-dd}|{e.Time:HH:mm:ss}|{e.StaffID}|{e.EntryType}|{e.Source}";
 
+    // Full-precision date/time: the default TimeOnly.ToString() drops seconds, which would let a new punch hide behind an
+    // existing one in the same minute and be skipped by the delta upsert.
     private static string EntryFingerprint(AttendanceEntry e) =>
         string.Join("|",
-            e.Date, e.Time, e.StaffID,
+            e.Date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+            e.Time.ToString("HH:mm:ss.FFFFFFF", CultureInfo.InvariantCulture),
+            e.StaffID,
             (e.ProjectID ?? string.Empty).Trim().ToUpperInvariant(),
             e.EntryType, e.Source,
             (e.OverrideReason ?? string.Empty).Trim(),
@@ -61,8 +73,23 @@ internal static partial class SheetMapper
     internal static IEnumerable<DateOnly> GetModifiedAttendanceEntryDates(IEnumerable<AttendanceEntry> current) =>
         current.Where(e => !_loadedEntryFingerprints.Contains(EntryFingerprint(e))).Select(e => e.Date).Distinct().ToList();
 
-    internal static void MarkEntriesSaved(IEnumerable<AttendanceEntry> entries) =>
-        _loadedEntryFingerprints = new HashSet<string>(entries.Select(EntryFingerprint), StringComparer.Ordinal);
+    /// <param name="persistedToServer">
+    /// True when <paramref name="entries"/> were committed to PostgreSQL (becomes the delta-upsert baseline);
+    /// false for offline saves, which leave the server baseline untouched.
+    /// </param>
+    internal static void MarkSaved(IEnumerable<AttendanceEntry> entries, bool persistedToServer = true)
+    {
+        var list = entries as IList<AttendanceEntry> ?? entries.ToList();
+        _loadedEntryFingerprints = new HashSet<string>(list.Select(EntryFingerprint), StringComparer.Ordinal);
+        _hasUnsavedRecordEdits = false;
+        _hasUnsavedGlobalEdits = false;
+
+        if (persistedToServer)
+        {
+            _persistedEntryFingerprints = new HashSet<string>(list.Select(EntryFingerprint), StringComparer.Ordinal);
+            _hasPersistedBaseline = true;
+        }
+    }
 
     private static void ClearTableFilter(dynamic sheet, string tableName)
     {
@@ -122,8 +149,14 @@ internal static partial class SheetMapper
     private static bool _editPromptPending;
     internal static bool HasUnsavedRecordEdits => _hasUnsavedRecordEdits;
 
+    // Edits that are not tied to a single date (preferences / lookups) or rolled-up attendance for the current day.
+    private static bool _hasUnsavedGlobalEdits;
+    private static bool _isSwitchingDate;
+    internal static bool HasUnsavedChanges => _hasUnsavedRecordEdits || _hasUnsavedGlobalEdits;
+
     /// <summary>Date currently shown on the board; lets a date change be reverted when the user declines.</summary>
     private static DateOnly? _loadedDate;
+    internal static DateOnly? LoadedDate => _loadedDate;
 
     // =========================================================================
     // 2. EXTRACTION & VALIDATION PIPELINE
@@ -161,6 +194,7 @@ internal static partial class SheetMapper
             {
                 DailyScheduleDate = date.Value,
                 DayStartTime = BoardContext.ReadTimeCell((object)attendanceSheet!, DayStartCell, BoardContext.DefaultDayStartTime),
+                NextDayStartTime = BoardContext.NextDayStartTime,
                 LateCutOffTime =BoardContext.ReadTimeCell((object)attendanceSheet!, LateCutOffCell, BoardContext.DefaultLateCutOff),
                 OTStartTime = BoardContext.ReadTimeCell((object)attendanceSheet!, OtStartCell, BoardContext.DefaultOtStartTime)
             };
@@ -182,7 +216,12 @@ internal static partial class SheetMapper
             });
             LoadingOverlay.Report("Reading daily schedule board...");
             record.Projects = ScheduleBoardMapper.Read((object)board!, date.Value);
-            RunFrozen(() => SyncEntryProjectsWithSchedule(entriesSheet, record.AttendanceEntries, date.Value, record.Projects, record.DayStartTime, record.OTStartTime, resetTracking: false));
+            RunFrozen(() => SyncEntryProjectsWithSchedule(entriesSheet, record.AttendanceEntries, date.Value, record.Projects, record.DayStartTime, record.NextDayStartTime, record.OTStartTime, resetTracking: false));
+
+            // Delta upsert: only entries that differ from the known server copy. No baseline => null => full upsert.
+            record.ModifiedAttendanceEntries = _hasPersistedBaseline
+                ? record.AttendanceEntries.Where(e => !_persistedEntryFingerprints.Contains(EntryFingerprint(e))).ToList()
+                : null;
 
             BoardContext.SetSkills(record.Skills);
             ServerSyncCommands.EnsureLicensesLoaded();
@@ -196,7 +235,18 @@ internal static partial class SheetMapper
             RunFrozen(() => ServerSyncCommands.SyncStaffLookupLists(date.Value, synchronous: true));
 
             // ---- table rule validation (required cells, dropdown sources, formats) ----
-            var (ruleErrors, ruleWarnings) = RulesExtractor.ValidateAllWorkbookTables(wbObj);
+            var warningDateFilters = new Dictionary<string, Func<DateOnly, TimeOnly?, bool>>(StringComparer.OrdinalIgnoreCase)
+            {
+                [EntriesTableName] = (entryDate, entryTime) => entryTime.HasValue
+                    ? DeviceSyncManager.IsInWorkingDay(entryDate, entryTime.Value, date.Value, record.DayStartTime, record.NextDayStartTime)
+                    : entryDate == date.Value
+            };
+            // These six tables were just healed + deduplicated by TableMapper.ExtractFromTable above: validate only.
+            var alreadyHealed = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+            {
+                EntriesTableName, MasterTableName, "WorkerPreferencesTable", "TeamTable", "SkillsTable", "ProjectRequirementsTable"
+            };
+            var (ruleErrors, ruleWarnings) = RulesExtractor.ValidateAllWorkbookTables(wbObj, warningDateFilters, alreadyHealed);
             errors.AddRange(ruleErrors);
             warnings.AddRange(ruleWarnings);
 
@@ -206,8 +256,8 @@ internal static partial class SheetMapper
             // ---- roll punches + board up into the daily attendance rows that get persisted ----
             LoadingOverlay.Report("Rolling up daily worker attendance...");
             var punchesForDate = record.AttendanceEntries
-                .Where(e => DeviceSyncManager.IsInWorkingDay(e.Date, e.Time, date.Value, record.DayStartTime)).ToList();
-            record.WorkerAttendance = AttendanceRollupService.Run(date.Value, punchesForDate, record.Projects, record.WorkerAttendance, record.DayStartTime, record.LateCutOffTime, record.OTStartTime);
+                .Where(e => DeviceSyncManager.IsInWorkingDay(e.Date, e.Time, date.Value, record.DayStartTime, record.NextDayStartTime)).ToList();
+            record.WorkerAttendance = AttendanceRollupService.Run(date.Value, punchesForDate, record.Projects, record.WorkerAttendance, record.DayStartTime, record.LateCutOffTime, record.OTStartTime, record.NextDayStartTime);
 
             return (record, errors, warnings);
         }
@@ -221,6 +271,8 @@ internal static partial class SheetMapper
     private static void ValidateSchedule(ScheduleRecord record, List<string> errors, List<string> warnings)
     {
         DateOnly scheduleDate = record.DailyScheduleDate;
+        var dayEntries = record.AttendanceEntries
+            .Where(e => DeviceSyncManager.IsInWorkingDay(e.Date, e.Time, scheduleDate, record.DayStartTime, record.NextDayStartTime)).ToList();
 
         // Duplicate workers within a shift band block the save.
         errors.AddRange(ScheduleBoardMapper.FindDuplicateWorkers(record.Projects, record.DailyScheduleDate, record.AttendanceEntries));
@@ -234,13 +286,16 @@ internal static partial class SheetMapper
             if (slot.ProjectID.Length > 0 && Roster.FindProject(slot.ProjectID) == null)
                 warnings.Add($"  [Daily Schedule - {label}]: project '{slot.ProjectID}' was not found in project master.");
 
-            // Resolution is against ALL field workers (a worker who resigned after this date, or who is already on a
-            // historical row, resolves cleanly). Only someone not employed on this date is flagged.
+            // Resolution is against ALL attendance staff (a worker who resigned after this date, or who is already on a
+            // historical row, resolves cleanly). Office / Admin staff resolve but cannot be scheduled; only field
+            // workers employed on this date pass.
             foreach (var worker in slot.Workers.Distinct(StringComparer.OrdinalIgnoreCase))
             {
-                var staff = Roster.FindStaff(worker);
+                var staff = Roster.FindAttendanceStaff(worker);
                 if (staff == null)
                     errors.Add($"  [Daily Schedule - {label}]: '{worker}' is not a known field worker (a team name must be expanded first).");
+                else if (!Roster.IsFieldDepartment(staff.Department))
+                    errors.Add($"  [Daily Schedule - {label}]: '{worker}' is {staff.Department} staff and cannot be assigned to Daily Schedule (only field workers can be scheduled).");
                 else if (!Roster.IsActiveOn(staff, scheduleDate))
                     errors.Add($"  [Daily Schedule - {label}]: '{worker}' was not employed on {scheduleDate:yyyy-MM-dd} ({Roster.DescribeInactive(staff, scheduleDate)}).");
             }
@@ -269,18 +324,21 @@ internal static partial class SheetMapper
                     .Any(s => s.Trim().Equals(primary, StringComparison.OrdinalIgnoreCase));
                 var inactive = held ? null : BoardContext.DescribeInactivePrimarySkillLicense(p, scheduleDate);
                 if (!held && inactive != null)
-                    warnings.Add($"  [Preference]: Staff ID '{p.StaffID}' has Primary Skill '{primary}', but their {inactive.Value.Detail} — they will not count as a qualified {primary} on {scheduleDate:dd/MM/yyyy}.");
+                {
+                    if (Roster.IsActiveOn(p.StaffID, scheduleDate))
+                        warnings.Add($"  [Preference]: Staff ID '{p.StaffID}' has Primary Skill '{primary}', but their {inactive.Value.Detail} — they will not count as a qualified {primary} on {scheduleDate:dd/MM/yyyy}.");
+                }
                 else if (!held)
                     errors.Add($"  [Preference]: Staff ID '{p.StaffID}' has Primary Skill '{primary}', which is not in their 'Licensed Skills' or 'Other Skills'.");
             }
         }
         if (record.AttendanceEntries.Any(e => e.StaffID <= 0))
             errors.Add("  [Attendance Entries]: Field 'Staff ID' is required and cannot be empty.");
-        foreach (var id in record.AttendanceEntries.Where(e => e.StaffID > 0).Select(e => e.StaffID).Distinct())
+        foreach (var id in dayEntries.Where(e => e.StaffID > 0).Select(e => e.StaffID).Distinct())
         {
-            var staff = Roster.FindStaff(id);
+            var staff = Roster.FindAttendanceStaff(id);
             if (staff == null)
-                warnings.Add($"  [Attendance Entries]: Staff ID '{id}' is not a known field worker; those punches are excluded from the attendance rollup.");
+                warnings.Add($"  [Attendance Entries]: Staff ID '{id}' is not a known staff member; those punches are excluded from the attendance rollup.");
             else if (!Roster.IsActiveOn(staff, scheduleDate))
                 warnings.Add($"  [Attendance Entries]: Staff ID '{id}' ({staff.ShortName}) was not employed on {scheduleDate:yyyy-MM-dd} ({Roster.DescribeInactive(staff, scheduleDate)}); those punches are excluded from the attendance rollup.");
         }
@@ -297,15 +355,14 @@ internal static partial class SheetMapper
         foreach (var g in record.AttendanceEntries.GroupBy(e => (e.Date, e.Time, e.StaffID, e.EntryType, e.Source)).Where(g => g.Count() > 1))
             errors.Add($"  [Attendance Entries]: Staff {g.Key.StaffID} has {g.Count()} identical {g.Key.Source} {g.Key.EntryType} punches at {g.Key.Date:dd/MM/yyyy} {g.Key.Time:HH:mm}.");
 
-        foreach (var day in record.AttendanceEntries.Where(e => e.IsApproved)
-                     .GroupBy(e => (e.StaffID, WorkingDay: DeviceSyncManager.WorkingDate(e.Date, e.Time, record.DayStartTime))))
+        foreach (var day in dayEntries.Where(e => e.IsApproved).GroupBy(e => e.StaffID))
         {
             var ordered = day.OrderBy(e => e.Date).ThenBy(e => e.Time).ToList();
             if (ordered[0].EntryType == AttendanceEntryType.CheckOut)
-                warnings.Add($"  [Attendance Entries]: Staff {day.Key.StaffID} on {day.Key.WorkingDay:dd/MM/yyyy} starts with a CheckOut and has no earlier CheckIn.");
+                warnings.Add($"  [Attendance Entries]: Staff {day.Key} on {scheduleDate:dd/MM/yyyy} starts with a CheckOut and has no earlier CheckIn.");
         }
 
-        int pending = record.AttendanceEntries.Count(e => !e.IsApproved);
+        int pending = dayEntries.Count(e => !e.IsApproved);
         if (pending > 0)
             warnings.Add($"  [Attendance Entries]: {pending} unapproved entr{(pending == 1 ? "y is" : "ies are")} excluded from the attendance rollup until 'Is Approved' is TRUE.");
     }
@@ -388,18 +445,18 @@ internal static partial class SheetMapper
     // =========================================================================
     private static void SyncEntryProjectsWithSchedule(
         dynamic? entriesSheet, List<AttendanceEntry> entries, DateOnly date,
-        IReadOnlyList<DailyProjectSchedule> slots, TimeOnly dayStartTime, TimeOnly otStartTime, bool resetTracking)
+        IReadOnlyList<DailyProjectSchedule> slots, TimeOnly dayStartTime, TimeOnly nextDayStartTime, TimeOnly otStartTime, bool resetTracking)
     {
         if (resetTracking) _autoDerivedEntryProjects.Clear();
         var changedByKey = new Dictionary<string, string>(StringComparer.Ordinal);
 
         foreach (var e in entries)
         {
-            if (e.StaffID <= 0 || !DeviceSyncManager.IsInWorkingDay(e.Date, e.Time, date, dayStartTime)) continue;
+            if (e.StaffID <= 0 || !DeviceSyncManager.IsInWorkingDay(e.Date, e.Time, date, dayStartTime, nextDayStartTime)) continue;
 
             string key = EntryIdentityKey(e);
-            string current = (e.ProjectID ?? string.Empty).Trim().ToUpperInvariant();
-            string scheduled = AttendanceRollupService.ScheduledProjectFor(e.StaffID, e.Time, slots, dayStartTime, otStartTime);
+            string current = AttendanceRollupService.NormalizeProjectId(e.ProjectID);
+            string scheduled = AttendanceRollupService.ScheduledProjectFor(e.StaffID, e.Date, e.Time, date, slots, dayStartTime, otStartTime);
 
             if (resetTracking)
             {
@@ -528,7 +585,7 @@ internal static partial class SheetMapper
     }
 
     // =========================================================================
-    // 3. APPROVAL DEFAULTS (Thumbprint/Manual/SKSB_App => TRUE, WhatsApp => FALSE until an admin confirms)
+    // 3. APPROVAL DEFAULTS (Thumbprint/Manual/SKSB_App/Admin => TRUE, WhatsApp => FALSE until an admin confirms)
     // =========================================================================
     private static void NormalizeApprovals(dynamic entriesSheet)
     {
@@ -610,6 +667,7 @@ internal static partial class SheetMapper
                 if (_loadedDate != date) PastRecordGuard.ResetEditSession(GuardSession);   // edit approvals are per date
                 _loadedDate = date;
                 _hasUnsavedRecordEdits = false;
+                _hasUnsavedGlobalEdits = false;
 
                 // SkillsTable: an empty record (first load / fresh server) keeps the template-seeded rows instead of wiping them.
                 bool writeSkills = record.Skills.Count > 0;
@@ -644,14 +702,34 @@ internal static partial class SheetMapper
 
                 // Context (requirements, icons, day start, cut-off, OT start) comes from the workbook; prefs/teams from the record just loaded.
                 BoardContext.Reload(wbObj);
+                BoardContext.SetNextDayStartTime(record.NextDayStartTime);
                 BoardContext.SetPreferences(record.Preferences, record.Teams);
 
-                SyncEntryProjectsWithSchedule(null, record.AttendanceEntries, date, record.Projects, BoardContext.DayStartTime, BoardContext.OTStartTime, resetTracking: true);
+                // Server baseline for the delta upsert: captured BEFORE ProjectID auto-derivation and Admin auto entries,
+                // so both still count as changes on the next save. Offline / pending-upload data is never a server baseline.
+                if (ServerEnvironment.IsOnline && !OfflineSnapshot.HasPendingSnapshot<ScheduleRecord>())
+                {
+                    _persistedEntryFingerprints = new HashSet<string>(record.AttendanceEntries.Select(EntryFingerprint), StringComparer.Ordinal);
+                    _hasPersistedBaseline = true;
+                }
+                else
+                {
+                    _persistedEntryFingerprints.Clear();
+                    _hasPersistedBaseline = false;
+                }
+
+                SyncEntryProjectsWithSchedule(null, record.AttendanceEntries, date, record.Projects, BoardContext.DayStartTime, BoardContext.NextDayStartTime, BoardContext.OTStartTime, resetTracking: true);
+
+                // Active Admin staff with no punch that working day get approved auto CheckIn/CheckOut entries.
+                // They are fingerprinted as loaded below, and _hasUnsavedGlobalEdits stays false, so merely browsing
+                // dates never triggers a save; they persist with the next real save of this date.
+                var adminAutoEntries = AttendanceRollupService.BuildAdminAutoEntries(date, record.AttendanceEntries, BoardContext.DayStartTime, BoardContext.OTStartTime, BoardContext.NextDayStartTime);
+                if (adminAutoEntries.Count > 0) record.AttendanceEntries.AddRange(adminAutoEntries);
 
                 var entries = record.AttendanceEntries
                     .OrderBy(e => e.Date).ThenBy(e => e.Time).ToList();
                 var dayEntries = entries
-                    .Where(e => DeviceSyncManager.IsInWorkingDay(e.Date, e.Time, date, BoardContext.DayStartTime)).ToList();
+                    .Where(e => DeviceSyncManager.IsInWorkingDay(e.Date, e.Time, date, BoardContext.DayStartTime, BoardContext.NextDayStartTime)).ToList();
                 foreach (var e in entries) e.StaffName = Roster.NameOf(e.StaffID, e.StaffName);
                 _loadedEntryFingerprints = new HashSet<string>(entries.Select(EntryFingerprint), StringComparer.Ordinal);
                 LoadingOverlay.Report("Populating attendance entries...");
@@ -670,14 +748,49 @@ internal static partial class SheetMapper
                     LoadingOverlay.Report("Rolling up daily attendances...");
                     var rows = AttendanceRollupService.Run(date,
                         dayEntries,
-                        record.Projects, record.WorkerAttendance, BoardContext.DayStartTime, BoardContext.LateCutOff, BoardContext.OTStartTime);
+                        record.Projects, record.WorkerAttendance, BoardContext.DayStartTime, BoardContext.LateCutOff, BoardContext.OTStartTime, BoardContext.NextDayStartTime);
                     WriteAttendanceRows(attendanceSheet, rows);
                 }
             });
+            RibbonController.RefreshWorkingDayDisplay();
         }
         catch (Exception ex)
         {
             AppLogger.Error("[ScheduleManager] Failed populating schedule workbook", ex);
+        }
+    }
+
+    /// <summary>
+    /// Lightweight post-save refresh: re-renders the board and rewrites <c>DailyAttendanceTable</c> from the saved record.
+    /// Deliberately leaves <c>AttendanceEntriesTable</c> (10k+ historical rows, already current on the sheet) and the
+    /// Preference tables untouched.
+    /// </summary>
+    internal static void RefreshAfterSave(ScheduleRecord record)
+    {
+        try
+        {
+            dynamic xlApp = ExcelDnaUtil.Application;
+            dynamic? wb = xlApp.ActiveWorkbook;
+            if (wb == null) return;
+            object wbObj = wb!;
+
+            dynamic? board = SheetMapperHelper.ResolveSheetSafely(wbObj, ScheduleBoardMapper.SheetAliases, ScheduleBoardMapper.DefaultSheetName);
+            dynamic? attendanceSheet = SheetMapperHelper.ResolveSheetSafely(wbObj, MasterSheetAliases, "Daily Attendances");
+
+            RunFrozen(() =>
+            {
+                var dayEntries = record.AttendanceEntries
+                    .Where(e => DeviceSyncManager.IsInWorkingDay(e.Date, e.Time, record.DailyScheduleDate, record.DayStartTime, record.NextDayStartTime))
+                    .ToList();
+
+                if (board != null) ScheduleBoardMapper.Render((object)board!, record.DailyScheduleDate, record.Projects, dayEntries, autoPopulate: true);
+                if (attendanceSheet != null) WriteAttendanceRows(attendanceSheet, record.WorkerAttendance);
+            });
+            RibbonController.RefreshWorkingDayDisplay();
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("[ScheduleManager] Failed refreshing schedule workbook after save", ex);
         }
     }
 
@@ -927,8 +1040,10 @@ internal static partial class SheetMapper
     /// Re-renders the board (team expansion, icons, check-in/out, project windows, requirement flags) and,
     /// optionally, refreshes the Daily Attendances rollup from the current punches. Safe to call repeatedly:
     /// events are suppressed while it writes and it never re-enters itself.
+    /// With <paramref name="ensureAdminEntries"/> (explicit Roll Up) the roster is reloaded and missing Admin auto
+    /// CheckIn / CheckOut entries are added; newly generated entries mark the day as unsaved so a date switch persists them.
     /// </summary>
-    internal static void RefreshDerived(bool reloadContext, bool rollup)
+    internal static void RefreshDerived(bool reloadContext, bool rollup, bool ensureAdminEntries = false)
     {
         if (_isRefreshing) return;
         _isRefreshing = true;
@@ -951,6 +1066,15 @@ internal static partial class SheetMapper
 
             RunFrozen(() =>
             {
+                if (ensureAdminEntries)
+                {
+                    Roster.Invalidate();
+                    ServerSyncCommands.SyncStaffLookupLists(date.Value, synchronous: true);
+                    // The next date's Day Start Time (end of this working day) may have been edited elsewhere.
+                    if (ServerEnvironment.IsOnline)
+                        BoardContext.SetNextDayStartTime(ServerSyncCommands.FetchDayStartTime(date.Value.AddDays(1)));
+                }
+
                 if (reloadContext)
                 {
                     RefreshLicensedSkills(wbObj, date.Value);
@@ -967,7 +1091,24 @@ internal static partial class SheetMapper
                     ? TableMapper.ExtractFromTable<AttendanceEntry>((object)entriesSheet!, EntriesTableName)
                     : new List<AttendanceEntry>();
 
-                SyncEntryProjectsWithSchedule(entriesSheet, entries, date.Value, slots, BoardContext.DayStartTime, BoardContext.OTStartTime, resetTracking: false);
+                if (ensureAdminEntries && rollup && entriesSheet != null)
+                {
+                    var adminAutoEntries = AttendanceRollupService.BuildAdminAutoEntries(date.Value, entries, BoardContext.DayStartTime, BoardContext.OTStartTime, BoardContext.NextDayStartTime);
+                    if (adminAutoEntries.Count > 0)
+                    {
+                        entries.AddRange(adminAutoEntries);
+                        entries = entries.OrderBy(e => e.Date).ThenBy(e => e.Time).ToList();
+                        foreach (var e in entries) e.StaffName = Roster.NameOf(e.StaffID, e.StaffName);
+                        ClearTableFilter(entriesSheet, EntriesTableName);
+                        TableMapper.PopulateTableSafe<AttendanceEntry>((object)entriesSheet!, EntriesTableName, entries);
+                        ApplyDateFilter(entriesSheet, EntriesTableName, date.Value);
+                        foreach (var e in adminAutoEntries) _loadedEntryFingerprints.Add(EntryFingerprint(e));
+                        // Generated entries are not in the database yet: persist them on the next date switch.
+                        _hasUnsavedGlobalEdits = true;
+                    }
+                }
+
+                SyncEntryProjectsWithSchedule(entriesSheet, entries, date.Value, slots, BoardContext.DayStartTime, BoardContext.NextDayStartTime, BoardContext.OTStartTime, resetTracking: false);
 
                 ScheduleBoardMapper.Render((object)board!, date.Value, slots, entries);
 
@@ -975,8 +1116,8 @@ internal static partial class SheetMapper
                 {
                     var existing = TableMapper.ExtractFromTable<DailyWorkerAttendance>((object)attendanceSheet!, MasterTableName);
                     var rows = AttendanceRollupService.Run(date.Value,
-                        entries.Where(e => DeviceSyncManager.IsInWorkingDay(e.Date, e.Time, date.Value, BoardContext.DayStartTime)).ToList(),
-                        slots, existing, BoardContext.DayStartTime, BoardContext.LateCutOff, BoardContext.OTStartTime);
+                        entries.Where(e => DeviceSyncManager.IsInWorkingDay(e.Date, e.Time, date.Value, BoardContext.DayStartTime, BoardContext.NextDayStartTime)).ToList(),
+                        slots, existing, BoardContext.DayStartTime, BoardContext.LateCutOff, BoardContext.OTStartTime, BoardContext.NextDayStartTime);
                     if (Signature(rows) != Signature(existing)) WriteAttendanceRows(attendanceSheet, rows);
                 }
             });
@@ -1070,7 +1211,11 @@ internal static partial class SheetMapper
 
             if (isEntries) QueueRefresh(reloadContext: false, rollup: true);
             else if (PreferenceAliases.Any(a => a.Equals(name, StringComparison.OrdinalIgnoreCase)) ||
-                     name.Equals("Lookups", StringComparison.OrdinalIgnoreCase)) QueueRefresh(reloadContext: true, rollup: false);
+                     name.Equals("Lookups", StringComparison.OrdinalIgnoreCase))
+            {
+                _hasUnsavedGlobalEdits = true;
+                QueueRefresh(reloadContext: true, rollup: false);
+            }
             else if (MasterSheetAliases.Any(a => a.Equals(name, StringComparison.OrdinalIgnoreCase)) && row <= 2) QueueRefresh(reloadContext: true, rollup: true);
         }
         catch (Exception ex)
@@ -1224,8 +1369,8 @@ internal static partial class SheetMapper
         dynamic? board = SheetMapperHelper.ResolveSheetSafely((object)wb!, ScheduleBoardMapper.SheetAliases, ScheduleBoardMapper.DefaultSheetName);
         if (board == null) return;
 
-        RunFrozen(() => ScheduleBoardMapper.WriteDate((object)board!, target));
-        OnDateCellChanged(DateSource.Date);
+        try { SwitchToDate((object)board!, target); }
+        catch (Exception ex) { AppLogger.Error("[ScheduleManager] Date change failed", ex); }
     }
 
     // =========================================================================
@@ -1277,31 +1422,65 @@ internal static partial class SheetMapper
                 return;
             }
 
-            // A2 and B2 always mirror each other. Events are off inside RunFrozen, so this write cannot re-enter the observer.
-            RunFrozen(() => ScheduleBoardMapper.WriteDate((object)board!, date.Value));
-            if (date == _loadedDate) return;
-
-            var answer = MessageBox.Show(
-                $"Load the schedule for {date:dddd, dd MMM yyyy}?\n\nUnsaved changes to {(_loadedDate.HasValue ? _loadedDate.Value.ToString("dd MMM yyyy") : "the current date")} will be discarded.",
-                "Schedule Manager", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
-
-            if (answer != DialogResult.Yes)
+            if (date == _loadedDate)
             {
-                if (_loadedDate.HasValue) RunFrozen(() => ScheduleBoardMapper.WriteDate((object)board!, _loadedDate.Value));
+                // A2 and B2 always mirror each other. Events are off inside RunFrozen, so this write cannot re-enter the observer.
+                RunFrozen(() => ScheduleBoardMapper.WriteDate((object)board!, date.Value));
                 return;
             }
 
-            using (LoadingOverlay.BeginScope($"Schedule Manager — Loading {date.Value:dd MMM yyyy}", "Fetching schedule from system..."))
-            {
-                var record = ServerSyncCommands.FetchSchedule(date.Value);
-                PopulateWorksheet(record);
-            }
-            SheetOperations.ShowStatusConfirmation($"Schedule for {date:yyyy-MM-dd} loaded.");
+            SwitchToDate((object)board!, date.Value);
         }
         catch (Exception ex)
         {
             AppLogger.Error("[ScheduleManager] Date change failed", ex);
         }
+    }
+
+    /// <summary>
+    /// Switches the board to <paramref name="target"/>. Unsaved changes on the outgoing date are saved first through the
+    /// normal save pipeline (errors / warnings / past-record guard / offline conflicts); a blocked save keeps the outgoing date.
+    /// </summary>
+    private static void SwitchToDate(object boardObj, DateOnly target)
+    {
+        if (_isSwitchingDate) return;
+        _isSwitchingDate = true;
+        try
+        {
+            if (target == _loadedDate)
+            {
+                RunFrozen(() => ScheduleBoardMapper.WriteDate(boardObj, target));
+                return;
+            }
+
+            DateOnly? previousDate = _loadedDate;
+            bool savedPrevious = false;
+
+            if (HasUnsavedChanges && previousDate.HasValue)
+            {
+                // Extraction reads A2/B2, so put the outgoing date back first or it would be saved under the new date.
+                RunFrozen(() => ScheduleBoardMapper.WriteDate(boardObj, previousDate.Value));
+
+                bool saved = SaveEntry.TrySave(Events.ScheduleSyncDescriptor, showSuccessNotification: false, repopulateAfterSave: false);
+                if (!saved)
+                {
+                    RunFrozen(() => ScheduleBoardMapper.WriteDate(boardObj, previousDate.Value));
+                    SheetOperations.ShowStatusConfirmation($"Could not switch to {target:yyyy-MM-dd}; stayed on {previousDate.Value:yyyy-MM-dd}.");
+                    return;
+                }
+                savedPrevious = true;
+            }
+
+            using (LoadingOverlay.BeginScope($"Schedule Manager — Loading {target:dd MMM yyyy}", "Fetching schedule from system..."))
+            {
+                var record = ServerSyncCommands.FetchSchedule(target);
+                PopulateWorksheet(record);
+            }
+            SheetOperations.ShowStatusConfirmation(savedPrevious && previousDate.HasValue
+                ? $"Saved {previousDate.Value:yyyy-MM-dd} and loaded {target:yyyy-MM-dd}."
+                : $"Schedule for {target:yyyy-MM-dd} loaded.");
+        }
+        finally { _isSwitchingDate = false; }
     }
 
     // =========================================================================
@@ -1310,6 +1489,7 @@ internal static partial class SheetMapper
     /// <summary>
     /// Appends terminal punches for the board date to the entries table (Source = Thumbprint), skipping punches
     /// already present. Must run on the macro thread. Returns (added, duplicates, unknown or other-date).
+    /// Punches from any attendance staff (Worker, Office, Admin) are accepted.
     /// </summary>
     internal static (int Added, int Duplicates, int Unknown) AppendTerminalPunches(IReadOnlyList<TerminalPunch> punches, DateOnly? targetDate = null)
     {
@@ -1333,7 +1513,7 @@ internal static partial class SheetMapper
         {
             var existing = TableMapper.ExtractFromTable<AttendanceEntry>((object)entriesSheet!, EntriesTableName);
             var (clean, removedExistingDuplicates) = DeviceSyncManager.DeduplicateExisting(existing, dayStart);
-            var result = DeviceSyncManager.BuildEntries(punches, clean, id => Roster.FindStaff(id) != null, dayStart);
+            var result = DeviceSyncManager.BuildEntries(punches, clean, id => Roster.FindAttendanceStaff(id) != null, dayStart);
             added = result.NewEntries.Count;
             duplicates = result.Duplicates + removedExistingDuplicates;
             unknown += result.UnknownStaff;
@@ -1410,13 +1590,20 @@ internal static partial class SheetMapper
             TableMapper.PopulateTableSafe<AttendanceEntry>((object)entriesSheet!, EntriesTableName, all);
             ApplyDateFilter(entriesSheet, EntriesTableName, selectedDate);
             // Already persisted: keep PastRecordGuard from treating them as unsaved manual edits.
-            foreach (var e in toAdd) _loadedEntryFingerprints.Add(EntryFingerprint(e));
+            foreach (var e in toAdd)
+            {
+                string fp = EntryFingerprint(e);
+                _loadedEntryFingerprints.Add(fp);
+                _persistedEntryFingerprints.Add(fp);
+            }
             totalAdded = toAdd.Count;
-            addedForDate = toAdd.Count(e => DeviceSyncManager.IsInWorkingDay(e.Date, e.Time, selectedDate, BoardContext.DayStartTime));
+            addedForDate = toAdd.Count(e => DeviceSyncManager.IsInWorkingDay(e.Date, e.Time, selectedDate, BoardContext.DayStartTime, BoardContext.NextDayStartTime));
             wrote = true;
         });
 
         if (wrote) RefreshDerived(reloadContext: false, rollup: true);
+        // Rolled-up attendance for the current day changed: persist on date switch without tripping PastRecordGuard.
+        if (addedForDate > 0) _hasUnsavedGlobalEdits = true;
         return (totalAdded, addedForDate);
     }
 

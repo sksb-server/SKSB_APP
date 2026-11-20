@@ -45,6 +45,7 @@ internal static class BoardContext
     public static readonly TimeOnly DefaultOtStartTime = new(18, 0);
 
     private static TimeOnly _dayStartTime = DefaultDayStartTime;
+    private static TimeOnly _nextDayStartTime = DefaultDayStartTime;
     private static TimeOnly _lateCutOff = DefaultLateCutOff;
     private static TimeOnly _otStartTime = DefaultOtStartTime;
 
@@ -57,6 +58,8 @@ internal static class BoardContext
     public static IReadOnlyList<ScheduleSkillRecord> Skills => _skills;
     public static IReadOnlyList<SkillLicenseType> SkillLicenseTypes => _skillLicenseTypes;
     public static TimeOnly DayStartTime => _dayStartTime;
+    /// <summary>Day Start Time of the board date + 1: the exclusive end boundary of the current working day.</summary>
+    public static TimeOnly NextDayStartTime => _nextDayStartTime;
     public static TimeOnly LateCutOff => _lateCutOff;
     public static TimeOnly OTStartTime => _otStartTime;
 
@@ -75,6 +78,8 @@ internal static class BoardContext
         _skillLicenses = (skillLicenses ?? Enumerable.Empty<SkillLicense>()).ToList();
         _licensesLoaded = true;
     }
+
+    public static void SetNextDayStartTime(TimeOnly value) => _nextDayStartTime = value;
 
     public static WorkerPreference? PreferenceFor(long staffId) => _prefs.FirstOrDefault(p => p.StaffID == staffId);
 

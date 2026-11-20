@@ -38,7 +38,8 @@ public enum AttendanceSource
     Thumbprint,
     Manual,
     SKSB_App,
-    WhatsApp
+    WhatsApp,
+    Admin
 }
 
 public enum Days
@@ -68,6 +69,9 @@ public record ScheduleRecord
     /// </summary>
     public TimeOnly DayStartTime { get; set; } = new(6, 0);
 
+    /// <summary>Day Start Time for <see cref="DailyScheduleDate"/> + 1 (end boundary of this working day). Default 06:00.</summary>
+    public TimeOnly NextDayStartTime { get; set; } = new(6, 0);
+
     /// <summary>Late Checked In Cut Off Time for <see cref="DailyScheduleDate"/> (Daily Attendances D2). Default 11:00.</summary>
     public TimeOnly LateCutOffTime { get; set; } = new(11, 0);
 
@@ -82,6 +86,14 @@ public record ScheduleRecord
 
     /// <summary>Append-only punch log for <see cref="DailyScheduleDate"/>.</summary>
     public List<AttendanceEntry> AttendanceEntries { get; set; } = new();
+
+    /// <summary>
+    /// Save-time delta of <see cref="AttendanceEntries"/>. When non-null, <c>ServerDispatcher.PersistSchedule</c> only
+    /// upserts these new/modified entries; when null (e.g. an offline pending upload), it upserts all
+    /// <see cref="AttendanceEntries"/>.
+    /// </summary>
+    [JsonIgnore]
+    public List<AttendanceEntry>? ModifiedAttendanceEntries { get; set; }
 
     public List<WorkerPreference> Preferences { get; set; } = new();
     public List<TeamRecord> Teams { get; set; } = new();
@@ -139,7 +151,7 @@ public record AttendanceEntry
     [ColumnRule(IsRequired = false)]
     public string OverrideReason { get; set; } = string.Empty;
 
-    /// <summary>Thumbprint / Manual / SKSB_App rows default to approved; WhatsApp rows wait for an admin.</summary>
+    /// <summary>Thumbprint / Manual / SKSB_App / Admin rows default to approved; WhatsApp rows wait for an admin.</summary>
     [ExcelColumn("Is Approved")]
     [ColumnRule(IsRequired = false)]
     public bool IsApproved { get; set; } = true;

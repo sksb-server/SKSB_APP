@@ -42,11 +42,17 @@ public class Events : ManagerEventsBase<ScheduleRecord>
         SaveToServer = schedule =>
         {
             bool ok = ServerSyncCommands.SaveScheduleSilent(schedule, out string err);
-            if (ok) SheetMapper.MarkEntriesSaved(schedule.AttendanceEntries);
+            if (ok) SheetMapper.MarkSaved(schedule.AttendanceEntries, persistedToServer: true);
             return (ok, err);
         },
-        SaveToOffline = schedule => OfflineSnapshot.SaveOfflineSnapshot(schedule),
+        SaveToOffline = schedule =>
+        {
+            OfflineSnapshot.SaveOfflineSnapshot(schedule);
+            SheetMapper.MarkSaved(schedule.AttendanceEntries, persistedToServer: false);
+        },
         PopulateWorksheet = schedule => SheetMapper.PopulateWorksheet(schedule),
+        // Post-save: board + daily attendance only; never rewrites the 10k+ row AttendanceEntriesTable.
+        RefreshAfterSave = schedule => SheetMapper.RefreshAfterSave(schedule),
         FetchFromServer = () => ServerSyncCommands.FetchSchedule(CurrentDate()),
         ValidateOfflinePayload = schedule => schedule != null && schedule.DailyScheduleDate.Year > 2000,
         ConfirmBeforeSave = ConfirmPastSave,

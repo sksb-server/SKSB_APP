@@ -16,7 +16,7 @@ public static class StaffImportConfig
     {
         { "PROJECT", "Worker" },
         { "OFFICE", "Office" },
-        { "ADMIN", "Office" },
+        { "ADMIN", "Admin" },
         { "MANAGEMENT", "Office" }
     };
 
@@ -46,7 +46,7 @@ public class StaffImportResult
         EntityLabel = "staff(s)",
         SuccessfullyImportedCount = ImportedStaffs.Count,
         FilteredExclusionCount = 0,
-        FilterRuleDescription = "Mapped departments: PROJECT -> Worker, OFFICE/ADMIN -> Office.",
+        FilterRuleDescription = "Mapped departments: PROJECT -> Worker, OFFICE/MANAGEMENT -> Office, ADMIN -> Admin.",
         SkippedErrors = SkippedErrors
     };
 }

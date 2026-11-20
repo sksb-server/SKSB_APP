@@ -340,7 +340,7 @@ public static class RuleEvaluator
     /// Bulk in-memory table healing: reads headers, formulas, and body values in 3 COM calls total,
     /// evaluates all rules in RAM with O(1) dictionary lookups, and writes back ONLY modified cells.
     /// </summary>
-    public static List<string> EvaluateAndHealTable(dynamic worksheet, dynamic table)
+    public static List<string> EvaluateAndHealTable(dynamic worksheet, dynamic table, Func<DateOnly, TimeOnly?, bool>? warningDateFilter = null)
     {
         var allNotices = new List<string>();
         if (_isEvaluating || worksheet == null || table == null) return allNotices;
@@ -372,6 +372,9 @@ public static class RuleEvaluator
                 colHeaders[c] = h;
                 colRules[c] = RuleRegistry.GetRule(tableName, h);
             }
+
+            int dateCol = FindColumnByHeader(colHeaders, "Date");
+            int timeCol = FindColumnByHeader(colHeaders, "Time");
 
             // 2. Bulk-read archetype formulas on first data row to identify formula columns (1 COM call)
             var archFormulas = SheetMapperHelper.ReadArchetypeFormulas((object)worksheet, startRow, startCol, colCount);
@@ -483,6 +486,9 @@ public static class RuleEvaluator
 
                 if (!rowHasUserInput) continue;
 
+                bool emitNotices = warningDateFilter == null || dateCol < 1 ||
+                    RuleDataCache.MatchesWarningDateFilter(dataGrid[r, dateCol], timeCol >= 1 ? dataGrid[r, timeCol] : null, warningDateFilter);
+
                 // STEP 0: Apply [ColumnRule(Transform = ...)] in memory
                 for (int c = 1; c <= colCount; c++)
                 {
@@ -566,7 +572,7 @@ public static class RuleEvaluator
                                 dirtyWrites.Add((excelRow, startCol + targetRelCol - 1, lookedUp, targetRule));
                                 rowValues[targetRelCol] = lookedUp;
                                 rawObjects[targetRelCol] = lookedUp;
-                                if (isMismatch)
+                                if (isMismatch && emitNotices)
                                 {
                                     allNotices.Add($"Row {excelRow} [{colHeaders[targetRelCol]}]: Auto-corrected '{currentTargetVal}' to '{lookedUp}' based on {colHeaders[c]} '{val}'.");
                                 }
@@ -591,7 +597,8 @@ public static class RuleEvaluator
                         dirtyWrites.Add((excelRow, startCol + c - 1, defaultVal, rule));
                         rawObjects[c] = defaultVal;
                         rowValues[c] = FormatDisplayValue(defaultVal, rule);
-                        allNotices.Add($"Row {excelRow} [{colHeaders[c]}]: Defaulted to '{rowValues[c]}'.");
+                        if (emitNotices)
+                            allNotices.Add($"Row {excelRow} [{colHeaders[c]}]: Defaulted to '{rowValues[c]}'.");
                     }
                 }
 
@@ -633,7 +640,7 @@ public static class RuleEvaluator
                         dirtyWrites.Add((excelRow, startCol + c - 1, enforcedValue, rule));
                         rowValues[c] = enforcedValue;
                         rawObjects[c] = enforcedValue;
-                        if (!string.IsNullOrWhiteSpace(guardReason))
+                        if (emitNotices && !string.IsNullOrWhiteSpace(guardReason))
                         {
                             allNotices.Add($"Row {excelRow} [{colHeaders[c]}]: {guardReason}");
                         }

@@ -98,6 +98,11 @@ public static class TableMapper
         var propBindings = ResolvePropertyBindings<T>(headerMap);
         if (propBindings.Count == 0) return records;
 
+        // Reflection lookups hoisted out of the row loop (hot path on 10k+ row tables).
+        var plateProp = typeof(T).GetProperty("VehiclePlate");
+        var staffIdProp = typeof(T).GetProperty("StaffID");
+        bool checkStaffId = typeof(T).Name.StartsWith("Staff", StringComparison.OrdinalIgnoreCase) && staffIdProp != null;
+
         for (int r = 1; r <= rowCount; r++)
         {
             if (IsRowEmpty(dataGrid, r, colCount))
@@ -131,16 +136,12 @@ public static class TableMapper
                 }
             }
 
-            var plateProp = typeof(T).GetProperty("VehiclePlate");
             if (plateProp != null && string.IsNullOrWhiteSpace(plateProp.GetValue(item)?.ToString()))
             {
                 continue;
             }
 
-            var staffIdProp = typeof(T).GetProperty("StaffID");
-            if (typeof(T).Name.StartsWith("Staff", StringComparison.OrdinalIgnoreCase) &&
-                staffIdProp != null &&
-                (Convert.ToInt64(staffIdProp.GetValue(item) ?? 0) <= 0))
+            if (checkStaffId && (Convert.ToInt64(staffIdProp!.GetValue(item) ?? 0) <= 0))
             {
                 continue;
             }

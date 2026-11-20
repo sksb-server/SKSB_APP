@@ -2,6 +2,8 @@ namespace SKSB_App.Core.Integration.Database;
 
 using System;
 using System.Collections.Generic;
+using System.Data;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -83,8 +85,10 @@ public static partial class ServerDispatcher
         }).ToList();
         long[] activeAttendanceIds = attendances.Select(a => a.StaffId).ToArray();
 
-        // ---- attendance entries (append-only upsert) ------------------------
-        var entries = schedule.AttendanceEntries.Where(e => e.StaffID > 0).Select(ToEntryRow).ToList();
+        // ---- attendance entries (append-only upsert, delta only when tracked) ----
+        // ModifiedAttendanceEntries == null (offline pending upload / no baseline) => safe full upsert.
+        var entrySource = schedule.ModifiedAttendanceEntries ?? schedule.AttendanceEntries;
+        int entriesUpserted = 0;
 
         // ---- preferences & teams (full batch) ------------------------------
         var prefs = schedule.Preferences
@@ -269,61 +273,130 @@ public static partial class ServerDispatcher
             if (teams.Count > 0) conn.Execute(sqlTeamUpsert, teams, trans);
             if (prefs.Count > 0) conn.Execute(sqlPrefUpsert, prefs, trans);
             if (slots.Count > 0) conn.Execute(sqlSlotUpsert, slots, trans);
-            if (entries.Count > 0) conn.Execute(SqlEntryUpsert, entries, trans);
+            entriesUpserted = UpsertAttendanceEntriesBulk(conn, trans, entrySource);
             if (attendances.Count > 0) conn.Execute(sqlAttendanceUpsert, attendances, trans);
         });
 
         AppLogger.Info(
             $"[PostgreSQL Upload - Schedule {schedule.DailyScheduleDate:yyyy-MM-dd}] " +
             $"dayStart={schedule.DayStartTime:HH:mm}, lateCutOff={schedule.LateCutOffTime:HH:mm}, otStart={schedule.OTStartTime:HH:mm}, " +
-            $"slots={slots.Count}, attendances={attendances.Count}, entries={entries.Count}, prefs={prefs.Count}, teams={teams.Count}, skills={skills.Count}, projSkillReqs={projSkillReqs.Count}");
+            $"slots={slots.Count}, attendances={attendances.Count}, entries={entriesUpserted}/{schedule.AttendanceEntries.Count}, prefs={prefs.Count}, teams={teams.Count}, skills={skills.Count}, projSkillReqs={projSkillReqs.Count}");
     }
 
     // =========================================================================
-    // 3. ATTENDANCE ENTRY ROWS (shared by the save path and the terminal sync)
+    // 3. ATTENDANCE ENTRY ROWS (bulk UNNEST, shared by the save path and the terminal sync)
     // =========================================================================
-    private const string SqlEntryUpsert = @"
+    private const string SqlEntryBulkInsertSelect = @"
         INSERT INTO attendance_entries (entry_date, entry_time, staff_id, project_id, entry_type, source, override_reason, is_approved, whatsapp_picture)
-        VALUES (@EntryDate, @EntryTime, @StaffId, @ProjectId, @EntryType, @Source, @OverrideReason, @IsApproved, @WhatsappPicture)
+        SELECT t.entry_date::date, t.entry_time::time, t.staff_id, t.project_id, t.entry_type, t.source, t.override_reason, t.is_approved, t.whatsapp_picture
+        FROM UNNEST(
+            @EntryDates::text[], @EntryTimes::text[], @StaffIds::bigint[], @ProjectIds::text[], @EntryTypes::text[],
+            @Sources::text[], @OverrideReasons::text[], @IsApproveds::boolean[], @WhatsappPictures::text[])
+            AS t(entry_date, entry_time, staff_id, project_id, entry_type, source, override_reason, is_approved, whatsapp_picture)";
+
+    private const string SqlEntryBulkUpsert = SqlEntryBulkInsertSelect + @"
         ON CONFLICT (entry_date, entry_time, staff_id, entry_type, source) DO UPDATE SET
             project_id       = EXCLUDED.project_id,
             override_reason  = EXCLUDED.override_reason,
             is_approved      = EXCLUDED.is_approved,
             whatsapp_picture = EXCLUDED.whatsapp_picture,
-            updated_at       = CURRENT_TIMESTAMP;";
+            updated_at       = CURRENT_TIMESTAMP
+        WHERE attendance_entries.project_id       IS DISTINCT FROM EXCLUDED.project_id
+           OR attendance_entries.override_reason  IS DISTINCT FROM EXCLUDED.override_reason
+           OR attendance_entries.is_approved      IS DISTINCT FROM EXCLUDED.is_approved
+           OR attendance_entries.whatsapp_picture IS DISTINCT FROM EXCLUDED.whatsapp_picture;";
 
     // DO NOTHING: terminal sync never overwrites manual is_approved / override_reason / project_id edits on stored punches.
-    private const string SqlEntryInsertIgnore = @"
-        INSERT INTO attendance_entries (entry_date, entry_time, staff_id, project_id, entry_type, source, override_reason, is_approved, whatsapp_picture)
-        VALUES (@EntryDate, @EntryTime, @StaffId, @ProjectId, @EntryType, @Source, @OverrideReason, @IsApproved, @WhatsappPicture)
+    private const string SqlEntryBulkInsertIgnore = SqlEntryBulkInsertSelect + @"
         ON CONFLICT (entry_date, entry_time, staff_id, entry_type, source) DO NOTHING;";
 
     /// <summary>Inserts new attendance entries across any dates, skipping rows that already exist. Returns rows actually inserted.</summary>
     public static int InsertAttendanceEntries(IEnumerable<AttendanceEntry> entries)
     {
         EnsureScheduleSchema();
-        var rows = entries.Where(e => e.StaffID > 0).Select(ToEntryRow).ToList();
-        if (rows.Count == 0) return 0;
+        var arrays = BuildEntryArrays(entries);
+        if (arrays == null) return 0;
 
         int inserted = 0;
         Db.ExecuteInTransaction((conn, trans) =>
         {
-            inserted = conn.Execute(SqlEntryInsertIgnore, rows, trans);
+            inserted = conn.Execute(SqlEntryBulkInsertIgnore, arrays, trans);
         });
-        AppLogger.Info($"[PostgreSQL Upload - Terminal Sync] inserted={inserted}, attempted={rows.Count}");
+        AppLogger.Info($"[PostgreSQL Upload - Terminal Sync] inserted={inserted}, attempted={arrays.EntryDates.Length}");
         return inserted;
     }
 
-    private static object ToEntryRow(AttendanceEntry e) => new
+    /// <summary>
+    /// Upserts <paramref name="entries"/> in a single <c>INSERT ... SELECT FROM UNNEST(...)</c> statement.
+    /// Unchanged rows are skipped by the <c>DO UPDATE ... WHERE IS DISTINCT FROM</c> guard. Returns rows inserted/updated.
+    /// </summary>
+    private static int UpsertAttendanceEntriesBulk(IDbConnection conn, IDbTransaction trans, IEnumerable<AttendanceEntry> entries)
     {
-        EntryDate = e.Date.ToDateTime(TimeOnly.MinValue),
-        EntryTime = e.Time.ToTimeSpan(),
-        StaffId = e.StaffID,
-        ProjectId = (e.ProjectID ?? string.Empty).Trim().ToUpperInvariant(),
-        EntryType = e.EntryType.ToString(),
-        Source = e.Source.ToString(),
-        OverrideReason = e.OverrideReason ?? string.Empty,
-        e.IsApproved,
-        WhatsappPicture = e.WhatsAppPicture ?? string.Empty
-    };
+        var arrays = BuildEntryArrays(entries);
+        return arrays == null ? 0 : conn.Execute(SqlEntryBulkUpsert, arrays, trans);
+    }
+
+    private sealed class EntryArrays
+    {
+        public string[] EntryDates { get; init; } = Array.Empty<string>();
+        public string[] EntryTimes { get; init; } = Array.Empty<string>();
+        public long[] StaffIds { get; init; } = Array.Empty<long>();
+        public string[] ProjectIds { get; init; } = Array.Empty<string>();
+        public string[] EntryTypes { get; init; } = Array.Empty<string>();
+        public string[] Sources { get; init; } = Array.Empty<string>();
+        public string[] OverrideReasons { get; init; } = Array.Empty<string>();
+        public bool[] IsApproveds { get; init; } = Array.Empty<bool>();
+        public string[] WhatsappPictures { get; init; } = Array.Empty<string>();
+    }
+
+    /// <summary>
+    /// Projects entries into parallel UNNEST arrays, deduplicated on the conflict key
+    /// (entry_date, entry_time, staff_id, entry_type, source) keeping the LAST occurrence, so a single statement never
+    /// hits SQLSTATE 21000 ("ON CONFLICT DO UPDATE command cannot affect row a second time"). Null when empty.
+    /// </summary>
+    private static EntryArrays? BuildEntryArrays(IEnumerable<AttendanceEntry> entries)
+    {
+        var byKey = new Dictionary<(string Date, string Time, long StaffId, string EntryType, string Source), int>();
+        var rows = new List<(string Date, string Time, long StaffId, string ProjectId, string EntryType, string Source, string OverrideReason, bool IsApproved, string WhatsappPicture)>();
+
+        foreach (var e in entries)
+        {
+            if (e == null || e.StaffID <= 0) continue;
+
+            var row = (
+                Date: e.Date.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+                // Sub-second digits are kept (trimmed when zero) so the conflict key matches what the previous TimeSpan parameter stored.
+                Time: e.Time.ToString("HH:mm:ss.FFFFFF", CultureInfo.InvariantCulture),
+                StaffId: e.StaffID,
+                ProjectId: (e.ProjectID ?? string.Empty).Trim().ToUpperInvariant(),
+                EntryType: e.EntryType.ToString(),
+                Source: e.Source.ToString(),
+                OverrideReason: e.OverrideReason ?? string.Empty,
+                IsApproved: e.IsApproved,
+                WhatsappPicture: e.WhatsAppPicture ?? string.Empty);
+
+            var key = (row.Date, row.Time, row.StaffId, row.EntryType, row.Source);
+            if (byKey.TryGetValue(key, out int idx)) rows[idx] = row; // keep last occurrence
+            else
+            {
+                byKey[key] = rows.Count;
+                rows.Add(row);
+            }
+        }
+
+        if (rows.Count == 0) return null;
+
+        return new EntryArrays
+        {
+            EntryDates = rows.Select(r => r.Date).ToArray(),
+            EntryTimes = rows.Select(r => r.Time).ToArray(),
+            StaffIds = rows.Select(r => r.StaffId).ToArray(),
+            ProjectIds = rows.Select(r => r.ProjectId).ToArray(),
+            EntryTypes = rows.Select(r => r.EntryType).ToArray(),
+            Sources = rows.Select(r => r.Source).ToArray(),
+            OverrideReasons = rows.Select(r => r.OverrideReason).ToArray(),
+            IsApproveds = rows.Select(r => r.IsApproved).ToArray(),
+            WhatsappPictures = rows.Select(r => r.WhatsappPicture).ToArray()
+        };
+    }
 }

@@ -10,15 +10,9 @@ using SKSB_App.Core.Types.Attributes;
 
 public enum Department
 {
-    Worker,
-    Driver,
-    Supervisor,
-    Foreman,
-    Operator,
-    Mechanic,
-    Admin,
-    Management,
     Office,
+    Worker,
+    Admin,
     None
 }
 

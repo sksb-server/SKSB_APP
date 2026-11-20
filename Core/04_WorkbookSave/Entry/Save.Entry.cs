@@ -12,13 +12,17 @@ using SKSB_App.Core.WorkbookSave.Validation;
 
 public static class SaveEntry
 {
-    public static void Save<T>(SaveContract<T> contract)
+    public static void Save<T>(SaveContract<T> contract) => TrySave(contract);
+
+    public static bool TrySave<T>(SaveContract<T> contract, bool showSuccessNotification = true, bool repopulateAfterSave = true)
     {
-        if (SheetOperations.IsMasterTemplateFile() || SheetOperations.IsTemplateEditMode) return;
+        if (SheetOperations.IsMasterTemplateFile() || SheetOperations.IsTemplateEditMode) return false;
 
         dynamic xlApp = ExcelDnaUtil.Application;
         bool origUpdating = true;
+        bool origEvents = true;
         try { origUpdating = (bool)xlApp.ScreenUpdating; } catch { }
+        try { origEvents = (bool)xlApp.EnableEvents; } catch { }
 
         try
         {
@@ -33,6 +37,11 @@ public static class SaveEntry
                 var (data, validationErrors, validationWarnings) = contract.ExtractAndValidate();
                 if (validationErrors.Count > 0 || validationWarnings.Count > 0)
                 {
+                    // Rule 2 modal exception: unfreeze + hide floating widgets before showing the dialog.
+                    SKSB_App.Core.RuntimeUI.DropDown.Arrow.HideAll();
+                    try { xlApp.EnableEvents = true; } catch { }
+                    try { xlApp.ScreenUpdating = true; } catch { }
+
                     using var valDialog = new SummaryDialog(contract.ModuleName, validationErrors, validationWarnings);
                     using (LoadingOverlay.Suspend())
                     {
@@ -40,8 +49,9 @@ public static class SaveEntry
                     }
                     if (validationErrors.Count > 0 || valDialog.Action != ValidationDialogAction.ProceedAnyway)
                     {
-                        return;
+                        return false;
                     }
+                    try { xlApp.ScreenUpdating = false; } catch { }
                 }
 #if DEBUG
                 // Debug: empty datasets still reach the Debug Save Intercept; only a null dataset bails out.
@@ -50,8 +60,10 @@ public static class SaveEntry
                 if (data == null || contract.IsDatasetEmpty(data))
 #endif
                 {
-                    SaveNotificationDialog.ShowSuccess(contract.ModuleName, "The worksheet contains no records to save.");
-                    return;
+                    if (data == null) return false;
+                    if (showSuccessNotification)
+                        SaveNotificationDialog.ShowSuccess(contract.ModuleName, "The worksheet contains no records to save.");
+                    return true; // Nothing to save
                 }
 
                 bool confirmed;
@@ -62,7 +74,7 @@ public static class SaveEntry
                 if (!confirmed)
                 {
                     AppLogger.Info($"[{contract.ModuleName}] Save cancelled at the pre-save confirmation.");
-                    return;
+                    return false;
                 }
 
 #if DEBUG
@@ -92,15 +104,16 @@ public static class SaveEntry
                         ServerEnvironment.EnterOfflineMode("Saved records to local offline storage.");
                         contract.UpdateWindowCaption();
                         LoadingOverlay.Report("Refreshing worksheet tables...");
-                        contract.PopulateWorksheet?.Invoke(data);
+                        if (repopulateAfterSave) (contract.RefreshAfterSave ?? contract.PopulateWorksheet)?.Invoke(data);
                         try { ((dynamic)ExcelDnaUtil.Application).ActiveWorkbook.Saved = true; } catch { }
-                        SaveNotificationDialog.ShowOffline(contract.ModuleName, "Debug: Records stashed to offline JSON storage.");
-                        return;
+                        if (showSuccessNotification)
+                            SaveNotificationDialog.ShowOffline(contract.ModuleName, "Debug: Records stashed to offline JSON storage.");
+                        return true;
                     case ExitResolution.QuitAnyway:
                     case ExitResolution.Cancel:
                     default:
                         AppLogger.Info($"[{contract.ModuleName}] Debug save cancelled by user.");
-                        return;
+                        return false;
                 }
 #endif
 
@@ -111,11 +124,17 @@ public static class SaveEntry
                     AppLogger.Info($"[{contract.ModuleName}] Save committed to PostgreSQL.");
                     OfflineSnapshot.ClearPendingSnapshot<T>();
                     LoadingOverlay.Report("Refreshing worksheet tables...");
-                    contract.PopulateWorksheet?.Invoke(data);
+                    if (repopulateAfterSave) (contract.RefreshAfterSave ?? contract.PopulateWorksheet)?.Invoke(data);
                     try { ((dynamic)ExcelDnaUtil.Application).ActiveWorkbook.Saved = true; } catch { }
-                    SaveNotificationDialog.ShowSuccess(contract.ModuleName, "Save completed successfully. All records persisted to database.");
-                    return;
+                    if (showSuccessNotification)
+                        SaveNotificationDialog.ShowSuccess(contract.ModuleName, "Save completed successfully. All records persisted to database.");
+                    return true;
                 }
+
+                // Rule 2 modal exception: unfreeze + hide floating widgets before showing the dialog.
+                SKSB_App.Core.RuntimeUI.DropDown.Arrow.HideAll();
+                try { xlApp.EnableEvents = true; } catch { }
+                try { xlApp.ScreenUpdating = true; } catch { }
 
                 using var conflictDialog = new ExitConflictDialog(
                     contract.ModuleName,
@@ -129,6 +148,7 @@ public static class SaveEntry
                 switch (conflictDialog.Resolution)
                 {
                     case ExitResolution.Retry:
+                        try { xlApp.ScreenUpdating = false; } catch { }
                         if (ServerEnvironment.IsOffline && !ServerEnvironment.SimulateOffline) ServerEnvironment.PingServer(out _);
                         continue;
                     case ExitResolution.SaveLocallyAndQuit:
@@ -137,19 +157,21 @@ public static class SaveEntry
                         ServerEnvironment.EnterOfflineMode("Saved records to local offline storage.");
                         contract.UpdateWindowCaption();
                         LoadingOverlay.Report("Refreshing worksheet tables...");
-                        contract.PopulateWorksheet?.Invoke(data);
+                        if (repopulateAfterSave) (contract.RefreshAfterSave ?? contract.PopulateWorksheet)?.Invoke(data);
                         try { ((dynamic)ExcelDnaUtil.Application).ActiveWorkbook.Saved = true; } catch { }
-                        SaveNotificationDialog.ShowOffline(contract.ModuleName, "Saved records to local offline storage.");
-                        return;
+                        if (showSuccessNotification)
+                            SaveNotificationDialog.ShowOffline(contract.ModuleName, "Saved records to local offline storage.");
+                        return true;
                     case ExitResolution.Cancel:
                     default:
-                        return;
+                        return false;
                 }
             }
         }
         finally
         {
             // 2. UNFREEZE SCREEN ONLY AT THE VERY END
+            try { xlApp.EnableEvents = origEvents; } catch { }
             try { xlApp.ScreenUpdating = origUpdating; } catch { }
         }
     }

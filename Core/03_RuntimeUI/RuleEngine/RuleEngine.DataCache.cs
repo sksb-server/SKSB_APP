@@ -256,6 +256,46 @@ public static class RuleDataCache
         return false;
     }
 
+    public static bool TryParseTime(object? rawVal, out TimeOnly result)
+    {
+        result = default;
+        if (rawVal == null || SheetMapperHelper.IsComError(rawVal)) return false;
+
+        if (rawVal is TimeOnly tOnly) { result = tOnly; return true; }
+        if (rawVal is TimeSpan ts) { result = TimeOnly.FromTimeSpan(TimeSpan.FromTicks(((ts.Ticks % TimeSpan.TicksPerDay) + TimeSpan.TicksPerDay) % TimeSpan.TicksPerDay)); return true; }
+        if (rawVal is DateTime dt) { result = TimeOnly.FromDateTime(dt); return true; }
+        if (rawVal is double oa && oa >= 0)
+        {
+            double frac = oa - Math.Floor(oa);
+            int seconds = (int)Math.Round(frac * 86400.0) % 86400;
+            result = TimeOnly.FromTimeSpan(TimeSpan.FromSeconds(seconds));
+            return true;
+        }
+
+        string s = rawVal.ToString()?.Trim() ?? string.Empty;
+        if (string.IsNullOrWhiteSpace(s) || s == "—") return false;
+
+        if (TimeOnly.TryParse(s, CultureInfo.InvariantCulture, DateTimeStyles.None, out TimeOnly parsed))
+        {
+            result = parsed;
+            return true;
+        }
+        if (TimeSpan.TryParse(s, CultureInfo.InvariantCulture, out TimeSpan parsedTs))
+        {
+            result = TimeOnly.FromTimeSpan(TimeSpan.FromTicks(((parsedTs.Ticks % TimeSpan.TicksPerDay) + TimeSpan.TicksPerDay) % TimeSpan.TicksPerDay));
+            return true;
+        }
+
+        return false;
+    }
+
+    public static bool MatchesWarningDateFilter(object? dateCell, object? timeCell, Func<DateOnly, TimeOnly?, bool>? filter)
+    {
+        if (filter == null || !TryParseDate(dateCell, out DateOnly rowDate)) return true;
+        TimeOnly? rowTime = TryParseTime(timeCell, out TimeOnly t) ? t : null;
+        return filter(rowDate, rowTime);
+    }
+
     private static List<string> ExtractRawArrayToList(object? raw)
     {
         var list = new List<string>();
