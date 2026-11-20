@@ -174,6 +174,10 @@ internal static class Roster
         return !string.IsNullOrWhiteSpace(id) && _projectById.TryGetValue(id.Trim(), out var p) ? p : null;
     }
 
+    /// <summary>True when <paramref name="projectId"/> exists in the roster and includes <see cref="ProjectType.Road_Reinstatement"/>.</summary>
+    internal static bool SupportsPremixHoles(string? projectId) =>
+        FindProject(projectId)?.Types.Contains(ProjectType.Road_Reinstatement) == true;
+
     /// <summary>
     /// Projects that are Active on <paramref name="date"/> (started, and not past the actual / target end date),
     /// ordered iJob -> MWO -> PVT -> others, then by project ID.

@@ -805,6 +805,11 @@ internal static partial class SheetMapper
             }
         }
 
+        // ---- Step E: display order — newest date on top ------------------------------------
+        var newestFirst = logs.OrderByDescending(l => l.Date).ThenByDescending(l => l.Time ?? string.Empty).ThenByDescending(l => l.OdometerID).ToList();
+        logs.Clear();
+        logs.AddRange(newestFirst);
+
         int flagged = logs.Count(l => !IsKnownPlate(l.VehiclePlate) ||
                                       (l.Remarks ?? string.Empty).Contains("[Ambiguous Odometer", StringComparison.Ordinal));
         return new OdometerReconcileResult(logs.Count, matchedCount, hoursNormalized, invalidZeroed, flagged);
@@ -894,6 +899,7 @@ internal static partial class SheetMapper
         {
             dynamic table = wsOdo.ListObjects["OdometersTable"];
             RuleEvaluator.EvaluateAndHealTable(wsOdo, table);
+            SKSB_App.Core.WorkbookSave.Validation.StackedEntryGuard.CaptureTableSnapshot(wsOdo, table);
         }
         catch { }
 

@@ -7,6 +7,7 @@ using System.Linq;
 using System.Reflection;
 using System.Text.RegularExpressions;
 using SKSB_App.Core.RuntimeUI.DropDown;
+using SKSB_App.Core.RuntimeUI.Progress;
 using SKSB_App.Core.Types.Attributes;
 using SKSB_App.Core.WorkbookOpen.Sheet;
 
@@ -31,6 +32,7 @@ public sealed class PropertyRuleDescriptor
     public ColumnDefaultAttribute? DefaultRule { get; init; }
     public List<ColumnStateGuardAttribute> StateGuards { get; init; } = new();
     public string? DateMustBeGreaterThanHeader { get; init; }
+    public bool DateMustBeGreaterThanAllowEqual { get; init; }
 
     public double RoundDownStep { get; init; }
 
@@ -221,6 +223,7 @@ public static partial class RuleRegistry
                 DefaultRule = defaultAttr,
                 StateGuards = guardAttrs,
                 DateMustBeGreaterThanHeader = dateGreaterAttr?.ReferenceHeader,
+                DateMustBeGreaterThanAllowEqual = dateGreaterAttr?.AllowEqual ?? false,
                 RoundDownStep = ruleAttr?.RoundDownStep ?? 0.0,
                 EffectiveFormatKind = fmt.Kind,
                 EffectiveZeroBehavior = fmt.Zero,
@@ -272,7 +275,8 @@ public static partial class RuleRegistry
     /// <summary>
     /// Auto-locks a C#-calculated column without sheet protection: a custom '=FALSE' Data Validation (Stop alert)
     /// blocks interactive typing while C# COM writes (.Value2) pass through. Paste / Delete are caught by the
-    /// SheetChange guard in EventsAutoOpen. Also shows the formula as the cell's input message.
+    /// SheetChange guard in EventsAutoOpen. No on-cell input message is shown (ShowInput = false);
+    /// the calculation logic lives solely in the table header hover Note.
     /// </summary>
     internal static void ApplyCalculatedColumnLock(dynamic targetRange, PropertyRuleDescriptor? rule)
     {
@@ -285,30 +289,24 @@ public static partial class RuleRegistry
             targetRange!.Validation.Add(7, 1, 1, "=FALSE");
             targetRange.Validation.IgnoreBlank = false;
 
-            string inputTitle, inputMessage, errorTitle, error;
+            string errorTitle, error;
             if (rule!.IsStrictlyCalculated)
             {
                 string formulaText = rule.DisplayFormula ?? "Calculated automatically by SKSB.";
                 if (formulaText.Length > 220) formulaText = formulaText.Substring(0, 220);
-                inputTitle = "Formula Evaluated Cell (Locked)";
-                inputMessage = formulaText;
                 errorTitle = "Locked Calculated Column";
                 error = $"'{rule.HeaderName}' is automatically calculated ({formulaText}) and cannot be edited manually.";
             }
             else
             {
-                inputTitle = "Read-Only Column (Locked)";
-                inputMessage = "Managed automatically by SKSB and cannot be edited manually.";
                 errorTitle = "Read-Only Column";
                 error = $"'{rule.HeaderName}' is managed automatically by SKSB and cannot be edited manually.";
             }
 
-            targetRange.Validation.InputTitle = inputTitle;
-            targetRange.Validation.InputMessage = inputMessage;
-            targetRange.Validation.ShowInput = true;
+            try { targetRange.Validation.ShowInput = false; } catch { }
 
-            targetRange.Validation.ErrorTitle = errorTitle;
-            targetRange.Validation.ErrorMessage = error.Length > 255 ? error.Substring(0, 255) : error;
+            targetRange.Validation.ErrorTitle = Truncate(errorTitle, 32);
+            targetRange.Validation.ErrorMessage = Truncate(error, 255);
             targetRange.Validation.ShowError = true;
         }
         catch { }
@@ -353,6 +351,7 @@ public static partial class RuleRegistry
                 {
                     dynamic table = ws.ListObjects[t];
                     string tableName = table.Name?.ToString() ?? string.Empty;
+                    LoadingOverlay.Report("Applying table rules & column tooltips...", $"Styling {tableName}...");
 
                     int headerRow = (int)table.HeaderRowRange.Row;
                     int startCol = (int)table.HeaderRowRange.Column;
@@ -366,6 +365,7 @@ public static partial class RuleRegistry
                         var rule = GetRule(tableName, headerText);
                         if (rule == null) continue;
 
+                        dynamic headerCell = ws.Cells[headerRow, absCol];
                         dynamic archCell = ws.Cells[headerRow + 1, absCol];
                         string archFormula = archCell.Formula?.ToString() ?? string.Empty;
 
@@ -382,6 +382,7 @@ public static partial class RuleRegistry
                                 }
                                 ApplyColumnNumberFormat(table, c, archCell, rule);
                                 ApplyCalculatedColumnLock(calcRange, rule);
+                                ApplyColumnHeaderNote(headerCell, rule);
                             }
                             catch { }
                             continue;
@@ -394,6 +395,7 @@ public static partial class RuleRegistry
                                 dynamic lockRange = (bodyRange != null) ? table.ListColumns[c].DataBodyRange : archCell;
                                 ApplyColumnNumberFormat(table, c, archCell, rule);
                                 ApplyCalculatedColumnLock(lockRange, rule);
+                                ApplyColumnHeaderNote(headerCell, rule);
                             }
                             catch { }
                             continue;
@@ -412,7 +414,12 @@ public static partial class RuleRegistry
                             catch { }
                         }
 
-                        if (archFormula.StartsWith("=")) continue;
+                        if (archFormula.StartsWith("="))
+                        {
+                            // Legacy Excel formula column: note on header only, never touch its Data Validation.
+                            ApplyColumnHeaderNote(headerCell, rule, archFormula);
+                            continue;
+                        }
 
                         // Inside RuleRegistry.ApplyDropdownStylesToWorkbook:
                         if (rule.HasDropdown)
@@ -429,6 +436,13 @@ public static partial class RuleRegistry
                         }
 
                         ApplyColumnNumberFormat(table, c, archCell, rule);
+
+                        try
+                        {
+                            dynamic tooltipRange = (bodyRange != null) ? table.ListColumns[c].DataBodyRange : archCell;
+                            ApplyColumnTooltips(headerCell, tooltipRange, rule);
+                        }
+                        catch { }
                     }
                 }
 
@@ -449,6 +463,35 @@ public static partial class RuleRegistry
             try { xlApp.ScreenUpdating = origUpdating; } catch { }
             try { xlApp.EnableEvents = origEvents; } catch { }
         }
+    }
+
+    /// <summary>
+    /// Returns the headers of sibling columns whose [ColumnSync] auto-fills the given column (excluding itself).
+    /// </summary>
+    internal static List<string> GetSyncSourcesForColumn(string tableName, string headerName)
+    {
+        EnsureInitialized();
+        if (string.IsNullOrWhiteSpace(tableName) || string.IsNullOrWhiteSpace(headerName))
+            return new List<string>();
+
+        if (!TryResolveTableDictionary(tableName, out var colDict))
+            return new List<string>();
+
+        string normHeader = NormalizeIdentifier(headerName);
+        string strippedHeader = normHeader.TrimEnd('s');
+
+        return colDict.Values
+            .Where(d => !d.NormalizedHeader.Equals(normHeader, StringComparison.OrdinalIgnoreCase))
+            .Where(d => d.SyncRules.Any(s =>
+            {
+                string normTarget = NormalizeIdentifier(s.TargetHeader ?? string.Empty);
+                return normTarget.Length > 0 &&
+                       (normTarget.Equals(normHeader, StringComparison.OrdinalIgnoreCase) ||
+                        normTarget.TrimEnd('s').Equals(strippedHeader, StringComparison.OrdinalIgnoreCase));
+            }))
+            .Select(d => d.HeaderName)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
     }
 
     internal static string NormalizeIdentifier(string raw)

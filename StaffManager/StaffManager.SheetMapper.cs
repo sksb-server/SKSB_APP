@@ -12,6 +12,7 @@ using SKSB_App.Core.WorkbookOpen.Sheet;
 using SKSB_App.Core.WorkbookOpen.Sync;
 using SKSB_App.Core.WorkbookSave.SheetMapper;
 using SKSB_App.Core.WorkbookSave.Storage;
+using SKSB_App.Core.WorkbookSave.Validation;
 
 public static partial class SheetMapper
 {
@@ -51,7 +52,8 @@ public static partial class SheetMapper
                 },
                 ChildPrimaryKeySelector = l => l.VehicleLicenseID,
                 ChildPrimaryKeyLabel = "Vehicle License ID",
-                ValidateForeignKeyExists = true
+                ValidateForeignKeyExists = true,
+                OrderChildRecords = list => list.OrderByDescending(l => l.RenewDate).ThenByDescending(l => l.VehicleLicenseID).ToList()
             },
             new ChildTableBinding<StaffRecord, SkillLicense, long>
             {
@@ -67,7 +69,8 @@ public static partial class SheetMapper
                 },
                 ChildPrimaryKeySelector = l => l.SkillLicenseID,
                 ChildPrimaryKeyLabel = "Skill License ID",
-                ValidateForeignKeyExists = true
+                ValidateForeignKeyExists = true,
+                OrderChildRecords = list => list.OrderByDescending(l => l.RenewDate).ThenByDescending(l => l.SkillLicenseID).ToList()
             }
         },
 
@@ -102,7 +105,7 @@ public static partial class SheetMapper
     // =========================================================================
     // 2. MASTER EXTRACTION & POPULATE PIPELINES
     // =========================================================================
-    public static (List<StaffRecord>? Data, List<string> Errors, List<string> Warnings) ExtractStaffRecordsWithDiagnostics()
+    public static (List<StaffRecord>? Data, List<ValidationIssue> Errors, List<ValidationIssue> Warnings) ExtractStaffRecordsWithDiagnostics()
     {
         var result = WorkbookMapper.ExtractMasterAndChildrenWithDiagnostics(Mapping);
         if (result.Data != null) ServerSyncCommands.DeriveShortNames(result.Data); // blank Short Name -> first + last word of Staff Name

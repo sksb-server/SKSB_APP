@@ -4,6 +4,7 @@ using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.RuntimeUI.RuleEngine;
 using SKSB_App.Core.Types;
 using SKSB_App.Core.WorkbookSave.SheetMapper;
+using SKSB_App.Core.WorkbookSave.Validation;
 using System;
 using System.Collections.Generic;
 using System.Linq;
@@ -54,6 +55,8 @@ internal static partial class SheetMapper
 
         RecalculateAfterPopulate = true,
 
+        ExcludeValidationTables = new[] { "ProjectSummaryTable" },
+
         HealTableOrder = new[]
         {
             "CompaniesTable",
@@ -73,7 +76,7 @@ internal static partial class SheetMapper
     // =========================================================================
     // 3. EXTRACT / POPULATE ENTRY POINTS
     // =========================================================================
-    internal static (List<ProjectRecord>? Data, List<string> Errors, List<string> Warnings) ExtractProjectRecordsWithDiagnostics()
+    internal static (List<ProjectRecord>? Data, List<ValidationIssue> Errors, List<ValidationIssue> Warnings) ExtractProjectRecordsWithDiagnostics()
         => WorkbookMapper.ExtractMasterAndChildrenWithDiagnostics(Mapping);
 
     internal static void PopulateWorksheet(List<ProjectRecord> records)

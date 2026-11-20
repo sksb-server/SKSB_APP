@@ -98,12 +98,12 @@ public static class RulesExtractor
         return cache;
     }
 
-    public static (List<string> Errors, List<string> Warnings) ValidateAllWorkbookTables(
+    public static (List<ValidationIssue> Errors, List<ValidationIssue> Warnings) ValidateAllWorkbookTables(
         object wbObj,
         params string[] excludeTableNames)
         => ValidateAllWorkbookTables(wbObj, null, excludeTableNames);
 
-    public static (List<string> Errors, List<string> Warnings) ValidateAllWorkbookTables(
+    public static (List<ValidationIssue> Errors, List<ValidationIssue> Warnings) ValidateAllWorkbookTables(
         object wbObj,
         IReadOnlyDictionary<string, Func<DateOnly, TimeOnly?, bool>>? warningDateFilters,
         params string[] excludeTableNames)
@@ -113,15 +113,15 @@ public static class RulesExtractor
     /// Tables the caller has already healed + deduplicated this save pass (e.g. via <c>TableMapper.ExtractFromTable</c>);
     /// they are only validated, skipping the redundant <c>EvaluateAndHealTable</c> / <c>CleanTableDuplicateRows</c> pass.
     /// </param>
-    public static (List<string> Errors, List<string> Warnings) ValidateAllWorkbookTables(
+    public static (List<ValidationIssue> Errors, List<ValidationIssue> Warnings) ValidateAllWorkbookTables(
         object wbObj,
         IReadOnlyDictionary<string, Func<DateOnly, TimeOnly?, bool>>? warningDateFilters,
         IReadOnlySet<string>? skipHealAndDedupeTables,
         params string[] excludeTableNames)
     {
         using var _ = AppLogger.Scope("ValidateAllWorkbookTables");
-        var errors = new List<string>();
-        var warnings = new List<string>();
+        var errors = new List<ValidationIssue>();
+        var warnings = new List<ValidationIssue>();
         if (wbObj == null) return (errors, warnings);
 
         dynamic wb = wbObj;
@@ -179,7 +179,7 @@ public static class RulesExtractor
         return (errors, warnings);
     }
 
-    private static (List<string> Errors, List<string> Warnings) EvaluateAndExtractInternal(
+    private static (List<ValidationIssue> Errors, List<ValidationIssue> Warnings) EvaluateAndExtractInternal(
         object worksheet,
         object? tableObj,
         object? bodyRangeObj,
@@ -191,8 +191,8 @@ public static class RulesExtractor
         Func<DateOnly, TimeOnly?, bool>? rowWarningFilter = null,
         bool skipHealAndDedupe = false)
     {
-        var errors = new List<string>();
-        var warnings = new List<string>();
+        var errors = new List<ValidationIssue>();
+        var warnings = new List<ValidationIssue>();
 
         dynamic wsDynamic = worksheet;
         dynamic wb = wsDynamic.Parent;
@@ -203,11 +203,7 @@ public static class RulesExtractor
         if (table != null && !skipHealAndDedupe)
         {
             // 1. In-memory cell healing
-            var healNotices = RuleEvaluator.EvaluateAndHealTable(wsDynamic, table, rowWarningFilter);
-            foreach (var notice in healNotices)
-            {
-                warnings.Add($"  [{sheetName}] {notice}");
-            }
+            warnings.AddRange(RuleEvaluator.EvaluateAndHealTable(wsDynamic, table, rowWarningFilter));
 
             // 2. VALIDATION DEDUPLICATION: Detect, Warn, Delete, and Skip
             var dedupeWarnings = new List<string>();
@@ -217,7 +213,7 @@ public static class RulesExtractor
             {
                 foreach (var w in dedupeWarnings)
                 {
-                    warnings.Add($"  [{sheetName}] {w}");
+                    warnings.Add(ValidationIssue.FromLegacyMessage(ValidationSeverity.Warning, w, sheetName, tableName));
                 }
 
                 // Refresh DataBodyRange so subsequent array read skips the deleted rows
@@ -356,6 +352,9 @@ public static class RulesExtractor
                 var cRule = rule.CSharpRule;
                 object? rawVal = rowObjectsOneBased[c + 1];
                 string strVal = rowStringsOneBased[c + 1];
+                int excelCol = startCol + c;
+                ValidationIssue CellIssue(ValidationSeverity severity, string message) =>
+                    new(severity, sheetName, tableName, excelRow, excelCol, rule.Header, message);
 
                 if (rule.IsFormula) continue;
 
@@ -363,7 +362,7 @@ public static class RulesExtractor
                 {
                     if (rule.IsRequired)
                     {
-                        errors.Add($"  Row {excelRow} [{sheetName}]: Field '{rule.Header}' is required and cannot be empty.");
+                        errors.Add(CellIssue(ValidationSeverity.Error, $"Field '{rule.Header}' is required and cannot be empty."));
                     }
                     continue;
                 }
@@ -377,12 +376,12 @@ public static class RulesExtractor
                 {
                     if (!double.TryParse(strVal, NumberStyles.Any, CultureInfo.InvariantCulture, out double dNum))
                     {
-                        errors.Add($"  Row {excelRow} [{sheetName}]: Value '{strVal}' in '{rule.Header}' must be a valid number.");
+                        errors.Add(CellIssue(ValidationSeverity.Error, $"Value '{strVal}' in '{rule.Header}' must be a valid number."));
                         continue;
                     }
                     if (cRule.AllowNonNegativeZero && dNum < -0.0001)
                     {
-                        errors.Add($"  Row {excelRow} [{sheetName}]: Value '{strVal}' in '{rule.Header}' cannot be negative.");
+                        errors.Add(CellIssue(ValidationSeverity.Error, $"Value '{strVal}' in '{rule.Header}' cannot be negative."));
                         continue;
                     }
                 }
@@ -396,9 +395,17 @@ public static class RulesExtractor
                         if (RuleDataCache.TryParseDate(strVal, out DateOnly thisDate) &&
                             RuleDataCache.TryParseDate(refValStr, out DateOnly refDate))
                         {
-                            if (thisDate <= refDate)
+                            if (cRule.DateMustBeGreaterThanAllowEqual)
                             {
-                                errors.Add($"  Row {excelRow} [{sheetName}]: '{rule.Header}' ({thisDate:dd/MM/yyyy}) must be strictly later than '{colHeadersOneBased[refCol]}' ({refDate:dd/MM/yyyy}).");
+                                if (thisDate < refDate)
+                                {
+                                    errors.Add(CellIssue(ValidationSeverity.Error, $"'{rule.Header}' ({thisDate:dd/MM/yyyy}) must be on or after '{colHeadersOneBased[refCol]}' ({refDate:dd/MM/yyyy})."));
+                                    continue;
+                                }
+                            }
+                            else if (thisDate <= refDate)
+                            {
+                                errors.Add(CellIssue(ValidationSeverity.Error, $"'{rule.Header}' ({thisDate:dd/MM/yyyy}) must be strictly later than '{colHeadersOneBased[refCol]}' ({refDate:dd/MM/yyyy})."));
                                 continue;
                             }
                         }
@@ -418,7 +425,7 @@ public static class RulesExtractor
                         {
                             if (!IsTokenInNormalizedSet(allowedSet, token))
                             {
-                                errors.Add($"  Row {excelRow} [{sheetName}]: '{token}' is not a valid option for '{rule.Header}'{emptyNote}.");
+                                errors.Add(CellIssue(ValidationSeverity.Error, $"'{token}' is not a valid option for '{rule.Header}'{emptyNote}."));
                             }
                         }
                     }
@@ -427,7 +434,7 @@ public static class RulesExtractor
                         if (!IsTokenInNormalizedSet(allowedSet, strVal))
                         {
                             string displayVal = RuleEvaluator.FormatDisplayValue(rawVal, cRule);
-                            errors.Add($"  Row {excelRow} [{sheetName}]: '{displayVal}' is not a valid option for '{rule.Header}'{emptyNote}.");
+                            errors.Add(CellIssue(ValidationSeverity.Error, $"'{displayVal}' is not a valid option for '{rule.Header}'{emptyNote}."));
                         }
                     }
                 }
@@ -465,16 +472,16 @@ public static class RulesExtractor
 
                         if (anyLookupFound && !anyLookupMatched)
                         {
-                            string conflictMsg = $"  Row {excelRow} [{sheetName}]: '{strVal}' in '{rule.Header}' conflicts with '{partnerVal}' in '{colHeadersOneBased[partnerCol]}'.";
+                            string conflictMsg = $"'{strVal}' in '{rule.Header}' conflicts with '{partnerVal}' in '{colHeadersOneBased[partnerCol]}'.";
                             if (cRule.IsWarningOnly)
                             {
                                 if (rowWarningFilter == null || dateCol < 1 ||
                                     RuleDataCache.MatchesWarningDateFilter(rowObjectsOneBased[dateCol], timeCol >= 1 ? rowObjectsOneBased[timeCol] : null, rowWarningFilter))
-                                    warnings.Add(conflictMsg);
+                                    warnings.Add(CellIssue(ValidationSeverity.Warning, conflictMsg));
                             }
                             else
                             {
-                                errors.Add(conflictMsg);
+                                errors.Add(CellIssue(ValidationSeverity.Error, conflictMsg));
                             }
                         }
                     }

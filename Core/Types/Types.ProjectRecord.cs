@@ -155,6 +155,7 @@ public record ProjectDetails
     public DateOnly TargetEndDate { get; set; } = DateOnly.FromDateTime(DateTime.Today.AddDays(365));
 
     [ExcelColumn("Actual End Date")]
+    [ColumnDateGreaterThan("Start Date", AllowEqual = true)]
     public DateOnly? ActualEndDate { get; set; }
 
     [ExcelColumn("Estimated Cost")]
@@ -244,8 +245,7 @@ public record CompanyRecord
 [ExcelTable("ProjectSummaryTable")]
 public record ProjectSummaryRow
 {
-    [ExcelColumn("Date", isRequired: true)]
-    [ColumnDefault(DefaultKind.Today)]
+    [ExcelColumn("Date")]
     public DateOnly Date { get; set; } = DateOnly.FromDateTime(DateTime.Today);
 
     [ExcelColumn("Team Lead")]

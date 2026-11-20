@@ -8,6 +8,7 @@ using System.Globalization;
 using System.Linq;
 using System.Reflection;
 using SKSB_App.Core.RuntimeUI.DateFilter;
+using SKSB_App.Core.RuntimeUI.TableRowManager;
 using SKSB_App.Core.Types.Attributes;
 using SKSB_App.Core.WorkbookSave.SheetMapper;
 
@@ -646,6 +647,9 @@ public static class RuleCalculator
                         if (ownDateCol >= 1 && RuleDataCache.TryParseDate(rawObjectsGrid[r, ownDateCol], out var od)) ownDate = od;
                     }
 
+                    // Newest-on-top tables hold earlier same-date entries BELOW the current row.
+                    bool newestOnTop = selfTable && TableRowManager.IsInsertAtTopEnabledForTable(rule.TableName);
+
                     var matches = new List<int>();
                     for (int s = 1; s <= src.Rows; s++)
                     {
@@ -653,16 +657,22 @@ public static class RuleCalculator
 
                         if (prior)
                         {
-                            // Strictly earlier by date, or same date and earlier in the table.
+                            // Strictly earlier by date, or same date and earlier in the table (by entry order).
                             if (selfTable && s == r) continue;
                             bool hasDates = ownDate.HasValue && dateCol >= 1 && RuleDataCache.TryParseDate(data[s, dateCol], out _);
                             if (hasDates)
                             {
                                 RuleDataCache.TryParseDate(data[s, dateCol], out var sd);
                                 if (sd > ownDate!.Value) continue;
-                                if (sd == ownDate.Value && selfTable && s > r) continue;
+                                if (sd == ownDate.Value && selfTable)
+                                {
+                                    if (newestOnTop ? s < r : s > r) continue;
+                                }
                             }
-                            else if (selfTable && s > r) continue;
+                            else if (selfTable)
+                            {
+                                if (newestOnTop ? s < r : s > r) continue;
+                            }
                         }
                         else if (dateCol >= 1 && RuleDataCache.TryParseDate(data[s, dateCol], out var rowDate) &&
                                  !scope.IsWithinScope(rowDate, anchor))
@@ -1064,6 +1074,17 @@ public static class RuleCalculator
                         decimal fallback = ToDecimal(args[2].Eval(ctx));
                         if (!TryToDate(dateRaw, out DateOnly date)) return fallback;
                         return WageProvider.ResolveRate(workers, date, fallback);
+                    }
+
+                case "IS_HOUR_METER":
+                    {
+                        Require(1);
+                        object? v = args[0].Eval(ctx);
+                        if (v is SKSB_App.Core.Types.VehicleType vtEnum)
+                            return SKSB_App.Core.Types.VehicleRecord.IsHourMeterType(vtEnum);
+                        string text = (v?.ToString() ?? string.Empty).Trim().Replace(' ', '_').Replace('-', '_');
+                        return Enum.TryParse<SKSB_App.Core.Types.VehicleType>(text, true, out var vt)
+                               && SKSB_App.Core.Types.VehicleRecord.IsHourMeterType(vt);
                     }
 
                 default:

@@ -4,6 +4,7 @@ using ExcelDna.Integration;
 using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.RuntimeUI.DropDown;
 using SKSB_App.Core.RuntimeUI.RuleEngine;
+using SKSB_App.Core.RuntimeUI.Undo;
 using SKSB_App.Core.Types.Attributes;
 using SKSB_App.Core.WorkbookOpen.Sheet;
 using SKSB_App.Core.WorkbookSave.SheetMapper;
@@ -29,8 +30,8 @@ public enum TableNature
 public static partial class TableRowManager
 {
     private static bool _isManagingRows = false;
-    private const string InsertAtTopDefinedName = "__SKSB_INSERT_AT_TOP";
-    private static bool _inMemoryFallback = false;
+    private const string InsertAtTopDefinedNamePrefix = "__SKSB_INSERT_AT_TOP_";
+    private static readonly ConcurrentDictionary<string, bool> _inMemoryTableFallback = new(StringComparer.OrdinalIgnoreCase);
 
     private static readonly ConcurrentDictionary<string, TableNature> TableNatures =
         new(StringComparer.OrdinalIgnoreCase);
@@ -51,6 +52,22 @@ public static partial class TableRowManager
         TableNatures["AllWorkersTable"] = TableNature.Absolute;
         TableNatures["SkillLicenseTypesTable"] = TableNature.Absolute;
         TableNatures["ProjectsTable"] = TableNature.Absolute;
+        TableNatures["DailyAttendanceTable"] = TableNature.Absolute;
+        TableNatures["iJobProjectsTable"] = TableNature.Absolute;
+        TableNatures["MWOProjectsTable"] = TableNature.Absolute;
+        TableNatures["PVTProjectsTable"] = TableNature.Absolute;
+        TableNatures["AllProjectsTable"] = TableNature.Absolute;
+        TableNatures["CompaniesTable"] = TableNature.Absolute;
+        TableNatures["AllCompaniesTable"] = TableNature.Absolute;
+        TableNatures["WorkerPreferencesTable"] = TableNature.Absolute;
+        TableNatures["TeamTable"] = TableNature.Absolute;
+        TableNatures["SkillsTable"] = TableNature.Absolute;
+        TableNatures["ProjectRequirementsTable"] = TableNature.Absolute;
+        TableNatures["ProjectTypeRequirementsTable"] = TableNature.Absolute;
+        TableNatures["SkillIconsTable"] = TableNature.Absolute;
+        TableNatures["StaffSummaryTable"] = TableNature.Absolute;
+        TableNatures["VehicleSummaryTable"] = TableNature.Absolute;
+        TableNatures["ProjectSummaryTable"] = TableNature.Absolute;
 
         // Additive Tables (Append-Only Event Logs / Transaction Ledgers)
         TableNatures["OdometersTable"] = TableNature.Additive;
@@ -62,20 +79,28 @@ public static partial class TableRowManager
         TableNatures["InsuranceClaimsTable"] = TableNature.Additive;
         TableNatures["StaffLicensesTable"] = TableNature.Additive;
         TableNatures["StaffLeavesTable"] = TableNature.Additive;
+        TableNatures["VehicleLicensesTable"] = TableNature.Additive;
+        TableNatures["SkillLicensesTable"] = TableNature.Additive;
+        TableNatures["AttendanceEntriesTable"] = TableNature.Additive;
     }
 
     public static TableNature GetTableNature(dynamic table)
     {
+        string? tableName = null;
+        try { tableName = table?.Name?.ToString(); } catch { }
+        return GetTableNatureByName(tableName);
+    }
+
+    public static TableNature GetTableNatureByName(string? tableName)
+    {
+        if (string.IsNullOrEmpty(tableName)) return TableNature.Absolute;
+
         try
         {
-            string tableName = table?.Name?.ToString() ?? string.Empty;
-            if (!string.IsNullOrEmpty(tableName))
-            {
-                if (TableNatures.TryGetValue(tableName, out var nature))
-                    return nature;
+            if (TableNatures.TryGetValue(tableName, out var nature))
+                return nature;
 
-                return ResolveDefaultTableNature(tableName);
-            }
+            return ResolveDefaultTableNature(tableName);
         }
         catch { }
 
@@ -107,15 +132,122 @@ public static partial class TableRowManager
         return TableNature.Absolute;
     }
 
+    // =========================================================================
+    // PER-TABLE "INSERT AT TOP" STATE
+    // =========================================================================
+
+    /// <summary>Insert at Top state for the currently active table (per-table, not workbook-global).</summary>
     public static bool IsInsertAtTopEnabled
     {
-        get => GetWorkbookInsertAtTop();
-        set => SetWorkbookInsertAtTop(value);
+        get => IsInsertAtTopEnabledForTable(ResolveActiveTable());
+        set
+        {
+            string? tableName = null;
+            try { tableName = ResolveActiveTable()?.Name?.ToString(); } catch { }
+            SetInsertAtTopForTable(tableName, value);
+        }
     }
 
-    public static TableInsertMode GetTableInsertMode()
+    public static TableInsertMode GetTableInsertMode(dynamic? table = null)
     {
-        return IsInsertAtTopEnabled ? TableInsertMode.InsertAtTop : TableInsertMode.InsertAtBottom;
+        bool atTop = IsInsertAtTopEnabledForTable(table ?? ResolveActiveTable());
+        return atTop ? TableInsertMode.InsertAtTop : TableInsertMode.InsertAtBottom;
+    }
+
+    /// <summary>
+    /// Resolves the table the user is working in: ActiveCell, then Selection, then the first table on the active sheet.
+    /// </summary>
+    public static dynamic? ResolveActiveTable()
+    {
+        dynamic? xlApp = null;
+        try { xlApp = ExcelDnaUtil.Application; } catch { }
+        if (xlApp == null) return null;
+
+        dynamic? table = null;
+        try { table = xlApp.ActiveCell?.ListObject; } catch { }
+        if (table != null) return table;
+
+        try { table = xlApp.Selection?.ListObject; } catch { }
+        if (table != null) return table;
+
+        try { table = xlApp.Selection?.Cells[1, 1].ListObject; } catch { }
+        if (table != null) return table;
+
+        try
+        {
+            dynamic? ws = xlApp.ActiveWorkbook?.ActiveSheet;
+            if (ws != null && (int)ws.ListObjects.Count > 0) table = ws.ListObjects[1];
+        }
+        catch { }
+
+        return table;
+    }
+
+    public static bool IsInsertAtTopEnabledForTable(dynamic? table)
+    {
+        string? tableName = null;
+        try { tableName = table?.Name?.ToString(); } catch { }
+        return IsInsertAtTopEnabledForTable(tableName);
+    }
+
+    public static bool IsInsertAtTopEnabledForTable(string? tableName)
+    {
+        if (string.IsNullOrWhiteSpace(tableName)) return false;
+
+        string definedName = BuildInsertAtTopDefinedName(tableName);
+        try
+        {
+            dynamic xlApp = ExcelDnaUtil.Application;
+            dynamic? wb = xlApp.ActiveWorkbook;
+            if (wb != null)
+            {
+                dynamic? nameObj = null;
+                try { nameObj = wb.Names.Item(definedName); } catch { }
+                if (nameObj != null)
+                {
+                    string refersTo = string.Empty;
+                    try { refersTo = nameObj.RefersTo?.ToString() ?? string.Empty; } catch { }
+                    return refersTo.IndexOf("TRUE", StringComparison.OrdinalIgnoreCase) >= 0;
+                }
+            }
+        }
+        catch { }
+
+        if (_inMemoryTableFallback.TryGetValue(tableName, out bool cached)) return cached;
+
+        // Default: ON for date-based / Additive tables, OFF for Absolute (master) tables.
+        return GetTableNatureByName(tableName) == TableNature.Additive;
+    }
+
+    public static void SetInsertAtTopForTable(string? tableName, bool enabled)
+    {
+        if (string.IsNullOrWhiteSpace(tableName)) return;
+
+        _inMemoryTableFallback[tableName] = enabled;
+        string definedName = BuildInsertAtTopDefinedName(tableName);
+        try
+        {
+            dynamic xlApp = ExcelDnaUtil.Application;
+            dynamic? wb = xlApp.ActiveWorkbook;
+            if (wb != null)
+            {
+                try { wb.Names.Item(definedName).Delete(); } catch { }
+                wb.Names.Add(
+                    Name: definedName,
+                    RefersTo: enabled ? "=\"TRUE\"" : "=\"FALSE\"",
+                    Visible: false
+                );
+            }
+        }
+        catch { }
+    }
+
+    private static string BuildInsertAtTopDefinedName(string tableName)
+    {
+        var sb = new System.Text.StringBuilder(tableName.Length);
+        foreach (char ch in tableName)
+            sb.Append(char.IsLetterOrDigit(ch) || ch == '_' ? ch : '_');
+        return InsertAtTopDefinedNamePrefix + sb.ToString();
     }
 
     /// <summary>
@@ -164,7 +296,7 @@ public static partial class TableRowManager
             try { oldEvents = (bool)xlApp.EnableEvents; } catch { }
             try { oldScreen = (bool)xlApp.ScreenUpdating; } catch { }
 
-            bool atTop = IsInsertAtTopEnabled;
+            bool atTop = IsInsertAtTopEnabledForTable(table);
             string tableName = "Table";
             dynamic? newRowFirstCell = null;
 
@@ -181,6 +313,7 @@ public static partial class TableRowManager
                 int headerRow = (int)table.HeaderRowRange.Row;
 
                 SpawnRowSafely(worksheet, table, startCol, colCount, headerRow, atTop);
+                UndoManager.ClearSheet(worksheet);
 
                 int rowCount = (int)table.ListRows.Count;
                 if (rowCount > 0)
@@ -285,6 +418,8 @@ public static partial class TableRowManager
             );
             if (confirmResult != DialogResult.Yes) return;
 
+            WithUnfilteredTable((object)table, () =>
+            {
             foreach (int idx in rowIndicesToDelete.OrderByDescending(x => x))
             {
                 if ((int)table.ListRows.Count > 1)
@@ -310,7 +445,9 @@ public static partial class TableRowManager
                     }
                 }
             }
+            });
 
+            UndoManager.ClearSheet(worksheet);
             SheetOperations.ShowStatusConfirmation($"Deleted {rowIndicesToDelete.Count} row(s) from '{tableName}'.");
         }
         catch (Exception ex)
@@ -353,7 +490,7 @@ public static partial class TableRowManager
         int rowCount = dataBody != null ? (int)dataBody.Rows.Count : 0;
         int lastDataRow = bodyStartRow + Math.Max(1, rowCount) - 1;
 
-        TableInsertMode insertMode = GetTableInsertMode();
+        TableInsertMode insertMode = GetTableInsertMode(table);
 
         int targetTopRow = (int)target!.Row;
         int targetRowCount = (int)target.Rows.Count;
@@ -386,12 +523,15 @@ public static partial class TableRowManager
             dynamic xlApp = ExcelDnaUtil.Application;
             bool origEnableEvents = true;
             try { origEnableEvents = (bool)xlApp.EnableEvents; } catch { }
+            bool origScreenUpdating = true;
+            try { origScreenUpdating = (bool)xlApp.ScreenUpdating; } catch { }
 
             var auditTrail = new List<string>();
 
             try
             {
                 xlApp.EnableEvents = false;
+                try { xlApp.ScreenUpdating = false; } catch { }
                 dynamic worksheet = table.Parent;
 
                 dynamic currentBody = table.DataBodyRange;
@@ -436,8 +576,10 @@ public static partial class TableRowManager
             }
             finally
             {
+                try { xlApp.ScreenUpdating = origScreenUpdating; } catch { }
                 try { xlApp.EnableEvents = origEnableEvents; } catch { }
                 _isManagingRows = false;
+                UndoManager.ReArmOnUndoIfAvailable();
             }
         });
     }
@@ -455,7 +597,7 @@ public static partial class TableRowManager
         {
             foreach (dynamic table in worksheet.ListObjects)
             {
-                TableInsertMode mode = GetTableInsertMode();
+                TableInsertMode mode = GetTableInsertMode(table);
                 CleanTableEmptyRows(table, mode, null);
                 tablesCleaned++;
             }
@@ -466,6 +608,31 @@ public static partial class TableRowManager
         }
 
         return tablesCleaned;
+    }
+
+    /// <summary>Compacts empty buffer rows on a single table only (used when toggling Insert at Top for that table).</summary>
+    public static void CleanSingleTableEmptyRows(dynamic table)
+    {
+        if (table == null) return;
+
+        dynamic xlApp = ExcelDnaUtil.Application;
+        bool origEnableEvents = true;
+        try { origEnableEvents = (bool)xlApp.EnableEvents; } catch { }
+
+        try
+        {
+            try { xlApp.EnableEvents = false; } catch { }
+            TableInsertMode mode = GetTableInsertMode(table);
+            CleanTableEmptyRows(table, mode, null);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("CleanSingleTableEmptyRows failed", ex);
+        }
+        finally
+        {
+            try { xlApp.EnableEvents = origEnableEvents; } catch { }
+        }
     }
 
     public static void CleanTableEmptyRows(dynamic table, TableInsertMode insertMode, List<string>? auditLog = null)
@@ -586,8 +753,13 @@ public static partial class TableRowManager
         dynamic newRowRange = newRow.Range;
 
         int sourceArchetypeRow = insertAtTop ? headerRow + 2 : headerRow + 1;
+        if (insertAtTop)
+        {
+            try { sourceArchetypeRow = (int)table.ListRows[2].Range.Row; }
+            catch { sourceArchetypeRow = headerRow + 2; }
 
-        // Inside TableRowManager.SpawnRowSafely:
+            try { newRowRange.RowHeight = worksheet.Rows[sourceArchetypeRow].RowHeight; } catch { }
+        }
 
         for (int c = 1; c <= colCount; c++)
         {
@@ -622,6 +794,11 @@ public static partial class TableRowManager
             }
             catch { }
 
+            if (insertAtTop)
+            {
+                MirrorBodyCellFormatting(archetypeCell, newCell);
+            }
+
             var cfg = Metadata.ReadConfig(archetypeCell);
             if (!cfg.IsEmpty)
             {
@@ -633,6 +810,15 @@ public static partial class TableRowManager
             {
                 newCell.Value2 = null;
                 RuleRegistry.ApplyCalculatedColumnLock(newCell, rule);
+            }
+            else
+            {
+                string newFormula = string.Empty;
+                try { newFormula = newCell.Formula?.ToString() ?? string.Empty; } catch { }
+                if (!newFormula.StartsWith("="))
+                {
+                    try { newCell.FormulaR1C1 = archetypeCell.FormulaR1C1; } catch { }
+                }
             }
 
             // Declarative [ColumnFormat]: units + dash for zero on the new row (text template cells stay text)
@@ -648,50 +834,130 @@ public static partial class TableRowManager
             : "[INSERT] Spawned new entry row at BOTTOM.");
     }
 
-    public static void DeleteTableRowSafely(dynamic table, int listRowIndex)
-    {
-        table.ListRows[listRowIndex].Delete();
-    }
-
-    private static bool GetWorkbookInsertAtTop()
+    /// <summary>Mirrors body-cell visual formatting onto a new top row (no clipboard, no FormatConditions).</summary>
+    private static void MirrorBodyCellFormatting(dynamic archetypeCell, dynamic newCell)
     {
         try
         {
-            dynamic xlApp = ExcelDnaUtil.Application;
-            dynamic? wb = xlApp.ActiveWorkbook;
-            if (wb != null)
+            int archPattern = (int)archetypeCell.Interior.Pattern;
+            if (archPattern == -4142)
             {
-                dynamic? nameObj = null;
-                try { nameObj = wb.Names.Item(InsertAtTopDefinedName); } catch { }
-                if (nameObj != null)
+                newCell.Interior.Pattern = -4142;
+            }
+            else
+            {
+                newCell.Interior.Pattern = archPattern;
+                newCell.Interior.Color = archetypeCell.Interior.Color;
+            }
+        }
+        catch { }
+
+        try { newCell.Font.Name = archetypeCell.Font.Name; } catch { }
+        try { newCell.Font.Size = archetypeCell.Font.Size; } catch { }
+        try { newCell.Font.Bold = archetypeCell.Font.Bold; } catch { }
+        try { newCell.Font.Italic = archetypeCell.Font.Italic; } catch { }
+        try { newCell.Font.Underline = archetypeCell.Font.Underline; } catch { }
+        try { newCell.Font.Strikethrough = archetypeCell.Font.Strikethrough; } catch { }
+        try { newCell.Font.Color = archetypeCell.Font.Color; } catch { }
+
+        try { newCell.WrapText = archetypeCell.WrapText; } catch { }
+        try { newCell.IndentLevel = archetypeCell.IndentLevel; } catch { }
+
+        foreach (int edge in new[] { 7, 8, 9, 10 })
+        {
+            try
+            {
+                dynamic src = archetypeCell.Borders[edge];
+                dynamic dst = newCell.Borders[edge];
+                int lineStyle = (int)src.LineStyle;
+                dst.LineStyle = lineStyle;
+                if (lineStyle != -4142)
                 {
-                    string refersTo = nameObj.RefersTo?.ToString() ?? string.Empty;
-                    return refersTo.IndexOf("TRUE", StringComparison.OrdinalIgnoreCase) >= 0;
+                    try { dst.Weight = src.Weight; } catch { }
+                    try { dst.Color = src.Color; } catch { }
+                }
+            }
+            catch { }
+        }
+    }
+
+    public static void DeleteTableRowSafely(dynamic table, int listRowIndex)
+    {
+        WithUnfilteredTable((object)table, () => table.ListRows[listRowIndex].Delete());
+    }
+
+    /// <summary>
+    /// Runs <paramref name="action"/> with any active table AutoFilter cleared (Excel refuses to
+    /// delete/move cells in a filtered table), then best-effort restores the captured filters.
+    /// </summary>
+    private static void WithUnfilteredTable(object tableObj, Action action)
+    {
+        dynamic table = tableObj;
+        var saved = new List<(int Field, object? Criteria1, int Operator, bool HasCriteria2, object? Criteria2)>();
+        bool filtered = false;
+        try
+        {
+            filtered = table.AutoFilter != null && (bool)table.AutoFilter.FilterMode;
+        }
+        catch { }
+
+        if (!filtered)
+        {
+            action();
+            return;
+        }
+
+        try
+        {
+            int fieldCount = 0;
+            try { fieldCount = (int)table.AutoFilter.Filters.Count; } catch { }
+            for (int i = 1; i <= fieldCount; i++)
+            {
+                try
+                {
+                    dynamic f = table.AutoFilter.Filters[i];
+                    if (!(bool)f.On) continue;
+                    object? c1 = null, c2 = null;
+                    int op = 0;
+                    bool hasC2 = false;
+                    try { c1 = f.Criteria1; } catch { }
+                    try { op = (int)f.Operator; } catch { }
+                    try { c2 = f.Criteria2; hasC2 = c2 != null; } catch { }
+                    saved.Add((i, c1, op, hasC2, c2));
+                }
+                catch { }
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn($"WithUnfilteredTable: failed to snapshot filters: {ex.Message}");
+        }
+
+        try { table.AutoFilter.ShowAllData(); } catch (Exception ex) { AppLogger.Warn($"WithUnfilteredTable: ShowAllData failed: {ex.Message}"); }
+
+        try
+        {
+            action();
+        }
+        finally
+        {
+            foreach (var f in saved)
+            {
+                try
+                {
+                    if (f.HasCriteria2 && f.Operator > 0)
+                        table.Range.AutoFilter(f.Field, f.Criteria1, f.Operator, f.Criteria2);
+                    else if (f.Operator > 0)
+                        table.Range.AutoFilter(f.Field, f.Criteria1, f.Operator);
+                    else if (f.Criteria1 != null)
+                        table.Range.AutoFilter(f.Field, f.Criteria1);
+                }
+                catch (Exception ex)
+                {
+                    AppLogger.Warn($"WithUnfilteredTable: failed to restore filter on field {f.Field}: {ex.Message}");
                 }
             }
         }
-        catch { }
-        return _inMemoryFallback;
-    }
-
-    private static void SetWorkbookInsertAtTop(bool enabled)
-    {
-        _inMemoryFallback = enabled;
-        try
-        {
-            dynamic xlApp = ExcelDnaUtil.Application;
-            dynamic? wb = xlApp.ActiveWorkbook;
-            if (wb != null)
-            {
-                try { wb.Names.Item(InsertAtTopDefinedName).Delete(); } catch { }
-                wb.Names.Add(
-                    Name: InsertAtTopDefinedName,
-                    RefersTo: enabled ? "=\"TRUE\"" : "=\"FALSE\"",
-                    Visible: false
-                );
-            }
-        }
-        catch { }
     }
 
     /// <summary>
@@ -863,10 +1129,13 @@ public static partial class TableRowManager
             // 5. Delete duplicate rows from bottom up under protection bypass
             if (duplicateIndices.Count > 0)
             {
-                foreach (int idx in duplicateIndices.OrderByDescending(x => x))
+                WithUnfilteredTable((object)table, () =>
                 {
-                    table.ListRows[idx].Delete();
-                }
+                    foreach (int idx in duplicateIndices.OrderByDescending(x => x))
+                    {
+                        table.ListRows[idx].Delete();
+                    }
+                });
             }
 
             return duplicateIndices.Count;

@@ -128,6 +128,7 @@ public record StaffDetails
     public DateOnly JoinDate { get; set; } = DateOnly.FromDateTime(DateTime.Today);
 
     [ExcelColumn("Resign Date")]
+    [ColumnDateGreaterThan("Join Date", AllowEqual = true)]
     public DateOnly? ResignDate { get; set; } = null;
 
     [ExcelColumn("Contract Status", isRequired: true)]
@@ -182,6 +183,7 @@ public abstract record StaffLicenseBase
     [ExcelColumn("Expiry Date", isRequired: true)]
     [ColumnRule(IsRequired = true)]
     [ColumnDefault(DefaultKind.DateOffsetDays, referenceHeader: "Renew Date", offset: 365)]
+    [ColumnDateGreaterThan("Renew Date")]
     public DateOnly ExpiryDate
     {
         get => _expiryDate ?? _renewDate.AddYears(1);
@@ -241,7 +243,7 @@ public record SkillLicense : StaffLicenseBase
     public long SkillLicenseID { get; set; } = 0;
 
     [ExcelColumn("Skill License Type", isRequired: true)]
-    [ColumnRule("SkillLicenseTypesTable[Skill License Type]", IsRequired = true)]
+    [ColumnRule("SkillLicenseTypesTable[Skill License Types]", IsRequired = true)]
     public string SkillLicenseType { get; set; } = string.Empty;
 
     [ExcelColumn("Status", isRequired: true)]

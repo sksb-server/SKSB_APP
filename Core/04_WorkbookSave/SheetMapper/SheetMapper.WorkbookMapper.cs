@@ -55,6 +55,9 @@ public sealed class ChildTableBinding<TMaster, TChild, TKey> : IChildTableBindin
     /// <summary>When true, a child whose foreign key is missing from the master table is reported as an error.</summary>
     public bool ValidateForeignKeyExists { get; set; }
 
+    /// <summary>Optional ordering applied to the flattened child list before populating (e.g. newest-date-first).</summary>
+    public Func<List<TChild>, List<TChild>>? OrderChildRecords { get; set; }
+
     public void ExtractInto(
         object wbObj,
         IReadOnlyDictionary<TKey, TMaster> masterMap,
@@ -125,6 +128,7 @@ public sealed class ChildTableBinding<TMaster, TChild, TKey> : IChildTableBindin
                 }
             }
 
+            if (OrderChildRecords != null) allChildren = OrderChildRecords(allChildren);
             TableMapper.PopulateTableSafe<TChild>((object)ws, TableName, allChildren);
         }
         catch (Exception ex)
@@ -205,6 +209,9 @@ public sealed class WorkbookMapping<TMaster, TKey>
     /// <summary>Tables to run through <see cref="RuleEvaluator.EvaluateAndHealTable"/> after populate, in order (repeats allowed).</summary>
     public string[] HealTableOrder { get; set; } = Array.Empty<string>();
 
+    /// <summary>Derived/view-only tables skipped by <see cref="RulesExtractor.ValidateAllWorkbookTables(object, string[])"/> during save.</summary>
+    public string[] ExcludeValidationTables { get; set; } = Array.Empty<string>();
+
     // ---- DEBUG populate audit ----
     public string AuditTitle { get; set; } = "Populate Audit";
     public string MasterLabel { get; set; } = "Records";
@@ -219,16 +226,28 @@ public static class WorkbookMapper
     // =========================================================================
     // 3a. MASTER + CHILD EXTRACTION & VALIDATION PIPELINE
     // =========================================================================
-    public static (List<TMaster>? Data, List<string> Errors, List<string> Warnings) ExtractMasterAndChildrenWithDiagnostics<TMaster, TKey>(
+    public static (List<TMaster>? Data, List<ValidationIssue> Errors, List<ValidationIssue> Warnings) ExtractMasterAndChildrenWithDiagnostics<TMaster, TKey>(
         WorkbookMapping<TMaster, TKey> map)
         where TMaster : new()
         where TKey : notnull
     {
+        // Hook delegates still report free-text messages; lift them into structured issues.
+        List<ValidationIssue> ToIssues(ValidationSeverity severity, IEnumerable<string> messages) =>
+            messages.Select(m => ValidationIssue.FromLegacyMessage(severity, m, map.MasterSheetName, map.MasterTableName)).ToList();
+
+        ValidationIssue WorkbookError(string message) =>
+            new(ValidationSeverity.Error, map.MasterSheetName, map.MasterTableName, 0, 0, string.Empty, message);
+
         try
         {
             dynamic xlApp = ExcelDnaUtil.Application;
             dynamic? wb = xlApp.ActiveWorkbook;
-            if (wb == null) return (null, new List<string> { "No active workbook found." }, new List<string>());
+            if (wb == null)
+            {
+                return (null,
+                    new List<ValidationIssue> { new(ValidationSeverity.Error, string.Empty, string.Empty, 0, 0, string.Empty, "No active workbook found.") },
+                    new List<ValidationIssue>());
+            }
             object wbObj = wb;
 
             var customErrors = new List<string>();
@@ -243,7 +262,9 @@ public static class WorkbookMapper
                 dynamic? masterWs = SheetMapperHelper.ResolveSheetSafely(wbObj, map.MasterSheetAliases, map.MasterSheetName);
                 if (masterWs == null)
                 {
-                    return (null, new List<string> { $"Worksheet '{map.MasterSheetName}' was not found in workbook." }, new List<string>());
+                    return (null,
+                        new List<ValidationIssue> { new(ValidationSeverity.Error, string.Empty, map.MasterTableName, 0, 0, string.Empty, $"Worksheet '{map.MasterSheetName}' was not found in workbook.") },
+                        new List<ValidationIssue>());
                 }
 
                 // 1. Extract master records (runs EvaluateAndHealTable automatically inside TableMapper)
@@ -282,9 +303,9 @@ public static class WorkbookMapper
 
             // 4. Validate all tables across all sheets
             LoadingOverlay.Report("Validating workbook rules...");
-            var (errors, warnings) = RulesExtractor.ValidateAllWorkbookTables(wbObj);
-            errors.AddRange(hookErrors);
-            warnings.AddRange(hookWarnings);
+            var (errors, warnings) = RulesExtractor.ValidateAllWorkbookTables(wbObj, map.ExcludeValidationTables);
+            errors.AddRange(ToIssues(ValidationSeverity.Error, hookErrors));
+            warnings.AddRange(ToIssues(ValidationSeverity.Warning, hookWarnings));
 
             // 5. Master primary key uniqueness
             var keyGroups = masters
@@ -297,19 +318,35 @@ public static class WorkbookMapper
                 int occurrences = group.Count();
                 if (occurrences > 1)
                 {
-                    errors.Add($"  [{map.MasterSheetName}]: Duplicate {map.MasterKeyLabel} '{group.Key}' detected {occurrences} times in '{map.MasterTableName}'.");
+                    errors.Add(new ValidationIssue(
+                        ValidationSeverity.Error,
+                        map.MasterSheetName,
+                        map.MasterTableName,
+                        0,
+                        0,
+                        map.MasterKeyLabel,
+                        $"Duplicate {map.MasterKeyLabel} '{group.Key}' detected {occurrences} times in '{map.MasterTableName}'."));
                 }
             }
 
             // 6. Domain-specific rules
-            map.CustomValidator?.Invoke(wbObj, masters, errors, warnings);
+            if (map.CustomValidator != null)
+            {
+                var customValErrors = new List<string>();
+                var customValWarnings = new List<string>();
+                map.CustomValidator(wbObj, masters, customValErrors, customValWarnings);
+                errors.AddRange(ToIssues(ValidationSeverity.Error, customValErrors));
+                warnings.AddRange(ToIssues(ValidationSeverity.Warning, customValWarnings));
+            }
 
             return (masters, errors, warnings);
         }
         catch (Exception ex)
         {
             AppLogger.Error($"[WorkbookMapper] Failed extracting {map.EntityLabel} records", ex);
-            return (null, new List<string> { $"Failed extracting {map.EntityLabel} records: {ex.Message}" }, new List<string>());
+            return (null,
+                new List<ValidationIssue> { WorkbookError($"Failed extracting {map.EntityLabel} records: {ex.Message}") },
+                new List<ValidationIssue>());
         }
     }
 
@@ -607,6 +644,10 @@ public static class WorkbookMapper
                     catch { } // Table is not on this sheet
                 }
             }
+
+            // Re-baseline stacked-entry snapshots now that synced UI helpers / state guards have settled,
+            // so the healing pass itself never counts as a user edit.
+            StackedEntryGuard.RefreshWorkbookSnapshots(wbObj);
 
             auditWorkbook = wbObj;
         }

@@ -1,6 +1,5 @@
 namespace SKSB_App.StaffManager;
 
-using ExcelDna.Integration;
 using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.RuntimeUI.DropDown;
 using SKSB_App.Core.Integration.Database;
@@ -66,12 +65,9 @@ public class Events : ManagerEventsBase<List<StaffRecord>>
 
     public override void AutoClose()
     {
-        ExcelAsyncUtil.QueueAsMacro(() =>
-        {
-            SheetMapper.UnregisterSummaryHooks();
-            SheetMapper.UnregisterSkillTypeCascadeHooks();
-            CustomDropdowns.Clear();
-        });
+        SheetMapper.UnregisterSummaryHooks();
+        SheetMapper.UnregisterSkillTypeCascadeHooks();
+        CustomDropdowns.Clear();
         base.AutoClose();
     }
 

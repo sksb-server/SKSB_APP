@@ -14,6 +14,7 @@ using SKSB_App.Core.RuntimeUI.DropDown;
 using SKSB_App.Core.RuntimeUI.Progress;
 using SKSB_App.Core.RuntimeUI.TableRowManager;
 using SKSB_App.Core.WorkbookOpen.Sheet;
+using SKSB_App.Core.WorkbookOpen.Sync;
 using SKSB_App.Core.WorkbookSave.Entry;
 
 /// <summary>
@@ -110,6 +111,13 @@ public abstract class ManagerRibbonBase : ExcelRibbon
                           screentip='{Esc(saveScreentip)}'
                           supertip='{Esc(saveSupertip)}'
                           onAction='OnSaveClicked' />
+                  <button id='btnValidateWorkbook'
+                          label='Check Issues'
+                          size='large'
+                          imageMso='Spelling'
+                          screentip='Check Issues'
+                          supertip='Validates every table in this workbook without saving and lists errors and warnings in a docked pane. Click an issue to jump to its cell.'
+                          onAction='OnValidateClicked' />
                   {extraControlsXml}
                 </group>";
     }
@@ -367,12 +375,13 @@ public abstract class ManagerRibbonBase : ExcelRibbon
             Action? populate;
             using (LoadingOverlay.BeginScope($"{Contract.ModuleName} — Loading from System", "Fetching records from system..."))
             {
-                Contract.SyncLookups?.Invoke(false);
                 (isEmpty, populate) = Contract.FetchForPopulate();
             }
 
             if (populate == null || (isEmpty && !PopulateWhenEmpty))
             {
+                // Queued via QueueAsMacro (outside a synchronous scope) so lookup lists still refresh.
+                Contract.SyncLookups?.Invoke(false);
                 if (ShowEmptyLoadDialog)
                 {
                     MessageBox.Show(EmptyLoadMessage, $"Load {Contract.ModuleName}", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -385,8 +394,13 @@ public abstract class ManagerRibbonBase : ExcelRibbon
             {
                 try
                 {
-                    using (LoadingOverlay.BeginScope($"{Contract.ModuleName} — Loading from System", "Populating workbook tables..."))
+                    using (LoadingOverlay.BeginScope($"{Contract.ModuleName} — Loading from System", "Synchronizing lookup lists & dropdowns..."))
+                    using (SyncHelper.BeginSynchronousScope())
                     {
+                        LoadingOverlay.Report("Synchronizing lookup lists & dropdowns...");
+                        Contract.SyncLookups?.Invoke(false);
+
+                        LoadingOverlay.Report("Populating workbook tables...");
                         populate();
                     }
                     Contract.UpdateWindowCaption();
@@ -412,34 +426,60 @@ public abstract class ManagerRibbonBase : ExcelRibbon
         ExcelAsyncUtil.QueueAsMacro(() => Contract.Save());
     }
 
+    public virtual void OnValidateClicked(IRibbonControl control)
+    {
+        ExcelAsyncUtil.QueueAsMacro(() => Contract.Validate());
+    }
+
     // =========================================================================
     // 4. ROW MANAGEMENT CALLBACKS
     // =========================================================================
     public bool GetInsertAtTopPressed(IRibbonControl control)
         => TableRowManager.IsInsertAtTopEnabled;
 
+    /// <summary>Refreshes the per-table toggle buttons (sheet switch / table selection change).</summary>
+    public static void InvalidateTableToggleControls()
+    {
+        try { RibbonUi?.InvalidateControl("btnToggleInsertTop"); } catch { }
+        try { RibbonUi?.InvalidateControl("btnToggleTotalRow"); } catch { }
+    }
+
     public void OnToggleInsertAtTopClicked(IRibbonControl control, bool isPressed)
     {
-        TableRowManager.IsInsertAtTopEnabled = isPressed;
-        RibbonUi?.InvalidateControl(control.Id);
+        dynamic? activeTable = TableRowManager.ResolveActiveTable();
+        string? activeTableName = null;
+        try { activeTableName = activeTable?.Name?.ToString(); } catch { }
+
+        if (!string.IsNullOrWhiteSpace(activeTableName))
+            TableRowManager.SetInsertAtTopForTable(activeTableName, isPressed);
+        else
+            TableRowManager.IsInsertAtTopEnabled = isPressed;
+
+        try { RibbonUi?.InvalidateControl(control.Id); } catch { }
 
         ExcelAsyncUtil.QueueAsMacro(() =>
         {
             try
             {
-                dynamic xlApp = ExcelDnaUtil.Application;
-                dynamic? ws = xlApp.ActiveWorkbook?.ActiveSheet;
-                if (ws != null)
+                dynamic? table = TableRowManager.ResolveActiveTable();
+                if (table != null)
                 {
-                    TableRowManager.CleanActiveSheetTables(ws);
+                    TableRowManager.CleanSingleTableEmptyRows(table);
+                }
+                else
+                {
+                    dynamic xlApp = ExcelDnaUtil.Application;
+                    dynamic? ws = xlApp.ActiveWorkbook?.ActiveSheet;
+                    if (ws != null) TableRowManager.CleanActiveSheetTables(ws);
                 }
             }
             catch { }
 
+            string label = string.IsNullOrWhiteSpace(activeTableName) ? string.Empty : $" for '{activeTableName}'";
             SheetOperations.ShowStatusConfirmation(
                 isPressed
-                    ? "Insert at TOP active: Spawns at top, redundant bottom rows trimmed."
-                    : "Insert at BOTTOM active: Spawns at bottom, redundant top rows trimmed."
+                    ? $"Insert at TOP active{label}: Spawns at top, redundant bottom rows trimmed."
+                    : $"Insert at BOTTOM active{label}: Spawns at bottom, redundant top rows trimmed."
             );
         });
     }

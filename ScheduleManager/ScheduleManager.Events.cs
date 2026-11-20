@@ -119,13 +119,10 @@ public class Events : ManagerEventsBase<ScheduleRecord>
 
     public override void AutoClose()
     {
-        ExcelAsyncUtil.QueueAsMacro(() =>
-        {
-            ParameterCells.UnregisterChangeObserver(SheetObserver);
-            CustomDropdowns.Clear();
-            PastRecordGuard.ResetEditSession(SheetMapper.GuardSession);
-            _boardHooked = false;
-        });
+        ParameterCells.UnregisterChangeObserver(SheetObserver);
+        CustomDropdowns.Clear();
+        PastRecordGuard.ResetEditSession(SheetMapper.GuardSession);
+        _boardHooked = false;
         base.AutoClose();
     }
 

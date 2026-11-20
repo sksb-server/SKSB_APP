@@ -4,15 +4,20 @@ using System;
 using System.Diagnostics;
 using ExcelDna.Integration;
 using SKSB_App.Core.Diagnostics;
+using SKSB_App.Core.RuntimeUI.BugReport;
 using SKSB_App.Core.RuntimeUI.DropDown;
+using SKSB_App.Core.RuntimeUI.Progress;
+using SKSB_App.Core.RuntimeUI.Ribbon;
 using SKSB_App.Core.RuntimeUI.RuleEngine;
 using SKSB_App.Core.RuntimeUI.TableRowManager;
+using SKSB_App.Core.RuntimeUI.Undo;
 #if DEBUG
 using SKSB_App.Core.RuntimeUI.TemplateEditor.RulesAudit;
 #endif
 using SKSB_App.Core.WorkbookOpen.Sheet;
 using SKSB_App.Core.WorkbookOpen.Sync;
 using SKSB_App.Core.WorkbookSave.SheetMapper;
+using SKSB_App.Core.WorkbookSave.Validation;
 using DropDownCommands = SKSB_App.Core.RuntimeUI.DropDown.Commands;
 
 public class EventsAutoOpen : IExcelAddIn
@@ -35,6 +40,7 @@ public class EventsAutoOpen : IExcelAddIn
     private static SheetSelectionChangeDelegate? _selectionHandler;
     private static SheetChangeDelegate? _changeHandler;
     private static SheetActivateDelegate? _activateHandler;
+    private static string? _lastSelectedTableName;
 
     private static string HookedPidKey => $"SKSB_EVENTS_HOOKED_{Environment.ProcessId}";
     private static string LastCheckedWorkbookKey => $"SKSB_LAST_CHECKED_WB_{Environment.ProcessId}";
@@ -55,6 +61,7 @@ public class EventsAutoOpen : IExcelAddIn
         Environment.SetEnvironmentVariable(HookedPidKey, "1");
         AppLogger.ResetSessionLog("Workbook Startup");
         AppLogger.Info($"EventsAutoOpen.AutoOpen primary hook in PID {Environment.ProcessId} (XLL: {ExcelDnaUtil.XllPath}).");
+        AutoBugReporter.InstallForExcelAddIn("Core");
 
         ExcelAsyncUtil.QueueAsMacro(() =>
         {
@@ -91,6 +98,11 @@ public class EventsAutoOpen : IExcelAddIn
         Environment.SetEnvironmentVariable(HookedPidKey, null);
         Environment.SetEnvironmentVariable(LastCheckedWorkbookKey, null);
         Arrow.Teardown();
+        StackedEntryGuard.ClearAll();
+        UndoManager.ClearAll();
+        ValidationTaskPaneManager.CloseAll();
+        _lastSelectedTableName = null;
+        AutoBugReporter.UninstallForExcelAddIn();
         UnEventHooks();
     }
 
@@ -124,10 +136,17 @@ public class EventsAutoOpen : IExcelAddIn
             Environment.SetEnvironmentVariable(LastTemplateModeKey, isTemplate ? "1" : "0");
             AppLogger.Info($"Workbook='{wbName}', IsMasterTemplateFile={isTemplate}");
 
+            using var progress = LoadingOverlay.BeginScope(
+                isTemplate ? "Template Mode — Initializing" : "Initializing Workbook",
+                "Applying table rules & column tooltips...");
+            using var syncScope = SyncHelper.BeginSynchronousScope();
+
             bool origUpdating = true;
             bool origEvents = true;
+            int origCalculation = -4105;
             try { origUpdating = (bool)xlApp.ScreenUpdating; xlApp.ScreenUpdating = false; } catch { }
             try { origEvents = (bool)xlApp.EnableEvents; xlApp.EnableEvents = false; } catch { }
+            try { origCalculation = (int)xlApp.Calculation; xlApp.Calculation = -4135; } catch { }
 
             try
             {
@@ -156,6 +175,7 @@ public class EventsAutoOpen : IExcelAddIn
                     }
                 }
 
+                try { xlApp.Calculation = origCalculation; } catch { }
                 try { xlApp.EnableEvents = origEvents; } catch { }
                 try { xlApp.ScreenUpdating = origUpdating; } catch { }
             }
@@ -199,15 +219,18 @@ public class EventsAutoOpen : IExcelAddIn
             dynamic xlApp = ExcelDnaUtil.Application;
             _xlAppRoot = xlApp;
 
-#if DEBUG
-            // DIAGNOSTIC 1: Intercept all sheet activations with stack trace
+            // Sheet activation: refresh per-table Ribbon toggles (DEBUG also logs a stack trace).
             _activateHandler = new SheetActivateDelegate(sh =>
             {
-                string sName = sh?.Name?.ToString() ?? "Unknown";
+#if DEBUG
+                string sName = "Unknown";
+                try { sName = sh?.Name?.ToString() ?? "Unknown"; } catch { }
                 AppLogger.Warn($"[SHEET ACTIVATION DETECTED] Switched active tab to: '{sName}'\nStack:\n{new StackTrace(1, true)}");
+#endif
+                _lastSelectedTableName = null;
+                ManagerRibbonBase.InvalidateTableToggleControls();
             });
             _xlAppRoot.SheetActivate += _activateHandler;
-#endif
 
             // DIAGNOSTIC 2: Intercept all selection changes to pinpoint horizontal viewport scrolling
             _selectionHandler = new SheetSelectionChangeDelegate(OnSheetSelectionChange);
@@ -224,6 +247,13 @@ public class EventsAutoOpen : IExcelAddIn
             _xlAppRoot.WorkbookAfterSave += _afterSaveHandler;
 #endif
 
+            try
+            {
+                XlCall.Excel(XlCall.xlcOnKey, "^z", "SKSB_UndoMacro");
+                XlCall.Excel(XlCall.xlcOnKey, "^y", "SKSB_RedoMacro");
+            }
+            catch { }
+
             AppLogger.Info("Application Sheet Events hooked successfully with full navigation diagnostics.");
         }
         catch (Exception ex)
@@ -236,6 +266,13 @@ public class EventsAutoOpen : IExcelAddIn
     {
         try
         {
+            try
+            {
+                XlCall.Excel(XlCall.xlcOnKey, "^z");
+                XlCall.Excel(XlCall.xlcOnKey, "^y");
+            }
+            catch { }
+
             if (_xlAppRoot != null)
             {
                 if (_windowActivateHandler != null) { _xlAppRoot.WindowActivate -= _windowActivateHandler; _windowActivateHandler = null; }
@@ -290,7 +327,19 @@ public class EventsAutoOpen : IExcelAddIn
         AppLogger.Info($"[SELECTION CHANGE] Sheet='{sheetName}', Range={addr}, Col={col}, Row={row}");
 #endif
 
+        StackedEntryGuard.OnSelectionChanged(sh, target);
+        UndoManager.CaptureSelectionSnapshot(sh, target);
+
         dynamic singleCell = target.Cells[1, 1];
+
+        string? tblName = null;
+        try { tblName = singleCell.ListObject?.Name?.ToString(); } catch { }
+        if (!string.Equals(tblName, _lastSelectedTableName, StringComparison.OrdinalIgnoreCase))
+        {
+            _lastSelectedTableName = tblName;
+            ManagerRibbonBase.InvalidateTableToggleControls();
+        }
+
         if (DropDownCommands.IsDropdownCell(singleCell))
         {
             Arrow.ShowArrowForCell(singleCell);
@@ -340,7 +389,7 @@ public class EventsAutoOpen : IExcelAddIn
     {
         try
         {
-            if (target == null) return;
+            if (target == null || UndoManager.IsApplyingUndoRedo) return;
 
             if (SheetOperations.IsTemplateEditMode)
             {
@@ -394,7 +443,9 @@ public class EventsAutoOpen : IExcelAddIn
             // 2. Handle Multi-Cell Deletes (e.g., selecting an entire row and hitting Delete)
             if (target.Cells.Count > 1)
             {
+                UndoManager.CommitEdit(sh, target);
                 TableRowManager.HandleSheetChange(target);
+                StackedEntryGuard.OnSheetChanged(sh, target);
                 return;
             }
 
@@ -420,12 +471,15 @@ public class EventsAutoOpen : IExcelAddIn
                 ExecuteLegacyCellSyncOnType(singleCell);
             }
 
+            UndoManager.CommitEdit(sh, singleCell);
+
             if (DropDownCommands.IsDropdownCell(singleCell))
             {
                 Arrow.ShowArrowForCell(singleCell);
             }
 
             TableRowManager.HandleSheetChange(singleCell);
+            StackedEntryGuard.OnSheetChanged(sh, singleCell);
         }
         catch (Exception ex)
         {

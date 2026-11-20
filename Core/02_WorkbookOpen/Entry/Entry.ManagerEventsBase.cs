@@ -4,10 +4,13 @@ using System;
 using System.Linq;
 using ExcelDna.Integration;
 using SKSB_App.Core.Diagnostics;
+using SKSB_App.Core.RuntimeUI.BugReport;
 using SKSB_App.Core.RuntimeUI.DropDown;
+using SKSB_App.Core.RuntimeUI.Progress;
 using SKSB_App.Core.WorkbookOpen.Sheet;
 using SKSB_App.Core.WorkbookOpen.Sync;
 using SKSB_App.Core.WorkbookSave.Entry;
+using SKSB_App.Core.WorkbookSave.Validation;
 
 // COM event signatures. Declared at namespace level (not nested in the generic base) so the
 // delegate types themselves stay non-generic for late-bound COM event subscription.
@@ -60,29 +63,37 @@ public abstract class ManagerEventsBase<T> : IExcelAddIn
     // =========================================================================
     public virtual void AutoOpen()
     {
+        AutoBugReporter.InstallForExcelAddIn(Contract.ModuleName);
+
         ExcelAsyncUtil.QueueAsMacro(() =>
         {
-            _coreEvents.AutoOpen();
+            try
+            {
+                _coreEvents.AutoOpen();
 
-            HookApplicationEvents();
+                HookApplicationEvents();
 
-            double nowSerial = Convert.ToDouble(XlCall.Excel(XlCall.xlfNow));
-            XlCall.Excel(XlCall.xlcOnTime, nowSerial + (1.0 / 86400.0), DelayedAutoLoadMacroName);
+                double nowSerial = Convert.ToDouble(XlCall.Excel(XlCall.xlfNow));
+                XlCall.Excel(XlCall.xlcOnTime, nowSerial + (1.0 / 86400.0), DelayedAutoLoadMacroName);
 
-            XlCall.Excel(XlCall.xlcOnKey, "^s", HotKeySaveMacroName);
-            XlCall.Excel(XlCall.xlcOnKey, "^+s", HotKeySaveMacroName);
+                XlCall.Excel(XlCall.xlcOnKey, "^s", HotKeySaveMacroName);
+                XlCall.Excel(XlCall.xlcOnKey, "^+s", HotKeySaveMacroName);
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error($"[{Contract.ModuleName}] AutoOpen queued macro failed", ex);
+            }
         });
     }
 
     public virtual void AutoClose()
     {
-        ExcelAsyncUtil.QueueAsMacro(() =>
-        {
-            _coreEvents.AutoClose();
-            UnhookApplicationEvents();
-            XlCall.Excel(XlCall.xlcOnKey, "^s");
-            XlCall.Excel(XlCall.xlcOnKey, "^+s");
-        });
+        // Runs synchronously: SynchronizationManager is torn down right after AutoClose returns,
+        // so queuing a macro here would fire SyncMacro against a closing host.
+        try { _coreEvents.AutoClose(); } catch { }
+        UnhookApplicationEvents();
+        try { XlCall.Excel(XlCall.xlcOnKey, "^s"); } catch { }
+        try { XlCall.Excel(XlCall.xlcOnKey, "^+s"); } catch { }
     }
 
     // =========================================================================
@@ -90,7 +101,7 @@ public abstract class ManagerEventsBase<T> : IExcelAddIn
     // =========================================================================
     public virtual void SyncLookups(bool isInteractive)
     {
-        ExcelAsyncUtil.QueueAsMacro(() =>
+        void Execute()
         {
             try
             {
@@ -103,7 +114,10 @@ public abstract class ManagerEventsBase<T> : IExcelAddIn
             {
                 AppLogger.Warn($"[{Contract.ModuleName}] SyncLookups warning: {ex.Message}");
             }
-        });
+        }
+
+        if (SyncHelper.IsSynchronousScope) Execute();
+        else ExcelAsyncUtil.QueueAsMacro(Execute);
     }
 
     // =========================================================================
@@ -152,13 +166,26 @@ public abstract class ManagerEventsBase<T> : IExcelAddIn
         // Workbooks that do not belong to this module are left entirely to Excel.
         if (!SheetOperations.IsModuleWorkbook((object?)wb, contract)) return;
 
+        object wbObj = (object)wb;
         SaveEntry.InterceptClose(
-            (object)wb,
+            wbObj,
             ref cancel,
             contract,
             ref _isExiting,
-            new Action(UnhookApplicationEvents)
+            new Action(UnhookApplicationEvents),
+            onForceClose: () => ForceCloseWorkbook(wbObj)
         );
+    }
+
+    /// <summary>
+    /// Closes the module workbook without re-running the close interception (used by the Validation Task Pane's
+    /// "Save &amp; Close" / DEBUG "Quit Anyway"). Runs on the macro thread.
+    /// </summary>
+    private static void ForceCloseWorkbook(object wbObj)
+    {
+        _isExiting = true;
+        UnhookApplicationEvents();
+        SaveEntry.ForceCloseAndQuit(wbObj, "ManagerEventsBase");
     }
 
     private static void OnWorkbookBeforeSave(dynamic wb, bool saveAsUi, ref bool cancel)
@@ -213,11 +240,23 @@ public abstract class ManagerEventsBase<T> : IExcelAddIn
         }
         catch { }
 
+        if (SheetOperations.IsMasterTemplateFile() || SheetOperations.IsTemplateEditMode)
+        {
+            OfflineSave.HandleStartup(contract);
+            return;
+        }
+
+        using var progress = LoadingOverlay.BeginScope($"{contract.ModuleName} — Starting Up", "Checking PostgreSQL server connection...");
+        using var syncScope = SyncHelper.BeginSynchronousScope();
+
         OfflineSave.HandleStartup(contract);
 
         object? wbObj = xlApp.ActiveWorkbook;
         if (wbObj == null || SheetOperations.IsTemplateEditMode) return;
 
-        SheetOperations.SetAuxiliarySheetsVisibility(visible: false);
+        LoadingOverlay.Report("Applying table rules & column tooltips...");
+        EventsAutoOpen.DelayedTemplateCheckMacro();
+
+        SheetOperations.SetAuxiliarySheetsVisibility(visible: false, synchronous: true);
     }
 }

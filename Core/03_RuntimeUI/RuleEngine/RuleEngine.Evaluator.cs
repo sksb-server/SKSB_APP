@@ -9,6 +9,7 @@ using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.Types.Attributes;
 using SKSB_App.Core.WorkbookOpen.Sheet;
 using SKSB_App.Core.WorkbookSave.SheetMapper;
+using SKSB_App.Core.WorkbookSave.Validation;
 
 public sealed class DropdownOption
 {
@@ -24,7 +25,7 @@ public static class RuleEvaluator
 
     private static readonly HashSet<string> OdometerHeaders = new(StringComparer.OrdinalIgnoreCase)
     {
-        "currentodometer", "odometerbefore", "odometerin", "odometerout"
+        "currentodometer", "odometerbefore", "odometerin", "odometerout", "odometerdifference"
     };
 
     private static string SquashHeaderText(string? h) =>
@@ -42,12 +43,25 @@ public static class RuleEvaluator
         string typeText = (rowValues[typeCol] ?? string.Empty).Trim().Replace(' ', '_').Replace('-', '_');
         bool isHours = Enum.TryParse<SKSB_App.Core.Types.VehicleType>(typeText, true, out var vt)
                        && SKSB_App.Core.Types.VehicleRecord.IsHourMeterType(vt);
-        string fmt = isHours ? RuleRegistry.OdometerHoursFormat : RuleRegistry.OdometerKmFormat;
 
         for (int c = 1; c <= colCount; c++)
         {
-            if (!OdometerHeaders.Contains(SquashHeaderText(colHeaders[c]))) continue;
-            try { worksheet.Cells[excelRow, startCol + c - 1].NumberFormat = fmt; } catch { }
+            string squashed = SquashHeaderText(colHeaders[c]);
+            if (!OdometerHeaders.Contains(squashed)) continue;
+            bool isDiff = squashed == "odometerdifference";
+            string fmt = isHours
+                ? (isDiff ? RuleRegistry.OdometerDiffHoursFormat : RuleRegistry.OdometerHoursFormat)
+                : (isDiff ? RuleRegistry.OdometerDiffKmFormat : RuleRegistry.OdometerKmFormat);
+            try
+            {
+                dynamic cell = worksheet.Cells[excelRow, startCol + c - 1];
+                string? curFmt = cell.NumberFormat?.ToString();
+                if (!string.Equals(curFmt, fmt, StringComparison.Ordinal))
+                {
+                    cell.NumberFormat = fmt;
+                }
+            }
+            catch { }
         }
     }
 
@@ -340,9 +354,9 @@ public static class RuleEvaluator
     /// Bulk in-memory table healing: reads headers, formulas, and body values in 3 COM calls total,
     /// evaluates all rules in RAM with O(1) dictionary lookups, and writes back ONLY modified cells.
     /// </summary>
-    public static List<string> EvaluateAndHealTable(dynamic worksheet, dynamic table, Func<DateOnly, TimeOnly?, bool>? warningDateFilter = null)
+    public static List<ValidationIssue> EvaluateAndHealTable(dynamic worksheet, dynamic table, Func<DateOnly, TimeOnly?, bool>? warningDateFilter = null)
     {
-        var allNotices = new List<string>();
+        var allNotices = new List<ValidationIssue>();
         if (_isEvaluating || worksheet == null || table == null) return allNotices;
 
         try
@@ -359,6 +373,7 @@ public static class RuleEvaluator
             if (rowCount <= 0 || colCount <= 0) return allNotices;
 
             string tableName = table.Name?.ToString() ?? string.Empty;
+            string sheetName = string.Empty; try { sheetName = worksheet!.Name?.ToString() ?? string.Empty; } catch { }
             dynamic wb = worksheet!.Parent;
 
             // 1. Bulk-read headers (1 COM call)
@@ -574,7 +589,7 @@ public static class RuleEvaluator
                                 rawObjects[targetRelCol] = lookedUp;
                                 if (isMismatch && emitNotices)
                                 {
-                                    allNotices.Add($"Row {excelRow} [{colHeaders[targetRelCol]}]: Auto-corrected '{currentTargetVal}' to '{lookedUp}' based on {colHeaders[c]} '{val}'.");
+                                    allNotices.Add(new ValidationIssue(ValidationSeverity.Warning, sheetName, tableName, excelRow, startCol + targetRelCol - 1, colHeaders[targetRelCol], $"Auto-corrected '{currentTargetVal}' to '{lookedUp}' based on {colHeaders[c]} '{val}'."));
                                 }
                             }
                         }
@@ -598,7 +613,7 @@ public static class RuleEvaluator
                         rawObjects[c] = defaultVal;
                         rowValues[c] = FormatDisplayValue(defaultVal, rule);
                         if (emitNotices)
-                            allNotices.Add($"Row {excelRow} [{colHeaders[c]}]: Defaulted to '{rowValues[c]}'.");
+                            allNotices.Add(new ValidationIssue(ValidationSeverity.Warning, sheetName, tableName, excelRow, startCol + c - 1, colHeaders[c], $"Defaulted to '{rowValues[c]}'."));
                     }
                 }
 
@@ -642,7 +657,7 @@ public static class RuleEvaluator
                         rawObjects[c] = enforcedValue;
                         if (emitNotices && !string.IsNullOrWhiteSpace(guardReason))
                         {
-                            allNotices.Add($"Row {excelRow} [{colHeaders[c]}]: {guardReason}");
+                            allNotices.Add(new ValidationIssue(ValidationSeverity.Warning, sheetName, tableName, excelRow, startCol + c - 1, colHeaders[c], guardReason));
                         }
                     }
                 }

@@ -163,11 +163,15 @@ public sealed class ColumnStateGuardAttribute : Attribute
 
 /// <summary>
 /// Enforces that a date column must be strictly greater (later) than a referenced date column.
+/// Set <see cref="AllowEqual"/> = true to enforce <c>&gt;=</c> (on or after) instead of strictly <c>&gt;</c>.
 /// </summary>
 [AttributeUsage(AttributeTargets.Property, AllowMultiple = false, Inherited = true)]
 public sealed class ColumnDateGreaterThanAttribute : Attribute
 {
     public string ReferenceHeader { get; }
+
+    /// <summary>When true, the date may equal the reference date (on or after, <c>&gt;=</c>).</summary>
+    public bool AllowEqual { get; set; } = false;
 
     public ColumnDateGreaterThanAttribute(string referenceHeader)
     {

@@ -552,7 +552,7 @@ internal static class ServerSyncCommands
         dates.UnionWith(vehicle.InsuranceClaims.Select(c => c.ClaimDate));
         dates.UnionWith(scheduled.Keys);
 
-        foreach (var date in dates.Where(d => d.Year > 1900).OrderBy(d => d))
+        foreach (var date in dates.Where(d => d.Year > 1900).OrderByDescending(d => d))
         {
             var odos = vehicle.OdometerLogs.Where(o => o.Date == date).ToList();
             var claims = vehicle.InsuranceClaims.Where(c => c.ClaimDate == date).ToList();

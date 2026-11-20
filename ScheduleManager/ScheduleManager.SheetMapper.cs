@@ -161,16 +161,18 @@ internal static partial class SheetMapper
     // =========================================================================
     // 2. EXTRACTION & VALIDATION PIPELINE
     // =========================================================================
-    internal static (ScheduleRecord? Data, List<string> Errors, List<string> Warnings) ExtractScheduleRecordWithDiagnostics()
+    internal static (ScheduleRecord? Data, List<ValidationIssue> Errors, List<ValidationIssue> Warnings) ExtractScheduleRecordWithDiagnostics()
     {
         using var _ = LoadingOverlay.BeginScope("Schedule Manager — Validating Schedule", "Reading dispatch board and attendance tables...");
-        var errors = new List<string>();
-        var warnings = new List<string>();
+        var errors = new List<ValidationIssue>();
+        var warnings = new List<ValidationIssue>();
+        static ValidationIssue GeneralError(string message) =>
+            new(ValidationSeverity.Error, string.Empty, string.Empty, 0, 0, string.Empty, message);
         try
         {
             dynamic xlApp = ExcelDnaUtil.Application;
             dynamic? wb = xlApp.ActiveWorkbook;
-            if (wb == null) return (null, new List<string> { "No active workbook found." }, warnings);
+            if (wb == null) return (null, new List<ValidationIssue> { GeneralError("No active workbook found.") }, warnings);
             object wbObj = wb!;
 
             dynamic? board = SheetMapperHelper.ResolveSheetSafely(wbObj, ScheduleBoardMapper.SheetAliases, ScheduleBoardMapper.DefaultSheetName);
@@ -179,14 +181,19 @@ internal static partial class SheetMapper
             dynamic? prefSheet = SheetMapperHelper.ResolveSheetSafely(wbObj, PreferenceAliases, "Preference");
             if (board == null || attendanceSheet == null || entriesSheet == null || prefSheet == null)
             {
-                errors.Add("  The workbook is missing one of: 'Daily Schedule', 'Daily Attendances', 'Attendance Entries', 'Preference'.");
+                errors.Add(GeneralError("The workbook is missing one of: 'Daily Schedule', 'Daily Attendances', 'Attendance Entries', 'Preference'."));
                 return (null, errors, warnings);
             }
 
             DateOnly? date = ScheduleBoardMapper.ReadDate((object)board!);
             if (date == null)
             {
-                errors.Add($"  [Daily Schedule]: Date cell {ScheduleBoardMapper.DateCell} is empty or not a valid date.");
+                var (dateRow, dateCol) = ParseA1Address(ScheduleBoardMapper.DateCell, defaultRow: 2, defaultCol: 2);
+                string boardName = ScheduleBoardMapper.DefaultSheetName;
+                try { boardName = Convert.ToString(board!.Name) ?? boardName; } catch { }
+                errors.Add(new ValidationIssue(
+                    ValidationSeverity.Error, boardName, string.Empty, dateRow, dateCol, "Date",
+                    $"Date cell {ScheduleBoardMapper.DateCell} is empty or not a valid date."));
                 return (null, errors, warnings);
             }
 
@@ -209,7 +216,15 @@ internal static partial class SheetMapper
                 record.Teams = TableMapper.ExtractFromTable<TeamRecord>((object)prefSheet!, "TeamTable");
                 record.Skills = TableMapper.ExtractFromTable<ScheduleSkillRecord>((object)prefSheet!, "SkillsTable");
                 record.ProjectSkillRequirements = TableMapper.ExtractFromTable<ProjectSkillRequirement>((object)prefSheet!, "ProjectRequirementsTable");
-                record.AttendanceEntries = TableMapper.ExtractFromTable<AttendanceEntry>((object)entriesSheet!, EntriesTableName);
+                ClearTableFilter(entriesSheet, EntriesTableName);
+                try
+                {
+                    record.AttendanceEntries = TableMapper.ExtractFromTable<AttendanceEntry>((object)entriesSheet!, EntriesTableName);
+                }
+                finally
+                {
+                    ApplyDateFilter(entriesSheet, EntriesTableName, date.Value);
+                }
                 var existing = TableMapper.ExtractFromTable<DailyWorkerAttendance>((object)attendanceSheet!, MasterTableName);
                 foreach (var e in existing) e.DailyScheduleDate = date.Value;
                 record.WorkerAttendance = existing;
@@ -251,7 +266,13 @@ internal static partial class SheetMapper
             warnings.AddRange(ruleWarnings);
 
             LoadingOverlay.Report("Validating schedule & worker availability...");
-            ValidateSchedule(record, errors, warnings);
+            var scheduleErrors = new List<string>();
+            var scheduleWarnings = new List<string>();
+            ValidateSchedule(record, scheduleErrors, scheduleWarnings);
+            string boardSheetName = ScheduleBoardMapper.DefaultSheetName;
+            try { boardSheetName = Convert.ToString(board!.Name) ?? boardSheetName; } catch { }
+            errors.AddRange(scheduleErrors.Select(m => ValidationIssue.FromLegacyMessage(ValidationSeverity.Error, m, boardSheetName)));
+            warnings.AddRange(scheduleWarnings.Select(m => ValidationIssue.FromLegacyMessage(ValidationSeverity.Warning, m, boardSheetName)));
 
             // ---- roll punches + board up into the daily attendance rows that get persisted ----
             LoadingOverlay.Report("Rolling up daily worker attendance...");
@@ -264,8 +285,24 @@ internal static partial class SheetMapper
         catch (Exception ex)
         {
             AppLogger.Error("[ScheduleManager] Failed extracting schedule record", ex);
-            return (null, new List<string> { $"Failed extracting schedule: {ex.Message}" }, warnings);
+            return (null, new List<ValidationIssue> { GeneralError($"Failed extracting schedule: {ex.Message}") }, warnings);
         }
+    }
+
+    /// <summary>Parses an A1-style address (e.g. "A2") into 1-based row / column; falls back to the defaults.</summary>
+    private static (int Row, int Col) ParseA1Address(string? address, int defaultRow, int defaultCol)
+    {
+        if (string.IsNullOrWhiteSpace(address)) return (defaultRow, defaultCol);
+        string a = address.Replace("$", string.Empty).Trim().ToUpperInvariant();
+        int i = 0, col = 0;
+        while (i < a.Length && a[i] >= 'A' && a[i] <= 'Z')
+        {
+            col = col * 26 + (a[i] - 'A' + 1);
+            i++;
+        }
+        return col > 0 && i < a.Length && int.TryParse(a.Substring(i), NumberStyles.Integer, CultureInfo.InvariantCulture, out int row) && row > 0
+            ? (row, col)
+            : (defaultRow, defaultCol);
     }
 
     private static void ValidateSchedule(ScheduleRecord record, List<string> errors, List<string> warnings)
@@ -285,6 +322,9 @@ internal static partial class SheetMapper
                 warnings.Add($"  [Daily Schedule - {label}]: workers are assigned but no project code is set.");
             if (slot.ProjectID.Length > 0 && Roster.FindProject(slot.ProjectID) == null)
                 warnings.Add($"  [Daily Schedule - {label}]: project '{slot.ProjectID}' was not found in project master.");
+
+            if (slot.PremixHoles > 0 && !Roster.SupportsPremixHoles(slot.ProjectID))
+                errors.Add($"  [Daily Schedule - {label}]: Premix Holes is only allowed for Road Reinstatement projects.");
 
             // Resolution is against ALL attendance staff (a worker who resigned after this date, or who is already on a
             // historical row, resolves cleanly). Office / Admin staff resolve but cannot be scheduled; only field
@@ -727,7 +767,7 @@ internal static partial class SheetMapper
                 if (adminAutoEntries.Count > 0) record.AttendanceEntries.AddRange(adminAutoEntries);
 
                 var entries = record.AttendanceEntries
-                    .OrderBy(e => e.Date).ThenBy(e => e.Time).ToList();
+                    .OrderByDescending(e => e.Date).ThenByDescending(e => e.Time).ToList();
                 var dayEntries = entries
                     .Where(e => DeviceSyncManager.IsInWorkingDay(e.Date, e.Time, date, BoardContext.DayStartTime, BoardContext.NextDayStartTime)).ToList();
                 foreach (var e in entries) e.StaffName = Roster.NameOf(e.StaffID, e.StaffName);
@@ -1097,7 +1137,7 @@ internal static partial class SheetMapper
                     if (adminAutoEntries.Count > 0)
                     {
                         entries.AddRange(adminAutoEntries);
-                        entries = entries.OrderBy(e => e.Date).ThenBy(e => e.Time).ToList();
+                        entries = entries.OrderByDescending(e => e.Date).ThenByDescending(e => e.Time).ToList();
                         foreach (var e in entries) e.StaffName = Roster.NameOf(e.StaffID, e.StaffName);
                         ClearTableFilter(entriesSheet, EntriesTableName);
                         TableMapper.PopulateTableSafe<AttendanceEntry>((object)entriesSheet!, EntriesTableName, entries);
@@ -1181,6 +1221,18 @@ internal static partial class SheetMapper
                         try { RunFrozen(() => ScheduleBoardMapper.ClearLeadCell(boardObj, clearRow, clearCol)); }
                         catch (Exception ex) { AppLogger.Warn($"[ScheduleManager] clearing linked cell failed: {ex.Message}"); }
                         RefreshDerived(reloadContext: false, rollup: true);
+                    });
+                    return;
+                }
+
+                if ((int)target.Cells.Count == 1 && ScheduleBoardMapper.IsPremixCell((object)sheet, row, col))
+                {
+                    object premixObj = sheet; int premixRow = row, premixCol = col;
+                    ExcelAsyncUtil.QueueAsMacro(() =>
+                    {
+                        string? notice = ScheduleBoardMapper.GetRejectedPremixNotice(premixObj, premixRow, premixCol);
+                        RefreshDerived(reloadContext: false, rollup: true);
+                        if (notice != null) SheetOperations.ShowStatusConfirmation(notice);
                     });
                     return;
                 }
@@ -1519,7 +1571,7 @@ internal static partial class SheetMapper
             unknown += result.UnknownStaff;
             if (added == 0 && removedExistingDuplicates == 0) { ApplyDateFilter(entriesSheet, EntriesTableName, day); return; }
 
-            var all = clean.Concat(result.NewEntries).OrderBy(e => e.Date).ThenBy(e => e.Time).ToList();
+            var all = clean.Concat(result.NewEntries).OrderByDescending(e => e.Date).ThenByDescending(e => e.Time).ToList();
             ServerSyncCommands.SyncLookupLists(day);
             foreach (var e in all) e.StaffName = Roster.NameOf(e.StaffID, e.StaffName);
             ClearTableFilter(entriesSheet, EntriesTableName);
@@ -1583,7 +1635,7 @@ internal static partial class SheetMapper
                 return;
             }
 
-            var all = clean.Concat(toAdd).OrderBy(e => e.Date).ThenBy(e => e.Time).ToList();
+            var all = clean.Concat(toAdd).OrderByDescending(e => e.Date).ThenByDescending(e => e.Time).ToList();
             ServerSyncCommands.SyncLookupLists(selectedDate);
             foreach (var e in all) e.StaffName = Roster.NameOf(e.StaffID, e.StaffName);
             ClearTableFilter(entriesSheet, EntriesTableName);

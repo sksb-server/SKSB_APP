@@ -23,6 +23,18 @@ public static partial class RuleRegistry
     /// <summary>Machinery: engine hours with one decimal.</summary>
     public const string OdometerHoursFormat = "#,##0.0 \"hrs\";-#,##0.0 \"hrs\";0.0 \"hrs\";@";
 
+    /// <summary>Full-tank cap for road-vehicle Odometer Difference (km); values at/above cap show "1,000+ km".</summary>
+    public const decimal OdometerDiffKmCap = 1000m;
+
+    /// <summary>Full-tank cap for machinery Odometer Difference (hrs); values at/above cap show "50+ hrs".</summary>
+    public const decimal OdometerDiffHoursCap = 50m;
+
+    /// <summary>Road-vehicle Odometer Difference: values >= 1,000 display as "1,000+ km".</summary>
+    public const string OdometerDiffKmFormat = "[>=1000]\"1,000+ km\";[<=0]0 \"km\";#,##0 \"km\";@";
+
+    /// <summary>Machinery Odometer Difference: values >= 50 display as "50+ hrs".</summary>
+    public const string OdometerDiffHoursFormat = "[>=50]\"50+ hrs\";[<=0]0.0 \"hrs\";#,##0.0 \"hrs\";@";
+
     // =========================================================================
     // 1. FORMAT RESOLUTION
     // =========================================================================

@@ -3,6 +3,7 @@ namespace SKSB_App.Core.WorkbookOpen.Sheet;
 using System;
 using ExcelDna.Integration;
 using SKSB_App.Core.Diagnostics;
+using SKSB_App.Core.WorkbookOpen.Sync;
 using SKSB_App.Core.WorkbookSave.Entry;
 
 public static class SheetOperations
@@ -113,9 +114,9 @@ public static class SheetOperations
         catch { }
     }
 
-    public static void SetAuxiliarySheetsVisibility(bool visible)
+    public static void SetAuxiliarySheetsVisibility(bool visible, bool synchronous = false)
     {
-        ExcelAsyncUtil.QueueAsMacro(() =>
+        void Execute()
         {
             using var _ = AppLogger.Scope($"SetAuxiliarySheetsVisibility(visible={visible})");
             dynamic xlApp = ExcelDnaUtil.Application;
@@ -146,7 +147,10 @@ public static class SheetOperations
                 try { xlApp.EnableEvents = origEvents; } catch { }
                 try { xlApp.ScreenUpdating = origUpdating; } catch { }
             }
-        });
+        }
+
+        if (synchronous || SyncHelper.IsSynchronousScope) Execute();
+        else ExcelAsyncUtil.QueueAsMacro(Execute);
     }
 
     private static void SetSingleSheetVisibility(string sheetName, bool visible)

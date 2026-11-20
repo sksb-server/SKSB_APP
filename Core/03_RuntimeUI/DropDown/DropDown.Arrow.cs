@@ -1,4 +1,4 @@
-﻿namespace SKSB_App.Core.RuntimeUI.DropDown;
+namespace SKSB_App.Core.RuntimeUI.DropDown;
 
 using System;
 using System.Collections.Generic;
@@ -12,6 +12,8 @@ using SKSB_App.Core.Bootstrap.Environment;
 using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.RuntimeUI.RuleEngine;
 using SKSB_App.Core.RuntimeUI.TableRowManager;
+using SKSB_App.Core.RuntimeUI.Undo;
+using SKSB_App.Core.WorkbookSave.Validation;
 
 public static class Arrow
 {
@@ -482,6 +484,7 @@ public static class Arrow
 
                     ExcelAsyncUtil.QueueAsMacro(() =>
                     {
+                        UndoManager.CaptureCellSnapshot(sheet, singleCell);
                         bool origEvents = true;
                         try { origEvents = (bool)xlApp.EnableEvents; xlApp.EnableEvents = false; } catch { }
                         try { custom.Commit(singleCell, targetItem); }
@@ -491,8 +494,13 @@ public static class Arrow
                         }
 
                         ParameterCells.NotifyChanged(sheet, singleCell);
+                        UndoManager.CommitEdit(sheet, singleCell, $"Dropdown {singleCell.Address?.ToString() ?? ""}");
 
-                        if (table != null) TableRowManager.HandleSheetChange(singleCell);
+                        if (table != null)
+                        {
+                            TableRowManager.HandleSheetChange(singleCell);
+                            StackedEntryGuard.OnSheetChanged(sheet, singleCell);
+                        }
                     });
                 };
             }
@@ -524,6 +532,7 @@ public static class Arrow
 
                     ExcelAsyncUtil.QueueAsMacro(() =>
                     {
+                        UndoManager.CaptureCellSnapshot(sheet, singleCell);
                         bool origEvents = true;
                         try { origEvents = (bool)xlApp.EnableEvents; xlApp.EnableEvents = false; } catch { }
                         try
@@ -543,13 +552,21 @@ public static class Arrow
 
                         // Events were suppressed for the write: let module observers (rollups etc.) know.
                         ParameterCells.NotifyChanged(sheet, singleCell);
+                        UndoManager.CommitEdit(sheet, singleCell, $"Dropdown {singleCell.Address?.ToString() ?? ""}");
 
                         if (table != null)
                         {
                             if (rule.IsMultiSelect)
-                                _pendingMultiSelectRowCheck = () => ExcelAsyncUtil.QueueAsMacro(() => TableRowManager.HandleSheetChange(singleCell));
+                                _pendingMultiSelectRowCheck = () => ExcelAsyncUtil.QueueAsMacro(() =>
+                                {
+                                    TableRowManager.HandleSheetChange(singleCell);
+                                    StackedEntryGuard.OnSheetChanged(sheet, singleCell);
+                                });
                             else
+                            {
                                 TableRowManager.HandleSheetChange(singleCell);
+                                StackedEntryGuard.OnSheetChanged(sheet, singleCell);
+                            }
                         }
                     });
                 };
@@ -577,6 +594,7 @@ public static class Arrow
 
                     ExcelAsyncUtil.QueueAsMacro(() =>
                     {
+                        UndoManager.CaptureCellSnapshot(sheet, singleCell);
                         bool origEvents = true;
                         try { origEvents = (bool)xlApp.EnableEvents; xlApp.EnableEvents = false; } catch { }
                         try
@@ -594,8 +612,13 @@ public static class Arrow
                         }
 
                         ParameterCells.NotifyChanged(sheet, singleCell);
+                        UndoManager.CommitEdit(sheet, singleCell, $"Dropdown {singleCell.Address?.ToString() ?? ""}");
 
-                        if (table != null) TableRowManager.HandleSheetChange(singleCell);
+                        if (table != null)
+                        {
+                            TableRowManager.HandleSheetChange(singleCell);
+                            StackedEntryGuard.OnSheetChanged(sheet, singleCell);
+                        }
                     });
                 };
             }

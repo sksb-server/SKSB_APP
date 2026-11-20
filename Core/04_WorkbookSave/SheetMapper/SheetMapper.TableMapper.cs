@@ -5,6 +5,7 @@ using SKSB_App.Core.RuntimeUI.Progress;
 using SKSB_App.Core.RuntimeUI.RuleEngine;
 using SKSB_App.Core.RuntimeUI.TableRowManager;
 using SKSB_App.Core.Types.Attributes;
+using SKSB_App.Core.WorkbookSave.Validation;
 using System;
 using System.Collections;
 using System.Collections.Generic;
@@ -226,6 +227,7 @@ public static class TableMapper
                         }
                     }
                 }
+                StackedEntryGuard.CaptureTableSnapshot(worksheet, table);
                 return;
             }
 
@@ -354,7 +356,8 @@ public static class TableMapper
                 // 4. Unit display overrides (applied after the archetype format so they win)
                 if (isOdometerColumn)
                 {
-                    ApplyOdometerUnitFormats(worksheet, records, headerRow, binding.ColumnIndex);
+                    bool isDiff = binding.Property.Name.Equals("OdometerDifference", StringComparison.OrdinalIgnoreCase);
+                    ApplyOdometerUnitFormats(worksheet, records, headerRow, binding.ColumnIndex, isDiff);
                 }
             }
 
@@ -363,6 +366,7 @@ public static class TableMapper
             int finalPhysicalRows = finalBody != null ? (int)finalBody.Rows.Count : 0;
             string finalRangeAddr = table.Range?.Address?.ToString() ?? "N/A";
             AppLogger.Info($"[{tName}] Physical verify after write: DataRows={finalPhysicalRows}, Range={finalRangeAddr}");
+            StackedEntryGuard.CaptureTableSnapshot(worksheet, table);
         }
         catch (Exception ex)
         {
@@ -395,10 +399,10 @@ public static class TableMapper
     /// Formats an odometer column as "hrs" (machinery) or "km" (road vehicles). Consecutive rows sharing a unit are
     /// formatted as one contiguous range, so the COM call count scales with unit changes, not with row count.
     /// </summary>
-    private static void ApplyOdometerUnitFormats<T>(dynamic worksheet, IList<T> records, int headerRow, int column)
+    private static void ApplyOdometerUnitFormats<T>(dynamic worksheet, IList<T> records, int headerRow, int column, bool isDiff = false)
     {
-        const string hoursFmt = RuleRegistry.OdometerHoursFormat;
-        const string kmFmt = RuleRegistry.OdometerKmFormat;
+        string hoursFmt = isDiff ? RuleRegistry.OdometerDiffHoursFormat : RuleRegistry.OdometerHoursFormat;
+        string kmFmt = isDiff ? RuleRegistry.OdometerDiffKmFormat : RuleRegistry.OdometerKmFormat;
 
         int runStart = 0;
         while (runStart < records.Count)

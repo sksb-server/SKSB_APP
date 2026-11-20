@@ -17,7 +17,7 @@ public class SummaryDialog : Form
 {
     public ValidationDialogAction Action { get; private set; } = ValidationDialogAction.Cancel;
 
-    public SummaryDialog(string moduleName, List<string> errors, List<string> warnings)
+    public SummaryDialog(string moduleName, List<string> errors, List<string> warnings, bool allowDebugQuit = false)
     {
         SuspendLayout();
         Text = $"{moduleName} - Data Integrity Check";
@@ -184,24 +184,27 @@ public class SummaryDialog : Form
         }
 
 #if DEBUG
-        var btnDebugQuit = new Button
+        if (allowDebugQuit)
         {
-            Text = "Debug: Quit Anyway (No Save)",
-            Font = new Font("Segoe UI", 9f, FontStyle.Italic),
-            ForeColor = Color.FromArgb(185, 28, 28),
-            BackColor = Color.FromArgb(254, 242, 242),
-            FlatStyle = FlatStyle.Flat,
-            AutoSize = true,
-            Padding = new Padding(12, 6, 12, 6),
-            Margin = new Padding(8, 0, 0, 0)
-        };
-        btnDebugQuit.FlatAppearance.BorderColor = Color.FromArgb(252, 165, 165);
-        btnDebugQuit.Click += (_, _) =>
-        {
-            Action = ValidationDialogAction.DebugQuitAnyway;
-            Close();
-        };
-        flowActions.Controls.Add(btnDebugQuit);
+            var btnDebugQuit = new Button
+            {
+                Text = "Debug: Quit Anyway (No Save)",
+                Font = new Font("Segoe UI", 9f, FontStyle.Italic),
+                ForeColor = Color.FromArgb(185, 28, 28),
+                BackColor = Color.FromArgb(254, 242, 242),
+                FlatStyle = FlatStyle.Flat,
+                AutoSize = true,
+                Padding = new Padding(12, 6, 12, 6),
+                Margin = new Padding(8, 0, 0, 0)
+            };
+            btnDebugQuit.FlatAppearance.BorderColor = Color.FromArgb(252, 165, 165);
+            btnDebugQuit.Click += (_, _) =>
+            {
+                Action = ValidationDialogAction.DebugQuitAnyway;
+                Close();
+            };
+            flowActions.Controls.Add(btnDebugQuit);
+        }
 #endif
 
         pnlContent.Controls.Add(lblTitle);

@@ -7,13 +7,21 @@ using SKSB_App.Core.ThumbprintSync;
 using SKSB_App.Core.Types;
 
 /// <summary>Start / end of one project's activity on the board header; <see cref="End"/> is null while someone is still checked in.</summary>
-internal readonly record struct ProjectWindow(TimeOnly? Start, TimeOnly? End);
+internal sealed record ProjectWindow(
+    TimeOnly? Start,
+    TimeOnly? End,
+    IReadOnlyList<string> StartWorkers,
+    IReadOnlyList<WindowContributor> EndContributors,
+    IReadOnlyList<string> OpenWorkers);
+
+/// <summary>A worker whose punch ended a span that set the window's end (check-out, or check-in to another project).</summary>
+internal readonly record struct WindowContributor(string WorkerName, AttendanceEntryType? OutEntryType = null, string? OutProject = null);
 
 /// <summary>
 /// One worker's span on one project, used for the "Check in and out Time" cell. <see cref="InOffset"/> /
 /// <see cref="OutOffset"/> are exact offsets from the working-day start (they may exceed 24 h on long working days).
 /// </summary>
-internal readonly record struct WorkerProjectSpan(TimeOnly In, TimeOnly? Out, TimeSpan InOffset, TimeSpan? OutOffset);
+internal readonly record struct WorkerProjectSpan(TimeOnly In, TimeOnly? Out, TimeSpan InOffset, TimeSpan? OutOffset, AttendanceEntryType? OutEntryType = null, string? OutProject = null);
 
 /// <summary>
 /// Rolls approved <see cref="AttendanceEntry"/> punches and the dispatch board up into one
@@ -122,7 +130,9 @@ internal static class AttendanceRollupService
                 TimeSpan? outOffset = hasNext ? ShiftOffset(timeline[i + 1].Date, timeline[i + 1].Time, date, dayStartTime) : null;
                 var key = (worker.Key, project);
                 if (!result.TryGetValue(key, out var spans)) result[key] = spans = new List<WorkerProjectSpan>();
-                spans.Add(new WorkerProjectSpan(timeline[i].Time, end, inOffset, outOffset));
+                AttendanceEntryType? outType = hasNext ? timeline[i + 1].EntryType : null;
+                string? outProject = hasNext && timeline[i + 1].EntryType == AttendanceEntryType.CheckIn ? EntryProject(timeline[i + 1]) : null;
+                spans.Add(new WorkerProjectSpan(timeline[i].Time, end, inOffset, outOffset, outType, outProject));
             }
         }
         return result;
@@ -137,15 +147,34 @@ internal static class AttendanceRollupService
         Dictionary<(long StaffId, string ProjectId), List<WorkerProjectSpan>> spans)
     {
         var mine = spans.Where(kv => kv.Key.ProjectId.Equals(projectId, StringComparison.OrdinalIgnoreCase))
-                        .SelectMany(kv => kv.Value).ToList();
-        if (mine.Count == 0) return new ProjectWindow(null, null);
+                        .SelectMany(kv => kv.Value.Select(sp => (kv.Key.StaffId, Span: sp))).ToList();
+        if (mine.Count == 0)
+            return new ProjectWindow(null, null, Array.Empty<string>(), Array.Empty<WindowContributor>(), Array.Empty<string>());
+
+        string NameFor(long id) => Roster.NameOf(id, $"#{id}");
 
         // Ordered by exact offset from the working-day start so a midnight-crossing window reads e.g. 21:00 - 03:00.
-        TimeOnly start = mine.OrderBy(s => s.InOffset).First().In;
-        TimeOnly? end = mine.Any(s => s.Out == null || s.OutOffset == null)
-            ? null
-            : mine.OrderBy(s => s.OutOffset!.Value).Last().Out;
-        return new ProjectWindow(start, end);
+        TimeSpan minIn = mine.Min(x => x.Span.InOffset);
+        TimeOnly start = mine.First(x => x.Span.InOffset == minIn).Span.In;
+        var startWorkers = mine.Where(x => x.Span.InOffset == minIn)
+            .Select(x => NameFor(x.StaffId)).Distinct(StringComparer.OrdinalIgnoreCase)
+            .OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList();
+
+        if (mine.Any(x => x.Span.Out == null || x.Span.OutOffset == null))
+        {
+            var openWorkers = mine.Where(x => x.Span.Out == null || x.Span.OutOffset == null)
+                .Select(x => NameFor(x.StaffId)).Distinct(StringComparer.OrdinalIgnoreCase)
+                .OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList();
+            return new ProjectWindow(start, null, startWorkers, Array.Empty<WindowContributor>(), openWorkers);
+        }
+
+        TimeSpan maxOut = mine.Max(x => x.Span.OutOffset!.Value);
+        TimeOnly end = mine.First(x => x.Span.OutOffset!.Value == maxOut).Span.Out!.Value;
+        var endContributors = mine.Where(x => x.Span.OutOffset!.Value == maxOut)
+            .Select(x => new WindowContributor(NameFor(x.StaffId), x.Span.OutEntryType, x.Span.OutProject))
+            .Distinct()
+            .OrderBy(c => c.WorkerName, StringComparer.OrdinalIgnoreCase).ToList();
+        return new ProjectWindow(start, end, startWorkers, endContributors, Array.Empty<string>());
     }
 
     // =========================================================================
@@ -284,8 +313,10 @@ internal static class AttendanceRollupService
                 ? OvertimeHours(inOffset, outOffset, otStartTime, dayStartTime)
                 : 0m;
             decimal additionalShifts = Math.Max(0, projectsDone.Count - 2) * 0.5m;
-            // +1.0 OT hour per premix hole, no thresholds - but only for a worker who actually clocked in.
-            decimal additionalOt = present ? mySlots.Sum(s => Math.Max(0, s.PremixHoles)) * 1.0m : 0m;
+            // +1.0 OT hour per premix hole on Road_Reinstatement projects, no thresholds - but only for a worker who actually clocked in.
+            decimal additionalOt = present
+                ? mySlots.Where(s => Roster.SupportsPremixHoles(s.ProjectID)).Sum(s => Math.Max(0, s.PremixHoles)) * 1.0m
+                : 0m;
 
             AttendanceStatus status =
                 !present ? AttendanceStatus.Absence

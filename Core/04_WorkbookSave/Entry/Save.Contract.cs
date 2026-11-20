@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using ExcelDna.Integration;
 using SKSB_App.Core.Integration.Database;
 using SKSB_App.Core.WorkbookSave.Storage;
+using SKSB_App.Core.WorkbookSave.Validation;
 
 /// <summary>
 /// Non-generic view of a <see cref="SaveContract{T}"/>. Lets COM-facing classes (Ribbon controllers)
@@ -21,6 +22,9 @@ public interface ISaveContract
 
     /// <summary>Runs the full validate + persist pipeline (<see cref="SaveEntry.Save{T}"/>).</summary>
     void Save();
+
+    /// <summary>Runs extraction + validation only and shows the results in the Validation Task Pane (<see cref="SaveEntry.Validate{T}"/>).</summary>
+    void Validate();
 
     /// <summary>
     /// Fetches the dataset and returns whether it is empty, plus an action that populates the worksheet
@@ -54,7 +58,7 @@ public class SaveContract<T> : ISaveContract
     // =========================================================================
     // 2. SAVE / LOAD PIPELINE DELEGATES
     // =========================================================================
-    public Func<(T? Data, List<string> Errors, List<string> Warnings)> ExtractAndValidate { get; set; } = null!;
+    public Func<(T? Data, List<ValidationIssue> Errors, List<ValidationIssue> Warnings)> ExtractAndValidate { get; set; } = null!;
     public Predicate<T?> IsDatasetEmpty { get; set; } = data => data == null;
 
     /// <summary>
@@ -100,6 +104,8 @@ public class SaveContract<T> : ISaveContract
     // 3. NON-GENERIC COMMAND SURFACE (ISaveContract)
     // =========================================================================
     void ISaveContract.Save() => SaveEntry.Save(this);
+
+    void ISaveContract.Validate() => SaveEntry.Validate(this);
 
     public bool HasPendingUpload => OfflineSnapshot.HasPendingSnapshot<T>();
 

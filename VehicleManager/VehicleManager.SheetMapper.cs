@@ -2,8 +2,10 @@
 
 using SKSB_App.Core.Types;
 using SKSB_App.Core.WorkbookSave.SheetMapper;
+using SKSB_App.Core.WorkbookSave.Validation;
 using System;
 using System.Collections.Generic;
+using System.Linq;
 
 internal static partial class SheetMapper
 {
@@ -36,11 +38,17 @@ internal static partial class SheetMapper
 
         Children = new List<IChildTableBinding<VehicleRecord, string>>
         {
-            Child<Maintenance>(MaintenanceAliases, "Maintenances", "MaintenancesTable", v => v.Maintenances, m => m.VehiclePlate, (m, plate) => m.VehiclePlate = plate),
-            Child<RoadTax>(RoadTaxAliases, "Road Taxes", "RoadTaxesTable", v => v.RoadTaxes, r => r.VehiclePlate, (r, plate) => r.VehiclePlate = plate),
-            Child<Inspection>(InspectionAliases, "Inspections", "InspectionsTable", v => v.Inspections, i => i.VehiclePlate, (i, plate) => i.VehiclePlate = plate),
-            Child<VehiclePermit>(PermitAliases, "Permits", "PermitsTable", v => v.Permits, p => p.VehiclePlate, (p, plate) => p.VehiclePlate = plate),
-            Child<VehicleInsurance>(InsuranceAliases, "Insurances", "InsurancesTable", v => v.Insurances, i => i.VehiclePlate, (i, plate) => i.VehiclePlate = plate),
+            // Date-based child tables are populated newest-date-on-top (not grouped by master plate order).
+            Child<Maintenance>(MaintenanceAliases, "Maintenances", "MaintenancesTable", v => v.Maintenances, m => m.VehiclePlate, (m, plate) => m.VehiclePlate = plate,
+                list => list.OrderByDescending(m => m.DateIn).ThenByDescending(m => m.MaintenanceID).ToList()),
+            Child<RoadTax>(RoadTaxAliases, "Road Taxes", "RoadTaxesTable", v => v.RoadTaxes, r => r.VehiclePlate, (r, plate) => r.VehiclePlate = plate,
+                list => list.OrderByDescending(r => r.RenewDate).ThenByDescending(r => r.RoadTaxID).ToList()),
+            Child<Inspection>(InspectionAliases, "Inspections", "InspectionsTable", v => v.Inspections, i => i.VehiclePlate, (i, plate) => i.VehiclePlate = plate,
+                list => list.OrderByDescending(i => i.ScheduleDateIn).ThenByDescending(i => i.InspectionID).ToList()),
+            Child<VehiclePermit>(PermitAliases, "Permits", "PermitsTable", v => v.Permits, p => p.VehiclePlate, (p, plate) => p.VehiclePlate = plate,
+                list => list.OrderByDescending(p => p.RenewDate).ThenByDescending(p => p.PermitID).ToList()),
+            Child<VehicleInsurance>(InsuranceAliases, "Insurances", "InsurancesTable", v => v.Insurances, i => i.VehiclePlate, (i, plate) => i.VehiclePlate = plate,
+                list => list.OrderByDescending(i => i.RenewDate).ThenByDescending(i => i.InsuranceID).ToList()),
             new ChildTableBinding<VehicleRecord, InsuranceClaim, string>
             {
                 SheetAliases = InsuranceClaimAliases,
@@ -54,9 +62,11 @@ internal static partial class SheetMapper
                 },
                 ChildPrimaryKeySelector = c => c.ClaimID,
                 ChildPrimaryKeyLabel = "Claim ID",
-                ValidateForeignKeyExists = true
+                ValidateForeignKeyExists = true,
+                OrderChildRecords = list => list.OrderByDescending(c => c.ClaimDate).ThenByDescending(c => c.ClaimID).ToList()
             },
-            Child<OdometerLog>(OdometerAliases, "Odometers", "OdometersTable", v => v.OdometerLogs, o => o.VehiclePlate, (o, plate) => o.VehiclePlate = plate)
+            Child<OdometerLog>(OdometerAliases, "Odometers", "OdometersTable", v => v.OdometerLogs, o => o.VehiclePlate, (o, plate) => o.VehiclePlate = plate,
+                list => list.OrderByDescending(o => o.Date).ThenByDescending(o => o.Time ?? string.Empty).ThenByDescending(o => o.OdometerID).ToList())
         },
 
         // Fuel companies still referenced by a fuel card are restored onto the sheet before rule validation runs.
@@ -114,10 +124,12 @@ internal static partial class SheetMapper
         string tableName,
         Func<VehicleRecord, IList<TChild>> collection,
         Func<TChild, string> plateSelector,
-        Action<TChild, string> plateSetter) where TChild : new()
+        Action<TChild, string> plateSetter,
+        Func<List<TChild>, List<TChild>>? orderRecords = null) where TChild : new()
     {
         return new ChildTableBinding<VehicleRecord, TChild, string>
         {
+            OrderChildRecords = orderRecords,
             SheetAliases = aliases,
             DefaultSheetName = defaultSheetName,
             TableName = tableName,
@@ -134,7 +146,7 @@ internal static partial class SheetMapper
     // =========================================================================
     // 2. MASTER EXTRACTION & POPULATE PIPELINES
     // =========================================================================
-    internal static (List<VehicleRecord>? Data, List<string> Errors, List<string> Warnings) ExtractVehicleRecordsWithDiagnostics()
+    internal static (List<VehicleRecord>? Data, List<ValidationIssue> Errors, List<ValidationIssue> Warnings) ExtractVehicleRecordsWithDiagnostics()
         => WorkbookMapper.ExtractMasterAndChildrenWithDiagnostics(Mapping);
 
     internal static void PopulateWorksheet(List<VehicleRecord> records)

@@ -295,7 +295,7 @@ public static class ServerSyncCommands
             {
                 var db = new PostgreSqlService();
                 var att = db.Query<dynamic>(
-                    "SELECT schedule_date, attendance_status, clock_in_time, clock_out_time, COALESCE(project_check_ins, '') AS project_check_ins, projects_done, regular_shift, additional_shifts, ot_hours, additional_ot_hours, total_flattened_hours FROM daily_attendances WHERE staff_id = @StaffId ORDER BY schedule_date ASC;",
+                    "SELECT schedule_date, attendance_status, clock_in_time, clock_out_time, COALESCE(project_check_ins, '') AS project_check_ins, projects_done, regular_shift, additional_shifts, ot_hours, additional_ot_hours, total_flattened_hours FROM daily_attendances WHERE staff_id = @StaffId ORDER BY schedule_date DESC;",
                     new { StaffId = staff.StaffID }).ToList();
 
                 var vehicles = new Dictionary<DateOnly, List<string>>();
@@ -362,6 +362,6 @@ public static class ServerSyncCommands
                 FlattenHours = w.TotalFlattenedHours
             });
         }
-        return rows.OrderBy(r => r.Date).ToList();
+        return rows.OrderByDescending(r => r.Date).ToList();
     }
 }

@@ -111,6 +111,7 @@ public record VehicleDetail
     [DataList("VehicleTypeList")]
     [ExcelColumn("Vehicle Type")]
     [ColumnRule("VehicleTypeList", IsRequired = true)]
+    [ColumnDefault(DefaultKind.Literal, literalValue: "Lorry")]
     public VehicleType Type { get; set; } = VehicleType.Lorry;
 
     [ExcelColumn("Brand")]
@@ -130,6 +131,7 @@ public record VehicleDetail
     public decimal? BoughtPrice { get; set; }
 
     [ExcelColumn("Sold Date")]
+    [ColumnDateGreaterThan("Bought Date", AllowEqual = true)]
     public DateOnly? SoldDate { get; set; }
 
     [ExcelColumn("Sold Price")]
@@ -274,6 +276,7 @@ public record Maintenance : VehicleChildRecord
     public DateOnly EstimatedReturn { get; set; } = DateOnly.FromDateTime(DateTime.Today.AddDays(3));
 
     [ExcelColumn("Date Completed")]
+    [ColumnDateGreaterThan("Date In", AllowEqual = true)]
     public DateOnly? DateCompleted { get; set; }
 
     [ExcelColumn("Odometer In")]
@@ -627,7 +630,7 @@ public record OdometerLog : VehicleChildRecord
     [ColumnRule("ProjectIDList", IsRequired = false, IsWarningOnly = true)]
     public string Project { get; set; } = string.Empty;
 
-    [ColumnRollup("OdometersTable", RollupKind.PriorMax, "Current Odometer", ForeignKeyHeader = "Vehicle Plate", LocalKeyHeader = "Vehicle Plate", DateProperty = "Date", Mode = CalculationMode.DefaultOnly)]
+    [ColumnRollup("OdometersTable", RollupKind.PriorMax, "Current Odometer", ForeignKeyHeader = "Vehicle Plate", LocalKeyHeader = "Vehicle Plate", DateProperty = "Date", Mode = CalculationMode.Always)]
     [ExcelColumn("Odometer Before")]
     public decimal? OdometerBefore { get; set; }
 
@@ -636,12 +639,12 @@ public record OdometerLog : VehicleChildRecord
 
     [JsonIgnore]
     [ExcelColumn("Odometer Difference")]
-    [ColumnCalculate("IF([Current Odometer] > [Odometer Before], [Current Odometer] - [Odometer Before], 0)", DecimalPlaces = 1)]
+    [ColumnCalculate("IF([Current Odometer] > [Odometer Before], MIN([Current Odometer] - [Odometer Before], IF(IS_HOUR_METER([Vehicle Type]), 50, 1000)), 0)", DecimalPlaces = 1)]
     public decimal? OdometerDifference { get; set; }
 
     [ExcelColumn("Fuel Card Number")]
     [ColumnRule("FuelCardsTable[Fuel Card Number]", IsRequired = false, IsWarningOnly = true)]
-    [ColumnSync("Fuel Company", "FuelCardsTable[Fuel Card Number]", "FuelCardsTable[Fuel Company Name]")]
+    [ColumnSync("Fuel Company", "FuelCardsTable[Fuel Card Number]", "FuelCardsTable[Fuel Company Names]")]
     [ColumnSync("Card Owner", "FuelCardsTable[Fuel Card Number]", "FuelCardsTable[Card Owner Name]")]
     public string FuelCardNumber { get; set; } = string.Empty;
 
@@ -651,7 +654,7 @@ public record OdometerLog : VehicleChildRecord
     public string CardOwner { get; set; } = string.Empty;
 
     [ExcelColumn("Fuel Company")]
-    [ColumnRule("FuelCompanyNamesTable[Fuel Company Name]", IsRequired = false, IsWarningOnly = true)]
+    [ColumnRule("FuelCompanyNamesTable[Fuel Company Names]", IsRequired = false, IsWarningOnly = true)]
     public string FuelCompany { get; set; } = string.Empty;
 
     [ExcelColumn("Station Name")]
@@ -689,7 +692,7 @@ public record FuelCardRecord
     public string FuelCardNumber { get; set; } = string.Empty;
 
     [ExcelColumn("Fuel Company Names")]
-    [ColumnRule("FuelCompanyNamesTable[Fuel Company Name]", IsRequired = true)]
+    [ColumnRule("FuelCompanyNamesTable[Fuel Company Names]", IsRequired = true)]
     public string FuelCompanyName { get; set; } = string.Empty;
 
     [ExcelColumn("Card Owner ID", isRequired: true)]

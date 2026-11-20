@@ -63,7 +63,7 @@ internal static class ScheduleBoardMapper
     private static readonly Regex HeaderCode = new(@"^\s*(\S+)", RegexOptions.Compiled);
     private static readonly Regex LeadingInt = new(@"^\s*(\d+)", RegexOptions.Compiled);
 
-    /// <summary>Premix header cell keeps a numeric value when &gt; 0 ("1 Hole", "5 Holes"); when 0 it displays the project type instead.</summary>
+    /// <summary>Premix header cell keeps a numeric value when &gt; 0 ("1 Hole", "5 Holes"); when 0 it displays the project type instead. Numeric premix holes only apply on <c>Road_Reinstatement</c> projects.</summary>
     private const string PremixHoleFormat = "[=1]0 \"Hole\";0 \"Holes\"";
     private const string EmptyOdometerDash = "—";
 
@@ -200,13 +200,14 @@ internal static class ScheduleBoardMapper
             for (int slot = 0; slot < _slotCount; slot++)
             {
                 int col = SlotColumn(slot);
+                string projectId = ParseProjectCode(Text(grid, band.HeaderRow, col));
                 var record = new DailyProjectSchedule
                 {
                     DailyScheduleDate = date,
                     Shift = band.Shift,
                     SlotIndex = slot,
-                    ProjectID = ParseProjectCode(Text(grid, band.HeaderRow, col)),
-                    PremixHoles = ParsePremixHoles(Text(grid, band.HeaderRow, col + 1))
+                    ProjectID = projectId,
+                    PremixHoles = Roster.SupportsPremixHoles(projectId) ? ParsePremixHoles(Text(grid, band.HeaderRow, col + 1)) : 0
                 };
 
                 for (int r = band.FirstWorkerRow; r <= band.LastWorkerRow; r++)
@@ -475,7 +476,9 @@ internal static class ScheduleBoardMapper
             var header = new object?[1, cols];
             var workers = new object?[WorkerRowsPerBand, cols];
             var vehicles = new object?[VehicleRowsPerBand, cols];
-            var comments = new string?[slotCount];
+            var headerComments = new string?[slotCount];
+            var typeComments = new string?[slotCount];
+            var windowComments = new string?[slotCount];
             var workerComments = new string?[WorkerRowsPerBand, slotCount];
 
             for (int slot = 0; slot < slotCount; slot++)
@@ -556,7 +559,9 @@ internal static class ScheduleBoardMapper
                 header[0, c0] = h.Text;
                 header[0, c0 + 1] = FormatPremixCell(data);
                 header[0, c0 + 2] = h.Window;
-                comments[slot] = h.Comment;
+                headerComments[slot] = h.Comment;
+                typeComments[slot] = BuildProjectTypeComment(data);
+                windowComments[slot] = h.WindowComment;
             }
 
             WriteBlock(ws, band.HeaderRow, band.HeaderRow, header);
@@ -571,16 +576,16 @@ internal static class ScheduleBoardMapper
                     try { ApplySizedComment(ws.Cells[band.FirstWorkerRow + i, SlotColumn(slot)], workerComments[i, slot]!); } catch { }
                 }
 
+            try { ws.Range[ws.Cells[band.HeaderRow, FirstSlotColumn], ws.Cells[band.HeaderRow, FirstSlotColumn + cols - 1]].ClearComments(); } catch { }
             for (int slot = 0; slot < slotCount; slot++)
             {
                 try { ws.Cells[band.HeaderRow, SlotColumn(slot) + 1].NumberFormat = PremixHoleFormat; } catch { }
-                try
-                {
-                    dynamic cell = ws.Cells[band.HeaderRow, SlotColumn(slot)];
-                    cell.ClearComments();
-                    if (!string.IsNullOrEmpty(comments[slot])) ApplySizedComment(cell, comments[slot]!);
-                }
-                catch { /* comments are advisory */ }
+                if (!string.IsNullOrEmpty(headerComments[slot]))
+                    try { ApplySizedComment(ws.Cells[band.HeaderRow, SlotColumn(slot)], headerComments[slot]!); } catch { /* comments are advisory */ }
+                if (!string.IsNullOrEmpty(typeComments[slot]))
+                    try { ApplySizedComment(ws.Cells[band.HeaderRow, SlotColumn(slot) + 1], typeComments[slot]!); } catch { }
+                if (!string.IsNullOrEmpty(windowComments[slot]))
+                    try { ApplySizedComment(ws.Cells[band.HeaderRow, SlotColumn(slot) + 2], windowComments[slot]!); } catch { }
             }
         }
 
@@ -696,15 +701,16 @@ internal static class ScheduleBoardMapper
 
     private static object? FormatPremixCell(DailyProjectSchedule data)
     {
-        if (data.PremixHoles > 0) return data.PremixHoles;
         if (data.ProjectID.Length == 0) return null;
         var info = Roster.FindProject(data.ProjectID);
+        bool allowsPremix = info != null && info.Types.Contains(ProjectType.Road_Reinstatement);
+        if (allowsPremix && data.PremixHoles > 0) return data.PremixHoles;
         if (info != null && info.Types.Count > 0)
         {
             var icons = string.Join(" ", info.Types.Select(BoardContext.IconFor).Where(s => s.Length > 0));
             if (icons.Length > 0) return icons;
         }
-        return 0;
+        return null;
     }
 
     private static string FormatSpan(TimeOnly? start, TimeOnly? end)
@@ -741,12 +747,12 @@ internal static class ScheduleBoardMapper
     }
 
     // ---- header: "CODE ⚠" + derived "HH:mm - HH:mm" window + requirements note --------------------
-    private static (string Text, string? Window, string? Comment) BuildHeader(
+    private static (string Text, string? Window, string? Comment, string? WindowComment) BuildHeader(
         DailyProjectSchedule data,
         Dictionary<(long StaffId, string ProjectId), List<WorkerProjectSpan>> spans,
         List<string> assignedSkills, List<VehicleType> assignedVehicleTypes)
     {
-        if (data.ProjectID.Length == 0) return (EmptyHeaderText, null, null);
+        if (data.ProjectID.Length == 0) return (EmptyHeaderText, null, null, null);
 
         var window = AttendanceRollupService.WindowFor(data.ProjectID, spans);
         string windowText = FormatSpan(window.Start, window.End);
@@ -767,7 +773,58 @@ internal static class ScheduleBoardMapper
             comment = sb.ToString();
         }
 
-        return ($"{data.ProjectID}{(unmet ? " ⚠" : string.Empty)}", windowText, comment);
+        return ($"{data.ProjectID}{(unmet ? " ⚠" : string.Empty)}", windowText, comment, BuildWindowComment(window));
+    }
+
+    private static string? BuildProjectTypeComment(DailyProjectSchedule data)
+    {
+        var info = data.ProjectID.Length > 0 ? Roster.FindProject(data.ProjectID) : null;
+        var types = (info?.Types ?? Array.Empty<ProjectType>()).Where(t => t != ProjectType.None).ToList();
+        bool showPremix = types.Contains(ProjectType.Road_Reinstatement) && data.PremixHoles > 0;
+        if (types.Count == 0 && !showPremix) return null;
+
+        var lines = new List<string>();
+        if (types.Count > 0)
+        {
+            lines.Add(types.Count == 1 ? "Project Type:" : "Project Types:");
+            foreach (var t in types)
+            {
+                string icon = BoardContext.IconFor(t);
+                string name = t.ToString().Replace('_', ' ');
+                lines.Add(icon.Length > 0 ? $"{icon} {name}" : name);
+            }
+        }
+        if (showPremix)
+            lines.Add($"Premix Holes: {data.PremixHoles} {(data.PremixHoles == 1 ? "Hole" : "Holes")}");
+        return string.Join("\n", lines);
+    }
+
+    private static string? BuildWindowComment(ProjectWindow window)
+    {
+        if (!window.Start.HasValue && !window.End.HasValue) return null;
+
+        var lines = new List<string>();
+        if (window.Start.HasValue)
+            lines.Add($"Start: {window.Start.Value.ToString("HH:mm", CultureInfo.InvariantCulture)} (earliest check-in: {(window.StartWorkers.Count > 0 ? string.Join(", ", window.StartWorkers) : "-")})");
+
+        if (window.End.HasValue)
+        {
+            var formatted = window.EndContributors.Select(c =>
+                c.OutEntryType == AttendanceEntryType.CheckIn && !string.IsNullOrWhiteSpace(c.OutProject)
+                    ? $"{c.WorkerName} -> {c.OutProject}"
+                    : c.WorkerName).ToList();
+            string reason = window.EndContributors.Count > 0 && window.EndContributors.All(c => c.OutEntryType == AttendanceEntryType.CheckIn)
+                ? "latest project switch"
+                : window.EndContributors.Any(c => c.OutEntryType == AttendanceEntryType.CheckIn)
+                    ? "latest exit"
+                    : "latest check-out";
+            lines.Add($"End: {window.End.Value.ToString("HH:mm", CultureInfo.InvariantCulture)} ({reason}: {string.Join(", ", formatted)})");
+        }
+        else
+        {
+            lines.Add($"End: No End (still checked in: {(window.OpenWorkers.Count > 0 ? string.Join(", ", window.OpenWorkers) : "-")})");
+        }
+        return string.Join("\n", lines);
     }
 
     // =========================================================================
@@ -1157,6 +1214,35 @@ internal static class ScheduleBoardMapper
     // ---- clearing a helper cell clears its lead cell ---------------------------------------------
     /// <summary>Set by <see cref="ApplySkillPick"/> / <see cref="ApplyTypePick"/>; the next helper-cell change is a dropdown commit, not a clear.</summary>
     private static bool _suppressNextHelperClear;
+
+    /// <summary>True when (row, col) is a project-header Premix cell on the board.</summary>
+    internal static bool IsPremixCell(object wsObj, int row, int col)
+    {
+        if (col > LastBoardColumn && IsBoardArea(row, col)) _slotCount = Math.Max(_slotCount, DetectSlotCount(wsObj));
+        return Locate(row, col).Kind == CellKind.Premix;
+    }
+
+    /// <summary>Notice text when a positive premix value was typed on a project that is not Road_Reinstatement; otherwise null.</summary>
+    internal static string? GetRejectedPremixNotice(object wsObj, int row, int col)
+    {
+        try
+        {
+            dynamic ws = wsObj;
+            string premixText = (ws.Cells[row, col].Value2 as object)?.ToString() ?? string.Empty;
+            if (ParsePremixHoles(premixText) <= 0) return null;
+            string headerText = (ws.Cells[row, col - 1].Value2 as object)?.ToString() ?? string.Empty;
+            string projectId = ParseProjectCode(headerText);
+            if (Roster.SupportsPremixHoles(projectId)) return null;
+            return projectId.Length > 0
+                ? $"Premix Holes is only allowed for Road Reinstatement projects ('{projectId}' is not Road Reinstatement)."
+                : "Premix Holes is only allowed for Road Reinstatement projects (select a Road Reinstatement project first).";
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn($"[ScheduleBoard] premix validation failed: {ex.Message}");
+            return null;
+        }
+    }
 
     /// <summary>True when a single Staff Skills / Vehicle Type cell was just emptied (the user is clearing the row).</summary>
     internal static bool IsClearedHelperCell(dynamic target, out int row, out int col)

@@ -24,6 +24,28 @@ public class EntityTableBlock
 
 public static class SyncHelper
 {
+    private static int _synchronousScopeDepth;
+
+    /// <summary>True while a startup/manual-load scope requires sync work to run inline instead of via QueueAsMacro.</summary>
+    public static bool IsSynchronousScope => _synchronousScopeDepth > 0;
+
+    public static IDisposable BeginSynchronousScope()
+    {
+        System.Threading.Interlocked.Increment(ref _synchronousScopeDepth);
+        return new SynchronousScopeToken();
+    }
+
+    private sealed class SynchronousScopeToken : IDisposable
+    {
+        private int _disposed;
+
+        public void Dispose()
+        {
+            if (System.Threading.Interlocked.Exchange(ref _disposed, 1) == 0)
+                System.Threading.Interlocked.Decrement(ref _synchronousScopeDepth);
+        }
+    }
+
     /// <summary>
     /// Writes entity table blocks directly to targetSheet via COM without activating the sheet or moving the screen.
     /// Performs live verification immediately after write.
@@ -34,7 +56,7 @@ public static class SyncHelper
 
         using var _ = AppLogger.Scope($"SyncEntityBlocks(targetSheet='{targetSheet}', blocks={blocks.Count})");
 
-        ExcelAsyncUtil.QueueAsMacro(() =>
+        void Execute()
         {
             try
             {
@@ -117,7 +139,10 @@ public static class SyncHelper
             {
                 AppLogger.Error($"SyncEntityBlocks on '{targetSheet}' threw exception", ex);
             }
-        });
+        }
+
+        if (IsSynchronousScope) Execute();
+        else ExcelAsyncUtil.QueueAsMacro(Execute);
     }
 
     public static void SyncDictionary(
@@ -288,7 +313,7 @@ public static class SyncHelper
             }
         }
 
-        if (synchronous) Execute();
+        if (synchronous || IsSynchronousScope) Execute();
         else ExcelAsyncUtil.QueueAsMacro(Execute);
     }
 

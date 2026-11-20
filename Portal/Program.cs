@@ -6,6 +6,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
+using SKSB_App.Core.RuntimeUI.BugReport;
 
 static class Program
 {
@@ -40,6 +41,7 @@ static class Program
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
         Application.EnableVisualStyles();
         Application.SetCompatibleTextRenderingDefault(false);
+        AutoBugReporter.InstallForPortal();
         Application.Run(new PortalForm());
     }
 
