@@ -32,8 +32,22 @@ public class Events : ManagerEventsBase<List<ProjectRecord>>
         // Companies and the summary selector must populate even before the first project exists.
         PopulateStartupWhenEmpty = true,
         SaveToServer = list => (ServerSyncCommands.SaveProjectsSilent(list, out string err), err),
+        SaveToServerWithConflictCheck = (list, force) =>
+        {
+            bool ok = ServerSyncCommands.SaveProjectsWithDelta(list, force, out string err, out var conflicts);
+            return (ok, err, conflicts);
+        },
+        // "Keep Server Values" in the pane's Conflict Mode: re-baseline only the conflicting rows.
+        OnAcceptServerValues = ServerSyncCommands.AcceptServerConflictBaselines,
         SaveToOffline = list => ServerSyncCommands.SaveProjectsOffline(list),
         PopulateWorksheet = list => SheetMapper.PopulateWorksheet(list),
+        // Authoritative re-fetch after a delta save: refreshes the project / company delta baselines (companies are
+        // re-fetched by PopulateWorksheet) and brings in rows added by other users.
+        RefreshAfterSave = savedList =>
+        {
+            var fresh = ServerSyncCommands.FetchProjectRecords();
+            SheetMapper.PopulateWorksheet(fresh ?? savedList);
+        },
         FetchFromServer = () => ServerSyncCommands.FetchProjectRecords(),
         ValidateOfflinePayload = list => list.Count > 0 && list.TrueForAll(p => !string.IsNullOrWhiteSpace(p.ProjectCode)),
         FormatConflictSummary = (local, server) =>

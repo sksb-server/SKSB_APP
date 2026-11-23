@@ -95,6 +95,13 @@ public record ScheduleRecord
     [JsonIgnore]
     public List<AttendanceEntry>? ModifiedAttendanceEntries { get; set; }
 
+    /// <summary>
+    /// Concurrency token for the date-scoped board: MAX(<c>updated_at</c>) across <c>daily_schedule_settings</c>,
+    /// <c>daily_project_schedules</c> and <c>daily_attendances</c> for <see cref="DailyScheduleDate"/> (null = no rows).
+    /// </summary>
+    [JsonIgnore]
+    public DateTime? BoardServerUpdatedAt { get; set; }
+
     public List<WorkerPreference> Preferences { get; set; } = new();
     public List<TeamRecord> Teams { get; set; } = new();
     public List<ScheduleSkillRecord> Skills { get; set; } = new();
@@ -324,6 +331,10 @@ public record WorkerPreference
     [ExcelColumn("Rest Day Preference")]
     [ColumnRule("DaysList", IsRequired = false)]
     public Days RestDayPreference { get; set; } = Days.None;
+
+    /// <summary>Server <c>updated_at</c> (optimistic-concurrency token); never written to Excel or JSON.</summary>
+    [JsonIgnore]
+    public DateTime? ServerUpdatedAt { get; set; }
 }
 
 // =========================================================================
@@ -348,6 +359,10 @@ public record TeamRecord
     [ExcelColumn("Default Vehicles")]
     [ColumnRule("VehiclePlateList", IsRequired = false, IsWarningOnly = true, IsMultiSelect = true)]
     public List<string> DefaultVehicles { get; set; } = new();
+
+    /// <summary>Server <c>updated_at</c> (optimistic-concurrency token); never written to Excel or JSON.</summary>
+    [JsonIgnore]
+    public DateTime? ServerUpdatedAt { get; set; }
 }
 
 // =========================================================================
@@ -365,6 +380,10 @@ public record ScheduleSkillRecord
     [ExcelColumn("Display Icon")]
     [ColumnRule("DisplayIconList", IsRequired = false, IsWarningOnly = true)]
     public string DisplayIcon { get; set; } = string.Empty;
+
+    /// <summary>Server <c>updated_at</c> (optimistic-concurrency token); never written to Excel or JSON.</summary>
+    [JsonIgnore]
+    public DateTime? ServerUpdatedAt { get; set; }
 }
 
 // =========================================================================
@@ -385,6 +404,10 @@ public record ProjectSkillRequirement
     [ExcelColumn("Required Vehicles")]
     [ColumnRule("VehicleTypeList", IsRequired = false, IsWarningOnly = true, IsMultiSelect = true)]
     public List<VehicleType> Vehicles { get; set; } = new();
+
+    /// <summary>Server <c>updated_at</c> (optimistic-concurrency token); never written to Excel or JSON.</summary>
+    [JsonIgnore]
+    public DateTime? ServerUpdatedAt { get; set; }
 }
 
 // =========================================================================

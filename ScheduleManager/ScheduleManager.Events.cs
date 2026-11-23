@@ -45,6 +45,14 @@ public class Events : ManagerEventsBase<ScheduleRecord>
             if (ok) SheetMapper.MarkSaved(schedule.AttendanceEntries, persistedToServer: true);
             return (ok, err);
         },
+        SaveToServerWithConflictCheck = (schedule, force) =>
+        {
+            bool ok = ServerSyncCommands.SaveScheduleWithDelta(schedule, force, out string err, out var conflicts);
+            if (ok) SheetMapper.MarkSaved(schedule.AttendanceEntries, persistedToServer: true);
+            return (ok, err, conflicts);
+        },
+        // "Keep Server Values" in the pane's Conflict Mode: re-baseline only the conflicting rows / date board.
+        OnAcceptServerValues = ServerSyncCommands.AcceptServerConflictBaselines,
         SaveToOffline = schedule =>
         {
             OfflineSnapshot.SaveOfflineSnapshot(schedule);

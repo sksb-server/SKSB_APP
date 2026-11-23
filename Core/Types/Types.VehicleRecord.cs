@@ -102,6 +102,9 @@ public record VehicleRecord
     public List<InsuranceClaim> InsuranceClaims { get; set; } = new();
     public List<OdometerLog> OdometerLogs { get; set; } = new();
 
+    /// <summary>Server <c>vehicle_master.updated_at</c> as loaded (optimistic-concurrency token; never persisted).</summary>
+    [JsonIgnore]
+    public DateTime? ServerUpdatedAt { get; set; }
 }
 
 public record VehicleDetail
@@ -229,6 +232,13 @@ public abstract record VehicleChildRecord
     [ColumnRule("VehicleTypeList", IsRequired = false, IsWarningOnly = true)]
     [ColumnSync("Vehicle Plate", "AllVehiclesTable[Vehicle Type]", "AllVehiclesTable[Vehicle Plate]")]
     public VehicleType VehicleType { get; set; } = VehicleType.None;
+
+    /// <summary>
+    /// Server <c>updated_at</c> of this child row as loaded (optimistic-concurrency token; never persisted). Shared by
+    /// Maintenance, RoadTax, Inspection, VehiclePermit, VehicleInsurance, InsuranceClaim and OdometerLog.
+    /// </summary>
+    [JsonIgnore]
+    public DateTime? ServerUpdatedAt { get; set; }
 }
 
 /// <summary>Shared renewal-cycle columns (insurance, permit, road tax): renewal / expiry dates, cost, remarks.</summary>
@@ -387,6 +397,9 @@ public record Workshop
     [ColumnRollup("MaintenancesTable", RollupKind.Sum, "Repair Total Cost", ForeignKeyHeader = "Workshop Name", LocalKeyHeader = "Workshop Name", DateProperty = "Date In")]
     [ExcelColumn("Total Cost")]
     public decimal? TotalCost { get; set; }
+
+    [JsonIgnore]
+    public DateTime? ServerUpdatedAt { get; set; }
 }
 
 // =========================================================================
@@ -467,6 +480,9 @@ public record InsuranceCompanyRecord
     [ColumnRollup("InsurancesTable", RollupKind.DistinctJoin, "Vehicle Plate", ForeignKeyHeader = "Insurance Agent", LocalKeyHeader = "Insurance Agent")]
     [ExcelColumn("Vehicle Plates Under Agent")]
     public string VehiclePlatesUnderAgent { get; set; } = string.Empty;
+
+    [JsonIgnore]
+    public DateTime? ServerUpdatedAt { get; set; }
 }
 
 [ExcelTable("InsuranceClaimsTable")]
@@ -708,6 +724,9 @@ public record FuelCardRecord
     [ColumnSync("Card Owner ID", "AllVehiclesTable[Brand] + ' ' + AllVehiclesTable[Model]", "AllVehiclesTable[Vehicle Plate]")]
     [ColumnSync("Card Owner ID", "StaffShortNameList", "StaffIDList")]
     public string CardOwnerName { get; set; } = string.Empty;
+
+    [JsonIgnore]
+    public DateTime? ServerUpdatedAt { get; set; }
 }
 
 [ExcelTable("FuelCompanyNamesTable")]

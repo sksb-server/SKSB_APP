@@ -69,6 +69,22 @@ public class SaveContract<T> : ISaveContract
     public Func<T, (bool Success, string ErrorMessage)> SaveToServer { get; set; } = null!;
 
     /// <summary>
+    /// Optional delta save with optimistic concurrency. Arg 2 is <c>forceOverwrite</c>. When the save is rolled back
+    /// because other users changed the same rows, return <c>Success = false</c> with a non-empty <c>Conflicts</c>
+    /// list; <see cref="SaveEntry"/> then lists the field-level diffs in the Validation Task Pane (Conflict Mode) with
+    /// "Keep Server Values" / "Overwrite Server &amp; Save". Takes precedence over <see cref="SaveToServer"/> for
+    /// interactive saves.
+    /// </summary>
+    public Func<T, bool, (bool Success, string ErrorMessage, IReadOnlyList<ConcurrencyConflict>? Conflicts)>? SaveToServerWithConflictCheck { get; set; }
+
+    /// <summary>
+    /// Runs after "Keep Server Values" wrote the server's values into the conflicting cells: the module refreshes the
+    /// delta baselines of ONLY those rows to the server's latest fingerprint / <c>updated_at</c>, so the next save
+    /// treats them as unchanged while every other edited row keeps its local edits and original baseline.
+    /// </summary>
+    public Action<IReadOnlyList<ConcurrencyConflict>>? OnAcceptServerValues { get; set; }
+
+    /// <summary>
     /// Offline-save hook: modules with auxiliary tables override it to snapshot those tables too. It must also
     /// persist the master payload (default: <see cref="OfflineSnapshot.SaveOfflineSnapshot{T}"/>).
     /// </summary>

@@ -61,7 +61,13 @@ public class ValidationTaskPaneControl : UserControl, IValidationTaskPaneControl
     private readonly Button _btnDebugQuit;
     private readonly Button _btnRevertHistory;
     private readonly Button _btnCloneHistory;
+    private readonly Button _btnKeepServer;
     private readonly DataGridView _grid;
+
+    private static readonly Color ProceedBack = ColorTranslator.FromHtml("#16A34A");
+    private static readonly Color ProceedBorder = ColorTranslator.FromHtml("#15803D");
+    private static readonly Color DangerBack = ColorTranslator.FromHtml("#DC2626");
+    private static readonly Color DangerBorder = ColorTranslator.FromHtml("#B91C1C");
 
     private List<ValidationIssue> _errors = new();
     private List<ValidationIssue> _warnings = new();
@@ -71,6 +77,9 @@ public class ValidationTaskPaneControl : UserControl, IValidationTaskPaneControl
     private Action? _onDebugQuitAnyway;
     private Action? _onRevertHistoryEdits;
     private Action? _onCloneHistoryAsNewRows;
+    private Action? _onKeepServerValues;
+    private bool _isClosing;
+    private bool _isConflictMode;
 
     /// <summary>Raised when the user clicks / double-clicks an issue row.</summary>
     public Action<ValidationIssue>? IssueSelected { get; set; }
@@ -145,11 +154,22 @@ public class ValidationTaskPaneControl : UserControl, IValidationTaskPaneControl
         };
 
         _btnProceed = CreateToolbarButton("Proceed with Save");
-        _btnProceed.BackColor = ColorTranslator.FromHtml("#16A34A");
+        _btnProceed.BackColor = ProceedBack;
         _btnProceed.ForeColor = Color.White;
-        _btnProceed.FlatAppearance.BorderColor = ColorTranslator.FromHtml("#15803D");
+        _btnProceed.FlatAppearance.BorderColor = ProceedBorder;
         _btnProceed.Visible = false;
-        _btnProceed.Click += (_, _) => _onProceedWithSave?.Invoke();
+        _btnProceed.Click += (_, _) =>
+        {
+            if (_isConflictMode) InvokeConflictAction(_onProceedWithSave);
+            else _onProceedWithSave?.Invoke();
+        };
+
+        _btnKeepServer = CreateToolbarButton("Keep Server Values");
+        _btnKeepServer.BackColor = AccentBack;
+        _btnKeepServer.ForeColor = ColorTranslator.FromHtml("#1D4ED8");
+        _btnKeepServer.FlatAppearance.BorderColor = AccentBorder;
+        _btnKeepServer.Visible = false;
+        _btnKeepServer.Click += (_, _) => InvokeConflictAction(_onKeepServerValues);
 
         _btnRevalidate = CreateToolbarButton("Re-validate");
         _btnRevalidate.Click += (_, _) => _onRevalidate?.Invoke();
@@ -175,6 +195,7 @@ public class ValidationTaskPaneControl : UserControl, IValidationTaskPaneControl
 
         // RightToLeft flow: first added sits at the far right.
         rightFlow.Controls.Add(_btnProceed);
+        rightFlow.Controls.Add(_btnKeepServer);
         rightFlow.Controls.Add(_btnRevalidate);
         rightFlow.Controls.Add(_btnCloneHistory);
         rightFlow.Controls.Add(_btnRevertHistory);
@@ -278,7 +299,8 @@ public class ValidationTaskPaneControl : UserControl, IValidationTaskPaneControl
         bool isClosing,
         Action? onDebugQuitAnyway,
         Action? onRevertHistoryEdits = null,
-        Action? onCloneHistoryAsNewRows = null)
+        Action? onCloneHistoryAsNewRows = null,
+        Action? onKeepServerValues = null)
     {
         if (IsDisposed) return;
         if (InvokeRequired)
@@ -286,7 +308,7 @@ public class ValidationTaskPaneControl : UserControl, IValidationTaskPaneControl
             try
             {
                 BeginInvoke(new Action(() => SetIssues(errors, warnings, onRevalidate, onProceedWithSave, isClosing, onDebugQuitAnyway,
-                    onRevertHistoryEdits, onCloneHistoryAsNewRows)));
+                    onRevertHistoryEdits, onCloneHistoryAsNewRows, onKeepServerValues)));
             }
             catch { }
             return;
@@ -298,12 +320,13 @@ public class ValidationTaskPaneControl : UserControl, IValidationTaskPaneControl
         _onProceedWithSave = onProceedWithSave;
         _onRevertHistoryEdits = onRevertHistoryEdits;
         _onCloneHistoryAsNewRows = onCloneHistoryAsNewRows;
+        _onKeepServerValues = onKeepServerValues;
+        _isClosing = isClosing;
 #if DEBUG
         _onDebugQuitAnyway = isClosing ? onDebugQuitAnyway : null;
 #else
         _onDebugQuitAnyway = null;
 #endif
-        _btnProceed.Text = isClosing ? "Save && Close" : "Proceed with Save";
 
         // Keep the current filter unless it would now show nothing while other issues exist.
         if (_filter == IssueFilter.Errors && _errors.Count == 0) _filter = IssueFilter.All;
@@ -328,7 +351,16 @@ public class ValidationTaskPaneControl : UserControl, IValidationTaskPaneControl
         int e = _errors.Count;
         int w = _warnings.Count;
 
-        if (e == 0 && w == 0)
+        // Conflict Mode: the save was rolled back by optimistic concurrency; only the two resolutions are offered.
+        bool hasConflicts = e == 0 && _warnings.Any(x => x.IsConcurrencyConflict);
+        _isConflictMode = hasConflicts;
+
+        if (hasConflicts)
+        {
+            _summaryLabel.Text = $"{w} Conflict{(w == 1 ? "" : "s")}";
+            _summaryLabel.ForeColor = WarningFore;
+        }
+        else if (e == 0 && w == 0)
         {
             _summaryLabel.Text = "✔ All checks passed";
             _summaryLabel.ForeColor = SuccessFore;
@@ -349,16 +381,42 @@ public class ValidationTaskPaneControl : UserControl, IValidationTaskPaneControl
         StyleFilterButton(_btnErrors, _filter == IssueFilter.Errors);
         StyleFilterButton(_btnWarnings, _filter == IssueFilter.Warnings);
 
-        _btnRevalidate.Visible = _onRevalidate != null;
-        bool canProceed = e == 0 && _onProceedWithSave != null;
-        _btnProceed.Visible = canProceed;
-        _btnProceed.Enabled = canProceed;
+        if (hasConflicts)
+        {
+            // Red so the destructive overwrite is never clicked by habit; blue "Keep Server Values" is the safe path.
+            _btnProceed.Text = _isClosing ? "Overwrite && Close" : "Overwrite Server && Save";
+            _btnProceed.BackColor = DangerBack;
+            _btnProceed.ForeColor = Color.White;
+            _btnProceed.FlatAppearance.BorderColor = DangerBorder;
+            _btnProceed.Visible = _onProceedWithSave != null;
+            _btnProceed.Enabled = _btnProceed.Visible;
 
-        bool hasStacked = _warnings.Any(i => i.IsStackedHistoryEdit);
-        _btnRevertHistory.Visible = hasStacked && _onRevertHistoryEdits != null;
-        _btnRevertHistory.Enabled = _btnRevertHistory.Visible;
-        _btnCloneHistory.Visible = hasStacked && _onCloneHistoryAsNewRows != null;
-        _btnCloneHistory.Enabled = _btnCloneHistory.Visible;
+            _btnKeepServer.Visible = _onKeepServerValues != null;
+            _btnKeepServer.Enabled = _btnKeepServer.Visible;
+
+            _btnRevalidate.Visible = false;
+            _btnRevertHistory.Visible = false;
+            _btnCloneHistory.Visible = false;
+        }
+        else
+        {
+            _btnProceed.Text = _isClosing ? "Save && Close" : "Proceed with Save";
+            _btnProceed.BackColor = ProceedBack;
+            _btnProceed.ForeColor = Color.White;
+            _btnProceed.FlatAppearance.BorderColor = ProceedBorder;
+            _btnKeepServer.Visible = false;
+
+            _btnRevalidate.Visible = _onRevalidate != null;
+            bool canProceed = e == 0 && _onProceedWithSave != null;
+            _btnProceed.Visible = canProceed;
+            _btnProceed.Enabled = canProceed;
+
+            bool hasStacked = _warnings.Any(i => i.IsStackedHistoryEdit);
+            _btnRevertHistory.Visible = hasStacked && _onRevertHistoryEdits != null;
+            _btnRevertHistory.Enabled = _btnRevertHistory.Visible;
+            _btnCloneHistory.Visible = hasStacked && _onCloneHistoryAsNewRows != null;
+            _btnCloneHistory.Enabled = _btnCloneHistory.Visible;
+        }
 #if DEBUG
         _btnDebugQuit.Visible = _onDebugQuitAnyway != null;
 #else
@@ -375,6 +433,15 @@ public class ValidationTaskPaneControl : UserControl, IValidationTaskPaneControl
         if (action == null) return;
         _btnRevertHistory.Enabled = false;
         _btnCloneHistory.Enabled = false;
+        action();
+    }
+
+    /// <summary>Same double-click guard for the Conflict Mode buttons (re-enabled by the next <see cref="SetIssues"/>).</summary>
+    private void InvokeConflictAction(Action? action)
+    {
+        if (action == null) return;
+        _btnKeepServer.Enabled = false;
+        _btnProceed.Enabled = false;
         action();
     }
 
@@ -401,7 +468,9 @@ public class ValidationTaskPaneControl : UserControl, IValidationTaskPaneControl
             foreach (var issue in source)
             {
                 int idx = _grid.Rows.Add(
-                    issue.Severity == ValidationSeverity.Error ? "Error" : "Warning",
+                    issue.Severity == ValidationSeverity.Error ? "Error"
+                        : issue.IsConcurrencyConflict ? "Conflict"
+                        : "Warning",
                     issue.SheetName,
                     issue.CellAddress,
                     issue.ColumnHeader,

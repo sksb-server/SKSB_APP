@@ -38,8 +38,22 @@ public class Events : ManagerEventsBase<List<StaffRecord>>
         ExtractAndValidate = () => SheetMapper.ExtractStaffRecordsWithDiagnostics(),
         IsDatasetEmpty = list => list == null || list.Count == 0,
         SaveToServer = list => (ServerSyncCommands.SaveStaffSilent(list, out string err), err),
+        SaveToServerWithConflictCheck = (list, force) =>
+        {
+            bool ok = ServerSyncCommands.SaveStaffWithDelta(list, force, out string err, out var conflicts);
+            return (ok, err, conflicts);
+        },
+        // "Keep Server Values" in the pane's Conflict Mode: re-baseline only the conflicting rows.
+        OnAcceptServerValues = ServerSyncCommands.AcceptServerConflictBaselines,
         SaveToOffline = list => ServerSyncCommands.SaveStaffOffline(list),
         PopulateWorksheet = list => SheetMapper.PopulateWorksheet(list),
+        // Authoritative re-fetch after a delta save: brings back server-assigned license IDs and rows added by
+        // other users, and refreshes the delta baselines.
+        RefreshAfterSave = savedList =>
+        {
+            var fresh = ServerSyncCommands.FetchStaffRecords();
+            SheetMapper.PopulateWorksheet(fresh ?? savedList);
+        },
         FetchFromServer = () => ServerSyncCommands.FetchStaffRecords(),
         ValidateOfflinePayload = list => list != null && list.Count > 0 && list.TrueForAll(s => s.StaffID > 0),
         FormatConflictSummary = (local, server) =>

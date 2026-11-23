@@ -93,6 +93,9 @@ public record ProjectRecord
     [DataDetail]
     public ProjectDetails ProjectDetails { get; set; } = new();
 
+    /// <summary>Server <c>updated_at</c> as last loaded (optimistic-concurrency token); never serialized or shown.</summary>
+    [JsonIgnore]
+    public DateTime? ServerUpdatedAt { get; set; }
 }
 
 public record ProjectDetails
@@ -229,6 +232,10 @@ public record CompanyRecord
     [DataList("CompanyNameList")]
     [ExcelColumn("Short Company Name", isRequired: true)]
     public string ShortCompanyName { get; set; } = string.Empty;
+
+    /// <summary>Server <c>updated_at</c> as last loaded (optimistic-concurrency token); never serialized or shown.</summary>
+    [JsonIgnore]
+    public DateTime? ServerUpdatedAt { get; set; }
 }
 
 // =========================================================================

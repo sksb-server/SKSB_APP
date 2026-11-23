@@ -8,6 +8,7 @@ using SKSB_App.Core.WorkbookOpen.Sync;
 using SKSB_App.Core.WorkbookSave.Storage;
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 
 internal static class ServerSyncCommands
@@ -40,37 +41,182 @@ internal static class ServerSyncCommands
         OfflineSnapshot.SaveOfflineSnapshot(projects);
     }
 
-    internal static bool SaveProjectsSilent(List<ProjectRecord> projects, out string errorMessage)
+    /// <summary>
+    /// Non-interactive save (startup pending upload / contracts without conflict checks). Upsert-only: with no
+    /// baseline every row is upserted; with a baseline only changed rows are written, overwriting the server.
+    /// </summary>
+    internal static bool SaveProjectsSilent(List<ProjectRecord> projects, out string errorMessage) =>
+        SaveProjectsWithDelta(projects, forceOverwrite: true, out errorMessage, out _);
+
+    /// <summary>
+    /// Delta save: only companies / projects that differ from the last server load are written (no hard deletes).
+    /// Modified rows are checked against their server <c>updated_at</c>; on conflict nothing is saved and
+    /// <paramref name="conflicts"/> lists the affected rows.
+    /// </summary>
+    internal static bool SaveProjectsWithDelta(List<ProjectRecord> projects, bool forceOverwrite, out string errorMessage, out IReadOnlyList<ConcurrencyConflict>? conflicts)
     {
         errorMessage = string.Empty;
+        conflicts = null;
         try
         {
+            projects ??= new List<ProjectRecord>();
+
             // 1. Companies live on their own sheet; persist them with the projects.
             var companies = ExtractCompaniesFromWorkbook();
 
             // Startup pending-upload commit runs before PopulateWorksheet: an unpopulated CompaniesTable must not
-            // wipe the companies saved offline.
+            // drop the companies saved offline.
             if (companies.Count == 0 && OfflineSnapshot.HasPendingSnapshot<List<ProjectRecord>>())
                 companies = OfflineSnapshot.Load<List<CompanyRecord>>() ?? companies;
 
-            AppLogger.Info(
-                $"[ProjectManager.SaveProjectsSilent] Projects={projects.Count}, " +
-                $"Companies={companies.Count}");
+            foreach (var p in projects) p.ProjectCode = NormalizeCode(p.ProjectCode);
 
-            // 2. PostgreSQL (companies first so project rows can resolve them)
-            ServerDispatcher.PersistCompanies(companies, isFullBatch: true);
-            ServerDispatcher.PersistProjects(projects, isFullBatch: true);
+            var payload = new ProjectDeltaPayload
+            {
+                Companies = CompanyBaseline.Diff(companies.Where(c => c.CompanyID > 0), c => c.CompanyID, CompanyFingerprint),
+                Projects = ProjectBaseline.Diff(projects.Where(p => p.ProjectCode.Length > 0), p => p.ProjectCode, ProjectFingerprint)
+            };
+
+            AppLogger.Info(
+                $"[ProjectManager.SaveProjectsWithDelta] force={forceOverwrite}, Projects={projects.Count}, Companies={companies.Count}");
+
+            // 2. PostgreSQL: single transaction, companies first so project rows can resolve them (rolled back on any conflict).
+            ServerDispatcher.PersistProjectDelta(payload, forceOverwrite);
 
             // 3. Local offline snapshots (only after the server commit succeeded)
             OfflineSnapshot.Save(projects, writeToDatabase: false);
             OfflineSnapshot.Save(companies, writeToDatabase: false);
             return true;
         }
+        catch (ConcurrencyConflictException cex)
+        {
+            conflicts = cex.Conflicts;
+            errorMessage = cex.Message;
+            AppLogger.Warn($"[{Module}] Delta save rolled back: {cex.Conflicts.Count} concurrency conflict(s).");
+            return false;
+        }
         catch (Exception ex)
         {
             errorMessage = ex.Message;
-            AppLogger.Error($"[{Module}] SaveProjectsSilent failed", ex);
+            AppLogger.Error($"[{Module}] SaveProjectsWithDelta failed", ex);
             return false;
+        }
+    }
+
+    // =========================================================================
+    // 1b. DELTA BASELINES & FINGERPRINTS
+    // =========================================================================
+    // Rows as last loaded from the server; diffing the sheet against them yields the delta to save.
+    private static readonly TableBaseline<string> ProjectBaseline = new();
+    private static readonly TableBaseline<long> CompanyBaseline = new();
+
+    private static string NormalizeCode(string? code) => (code ?? string.Empty).Trim().ToUpperInvariant();
+    private static string Norm(string? s) => (s ?? string.Empty).Trim();
+    private static string Norm(DateOnly d) => d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
+    private static string Norm(DateOnly? d) => d.HasValue ? Norm(d.Value) : string.Empty;
+    private static string Norm(decimal m) => decimal.Round(m, 2).ToString("F2", CultureInfo.InvariantCulture);
+
+    private static string ProjectFingerprint(ProjectRecord p)
+    {
+        var d = p.ProjectDetails ?? new ProjectDetails();
+        return string.Join("\u001F",
+            NormalizeCode(p.ProjectCode),
+            p.Category.ToString(),
+            Norm(d.ReferenceNo),
+            string.Join(",", (d.ProjectType ?? new List<ProjectType>()).Where(t => t != ProjectType.None).Distinct().Select(t => t.ToString())),
+            d.Priority.ToString(),
+            d.Status.ToString(),
+            d.CompanyID.ToString(CultureInfo.InvariantCulture),
+            Norm(d.CompanyName),
+            (d.StaffID ?? 0).ToString(CultureInfo.InvariantCulture),
+            Norm(d.PIC),
+            d.District.ToString(),
+            Norm(d.Address),
+            Norm(d.StartDate),
+            Norm(d.TargetEndDate),
+            Norm(d.ActualEndDate),
+            Norm(d.EstimatedCost),
+            Norm(d.PromisedReturn),
+            Norm(d.ActualReturn),
+            Norm(d.Remarks));
+    }
+
+    private static string CompanyFingerprint(CompanyRecord c) => string.Join("\u001F",
+        c.CompanyID.ToString(CultureInfo.InvariantCulture),
+        Norm(c.LegalCompanyName),
+        Norm(c.ShortCompanyName));
+
+    /// <summary>
+    /// Server <c>updated_at</c> as a concurrency token. Kept exactly as Npgsql returned it (UTC for <c>timestamptz</c>,
+    /// Unspecified for <c>timestamp</c>) so it round-trips against the column's own type.
+    /// </summary>
+    private static DateTime? ToUtcDateTime(object? raw) => raw switch
+    {
+        DateTime dt => dt.Kind == DateTimeKind.Local ? DateTime.SpecifyKind(dt.ToUniversalTime(), DateTimeKind.Utc) : dt,
+        DateTimeOffset dto => DateTime.SpecifyKind(dto.UtcDateTime, DateTimeKind.Utc),
+        _ => null
+    };
+
+    // =========================================================================
+    // 1c. CONCURRENCY CONFLICT RESOLUTION ("Keep Server Values")
+    // =========================================================================
+    /// <summary>
+    /// After the pane wrote the server's values into the conflicting cells, re-reads ONLY those rows and moves their
+    /// delta baselines to the server's latest fingerprint + <c>updated_at</c>. The next save then treats them as
+    /// unchanged, while every other edited row keeps its local edits and its original baseline.
+    /// </summary>
+    internal static void AcceptServerConflictBaselines(IReadOnlyList<ConcurrencyConflict> conflicts)
+    {
+        if (conflicts == null || conflicts.Count == 0) return;
+        if (!ServerEnvironment.IsOnline)
+        {
+            AppLogger.Warn($"[{Module}] Keep Server Values: server offline, conflict baselines not refreshed.");
+            return;
+        }
+
+        IEnumerable<string> KeysFor(string table) => conflicts
+            .Where(c => string.Equals(c.TableName, table, StringComparison.OrdinalIgnoreCase))
+            .Select(c => (c.RawKeyValue ?? string.Empty).Trim())
+            .Where(k => k.Length > 0);
+
+        string[] projectIds = KeysFor("project_master").Select(NormalizeCode).Distinct().ToArray();
+        long[] companyIds = KeysFor("company_master")
+            .Select(k => long.TryParse(k, NumberStyles.Integer, CultureInfo.InvariantCulture, out long id) ? id : 0)
+            .Where(id => id > 0)
+            .Distinct()
+            .ToArray();
+        int refreshed = 0;
+
+        try
+        {
+            var db = new PostgreSqlService();
+
+            if (companyIds.Length > 0)
+            {
+                foreach (var r in db.Query<dynamic>("SELECT * FROM company_master WHERE company_id = ANY(@Ids);", new { Ids = companyIds }))
+                {
+                    CompanyRecord c = MapCompanyRow((object)r);
+                    CompanyBaseline.UpsertEntry(c.CompanyID, CompanyFingerprint(c), c.ServerUpdatedAt);
+                    refreshed++;
+                }
+            }
+
+            if (projectIds.Length > 0)
+            {
+                foreach (var r in db.Query<dynamic>("SELECT * FROM project_master WHERE project_id = ANY(@Ids);", new { Ids = projectIds }))
+                {
+                    ProjectRecord p = BuildProject(r);
+                    ProjectBaseline.UpsertEntry(p.ProjectCode, ProjectFingerprint(p), p.ServerUpdatedAt);
+                    refreshed++;
+                }
+            }
+
+            AppLogger.Info($"[{Module}] Keep Server Values: refreshed {refreshed} conflict baseline(s) " +
+                $"(companies {companyIds.Length}, projects {projectIds.Length}).");
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error($"[{Module}] AcceptServerConflictBaselines failed", ex);
         }
     }
 
@@ -84,6 +230,9 @@ internal static class ServerSyncCommands
             AppLogger.Info($"[PostgreSQL Query] project_master returned {rawProjects.Count} record(s).");
             var projects = new List<ProjectRecord>();
             foreach (var p in rawProjects) projects.Add(BuildProject(p));
+
+            // Only reached when the server answered: an empty result is an authoritative (empty) baseline.
+            ProjectBaseline.Capture(projects, p => p.ProjectCode, ProjectFingerprint, p => p.ServerUpdatedAt);
             return projects;
         });
 
@@ -145,7 +294,8 @@ internal static class ServerSyncCommands
                 ClaimCost = DecN(p.claim_cost),
                 ActualProjectCost = DecN(p.actual_project_cost),
                 ProfitMargin = DecN(p.profit_margin)
-            }
+            },
+            ServerUpdatedAt = ToUtcDateTime(Col((object)p, "updated_at"))
         };
     }
 
@@ -272,10 +422,28 @@ internal static class ServerSyncCommands
     // =========================================================================
     // 3. COMPANIES
     // =========================================================================
-    internal static List<CompanyRecord> FetchCompanies() => ServerSyncHelper.FetchAuxiliaryTable<CompanyRecord>(Module, "CompaniesTable", @"
-        SELECT company_id AS CompanyID,
-               legal_company_name AS LegalCompanyName,
-               short_company_name AS ShortCompanyName
-        FROM company_master
-        ORDER BY company_id;");
+    internal static List<CompanyRecord> FetchCompanies() =>
+        ServerSyncHelper.FetchAuthoritativeList(Module, "CompaniesTable", db =>
+        {
+            var companies = new List<CompanyRecord>();
+            foreach (var r in db.Query<dynamic>("SELECT * FROM company_master ORDER BY company_id;"))
+                companies.Add(MapCompanyRow((object)r));
+
+            // Only reached when the server answered (offline-cache rows must never become a baseline).
+            CompanyBaseline.Capture(companies, c => c.CompanyID, CompanyFingerprint, c => c.ServerUpdatedAt);
+            return companies;
+        });
+
+    /// <summary>Shared by the full load and the conflict-baseline refresh so fingerprints always agree.</summary>
+    private static CompanyRecord MapCompanyRow(object row)
+    {
+        object? id = ServerSyncHelper.Col(row, "company_id");
+        return new CompanyRecord
+        {
+            CompanyID = id != null ? Convert.ToInt64(id, CultureInfo.InvariantCulture) : 0,
+            LegalCompanyName = ServerSyncHelper.ColumnText(row, "legal_company_name"),
+            ShortCompanyName = ServerSyncHelper.ColumnText(row, "short_company_name"),
+            ServerUpdatedAt = ToUtcDateTime(ServerSyncHelper.Col(row, "updated_at"))
+        };
+    }
 }

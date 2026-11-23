@@ -2,6 +2,7 @@ namespace SKSB_App.ScheduleManager;
 
 using System;
 using System.Collections.Generic;
+using System.Globalization;
 using System.Linq;
 using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.Integration.Database;
@@ -14,17 +15,356 @@ internal static class ServerSyncCommands
     private const string Module = "ScheduleManager";
 
     // =========================================================================
-    // 1. SAVE (local snapshot + transactional PostgreSQL dispatch)
+    // 1. SAVE (delta-only, optimistic concurrency, single PostgreSQL transaction)
     // =========================================================================
-    internal static bool SaveScheduleSilent(ScheduleRecord schedule, out string errorMessage)
-    {
-        AppLogger.Info(
-            $"[{Module}.SaveScheduleSilent] {schedule.DailyScheduleDate:yyyy-MM-dd}: slots={schedule.Projects.Count}, " +
-            $"attendances={schedule.WorkerAttendance.Count}, entries={schedule.AttendanceEntries.Count}, " +
-            $"prefs={schedule.Preferences.Count}, teams={schedule.Teams.Count}");
+    /// <summary>
+    /// Non-interactive save (startup pending upload / contracts without conflict checks). Without baselines every
+    /// reference row is upserted and the board is written; with baselines only changed rows are written, overwriting the server.
+    /// </summary>
+    internal static bool SaveScheduleSilent(ScheduleRecord schedule, out string errorMessage) =>
+        SaveScheduleWithDelta(schedule, forceOverwrite: true, out errorMessage, out _);
 
-        // OfflineSnapshot.Save(record, writeToDatabase: true) -> ServerDispatcher.Dispatch -> PersistSchedule.
-        return ServerSyncHelper.SaveSilent(schedule, out errorMessage);
+    /// <summary>
+    /// Delta save: only reference rows that differ from the last server load are written (never hard-deleted); the
+    /// date-scoped board / settings / daily attendance are written only when they changed. Modified rows and the
+    /// board are checked against their server <c>updated_at</c>; on conflict nothing is saved and
+    /// <paramref name="conflicts"/> lists the affected rows.
+    /// </summary>
+    internal static bool SaveScheduleWithDelta(ScheduleRecord schedule, bool forceOverwrite, out string errorMessage, out IReadOnlyList<ConcurrencyConflict>? conflicts)
+    {
+        errorMessage = string.Empty;
+        conflicts = null;
+        try
+        {
+            DateOnly date = schedule.DailyScheduleDate;
+            bool hasDateBaseline = _baselineDate == date && _baselineBoardFingerprint != null;
+            bool boardChanged = !hasDateBaseline ||
+                                !string.Equals(_baselineBoardFingerprint, BoardFingerprint(schedule), StringComparison.Ordinal);
+
+            var payload = new ScheduleDeltaPayload
+            {
+                Schedule = schedule,
+                HasDateBaseline = hasDateBaseline,
+                BoardOrAttendanceChanged = boardChanged,
+                ExpectedBoardMaxUpdatedAt = hasDateBaseline ? _baselineBoardMaxUpdatedAt : null,
+                Preferences = PrefBaseline.Diff(schedule.Preferences.Where(p => p.StaffID > 0), p => p.StaffID, PrefFingerprint),
+                Teams = TeamBaseline.Diff(schedule.Teams.Where(t => !string.IsNullOrWhiteSpace(t.TeamName)), TeamKey, TeamFingerprint),
+                Skills = SkillBaseline.Diff((schedule.Skills ?? new List<ScheduleSkillRecord>()).Where(s => !string.IsNullOrWhiteSpace(s.SkillName)), SkillKey, SkillFingerprint),
+                ProjectSkillRequirements = ProjSkillReqBaseline.Diff(
+                    (schedule.ProjectSkillRequirements ?? new List<ProjectSkillRequirement>()).Where(r => r.ProjectType != ProjectType.None),
+                    r => r.ProjectType, ProjSkillReqFingerprint)
+            };
+            bool boardWritten = !payload.HasDateBaseline || payload.BoardOrAttendanceChanged || forceOverwrite;
+
+            AppLogger.Info(
+                $"[{Module}.SaveScheduleWithDelta] {date:yyyy-MM-dd} force={forceOverwrite}: dateBaseline={hasDateBaseline}, boardChanged={boardChanged}, " +
+                $"slots={schedule.Projects.Count}, attendances={schedule.WorkerAttendance.Count}, entries={schedule.AttendanceEntries.Count}, " +
+                $"prefs={schedule.Preferences.Count}, teams={schedule.Teams.Count}, skills={schedule.Skills?.Count ?? 0}, projSkillReqs={schedule.ProjectSkillRequirements?.Count ?? 0}");
+
+            // 1. PostgreSQL: single transaction, rolled back on any conflict.
+            ServerDispatcher.PersistScheduleDelta(payload, forceOverwrite);
+
+            // 2. Local offline snapshot (only after the server commit succeeded).
+            OfflineSnapshot.Save(schedule, writeToDatabase: false);
+
+            // 3. Move the baselines to what was just written (only the written rows / board, so concurrent server
+            //    edits to rows this workbook never touched are still detected on the next save).
+            RefreshBaselinesAfterSave(payload, boardWritten);
+            return true;
+        }
+        catch (ConcurrencyConflictException cex)
+        {
+            conflicts = cex.Conflicts;
+            errorMessage = cex.Message;
+            AppLogger.Warn($"[{Module}] Delta save rolled back: {cex.Conflicts.Count} concurrency conflict(s).");
+            return false;
+        }
+        catch (Exception ex)
+        {
+            errorMessage = ex.Message;
+            AppLogger.Error($"[{Module}] SaveScheduleWithDelta failed", ex);
+            return false;
+        }
+    }
+
+    private static void RefreshBaselinesAfterSave(ScheduleDeltaPayload payload, bool boardWritten)
+    {
+        try
+        {
+            var db = new PostgreSqlService();
+
+            static List<T> Written<T>(TableDelta<T> d) =>
+                d.Added.Concat(d.Modified.Select(m => m.Record)).Concat(d.FallbackUpsert).ToList();
+
+            // key (normalised exactly like the baseline key) -> server updated_at
+            Dictionary<string, DateTime?> UpdatedAtByKey(string sql, object param, string keyColumn)
+            {
+                var map = new Dictionary<string, DateTime?>(StringComparer.Ordinal);
+                foreach (var row in db.Query<dynamic>(sql, param))
+                {
+                    var r = (IDictionary<string, object>)row;
+                    string key = Norm(Convert.ToString(r[keyColumn], CultureInfo.InvariantCulture)).ToUpperInvariant();
+                    map[key] = ToUtcDateTime(r["updated_at"]);
+                }
+                return map;
+            }
+
+            var prefs = Written(payload.Preferences);
+            if (prefs.Count > 0)
+            {
+                var ts = UpdatedAtByKey("SELECT staff_id, updated_at FROM worker_preferences WHERE staff_id = ANY(@Ids);",
+                    new { Ids = prefs.Select(p => p.StaffID).Distinct().ToArray() }, "staff_id");
+                foreach (var p in prefs)
+                    if (ts.TryGetValue(p.StaffID.ToString(CultureInfo.InvariantCulture), out DateTime? u)) PrefBaseline.UpsertEntry(p.StaffID, PrefFingerprint(p), u);
+            }
+
+            var teams = Written(payload.Teams);
+            if (teams.Count > 0)
+            {
+                var ts = UpdatedAtByKey("SELECT team_name, updated_at FROM teams_master WHERE UPPER(TRIM(team_name)) = ANY(@Keys);",
+                    new { Keys = teams.Select(TeamKey).Distinct().ToArray() }, "team_name");
+                foreach (var t in teams)
+                    if (ts.TryGetValue(TeamKey(t), out DateTime? u)) TeamBaseline.UpsertEntry(TeamKey(t), TeamFingerprint(t), u);
+            }
+
+            var skills = Written(payload.Skills);
+            if (skills.Count > 0)
+            {
+                var ts = UpdatedAtByKey("SELECT skill_name, updated_at FROM lookup_schedule_skills WHERE UPPER(TRIM(skill_name)) = ANY(@Keys);",
+                    new { Keys = skills.Select(SkillKey).Distinct().ToArray() }, "skill_name");
+                foreach (var s in skills)
+                    if (ts.TryGetValue(SkillKey(s), out DateTime? u)) SkillBaseline.UpsertEntry(SkillKey(s), SkillFingerprint(s), u);
+            }
+
+            var reqs = Written(payload.ProjectSkillRequirements);
+            if (reqs.Count > 0)
+            {
+                var ts = UpdatedAtByKey("SELECT project_type, updated_at FROM project_skill_requirements WHERE project_type = ANY(@Keys);",
+                    new { Keys = reqs.Select(r => r.ProjectType.ToString()).Distinct().ToArray() }, "project_type");
+                foreach (var r in reqs)
+                    if (ts.TryGetValue(r.ProjectType.ToString().ToUpperInvariant(), out DateTime? u)) ProjSkillReqBaseline.UpsertEntry(r.ProjectType, ProjSkillReqFingerprint(r), u);
+            }
+
+            if (boardWritten)
+            {
+                var schedule = payload.Schedule;
+                _baselineDate = schedule.DailyScheduleDate;
+                _baselineBoardFingerprint = BoardFingerprint(schedule);
+                _baselineBoardMaxUpdatedAt = QueryBoardMaxUpdatedAt(db, schedule.DailyScheduleDate);
+                schedule.BoardServerUpdatedAt = _baselineBoardMaxUpdatedAt;
+            }
+        }
+        catch (Exception ex)
+        {
+            // The save itself committed: a stale baseline only costs an extra (harmless) concurrency check next time.
+            AppLogger.Warn($"[{Module}] Post-save baseline refresh failed: {ex.Message}");
+        }
+    }
+
+    // =========================================================================
+    // 1b. DELTA BASELINES & FINGERPRINTS
+    // =========================================================================
+    // Rows as last loaded from (or saved to) the server; diffing the sheet against them yields the delta to save.
+    private static readonly TableBaseline<long> PrefBaseline = new();
+    private static readonly TableBaseline<string> TeamBaseline = new();
+    private static readonly TableBaseline<string> SkillBaseline = new();
+    private static readonly TableBaseline<ProjectType> ProjSkillReqBaseline = new();
+
+    // Date-scoped board / settings / daily attendance baseline (one working date at a time).
+    private static DateOnly? _baselineDate;
+    private static string? _baselineBoardFingerprint;
+    private static DateTime? _baselineBoardMaxUpdatedAt;
+
+    private const string Sep = "\u001F";
+
+    private static string Norm(string? s) => (s ?? string.Empty).Trim();
+    private static string NormList(IEnumerable<string>? items, bool upper = false) =>
+        string.Join(",", (items ?? Enumerable.Empty<string>())
+            .Where(s => !string.IsNullOrWhiteSpace(s))
+            .Select(s => upper ? s.Trim().ToUpperInvariant() : s.Trim()));
+    private static string NormDec(decimal d) => decimal.Round(d, 2).ToString("F2", CultureInfo.InvariantCulture);
+
+    /// <summary>Whole seconds (Excel serial times carry floating-point noise).</summary>
+    private static string NormTime(TimeOnly? t) =>
+        t.HasValue ? ((long)Math.Round(t.Value.ToTimeSpan().TotalSeconds)).ToString(CultureInfo.InvariantCulture) : string.Empty;
+
+    private static string TeamKey(TeamRecord t) => Norm(t.TeamName).ToUpperInvariant();
+    private static string SkillKey(ScheduleSkillRecord s) => Norm(s.SkillName).ToUpperInvariant();
+
+    private static string PrefFingerprint(WorkerPreference p) => string.Join(Sep,
+        p.StaffID.ToString(CultureInfo.InvariantCulture),
+        NormList(p.Team),
+        Norm(p.PrimarySkill),
+        NormList(p.OtherSkills),
+        NormList(p.BlacklistedSkills),
+        p.PreferredVehicleType.ToString(),
+        Norm(p.DedicatedVehiclePlate).ToUpperInvariant(),
+        p.PreferredShift.ToString(),
+        Math.Max(0, p.MaxDaysPerWeek).ToString(CultureInfo.InvariantCulture),
+        p.RestDayPreference.ToString());
+
+    private static string TeamFingerprint(TeamRecord t) => string.Join(Sep,
+        Norm(t.TeamName),
+        t.TeamLeaderStaffID.ToString(CultureInfo.InvariantCulture),
+        NormList(t.DefaultVehicles, upper: true));
+
+    private static string SkillFingerprint(ScheduleSkillRecord s) => string.Join(Sep,
+        Norm(s.SkillName),
+        Norm(s.DisplayIcon));
+
+    private static string ProjSkillReqFingerprint(ProjectSkillRequirement r) => string.Join(Sep,
+        r.ProjectType.ToString(),
+        NormList(r.Skills),
+        string.Join(",", (r.Vehicles ?? new List<VehicleType>()).Where(v => v != VehicleType.None).Distinct().Select(v => v.ToString())));
+
+    /// <summary>
+    /// Fingerprint of everything written for one working date: settings, persisted board slots (same filter as the
+    /// dispatcher) and daily attendance rows. Derived / display-only fields (project names, staff names, ProjectsDone,
+    /// Total Flattened Hours, Next Day Start Time) are excluded.
+    /// </summary>
+    private static string BoardFingerprint(ScheduleRecord s)
+    {
+        var parts = new List<string>
+        {
+            s.DailyScheduleDate.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture),
+            NormTime(s.DayStartTime), NormTime(s.LateCutOffTime), NormTime(s.OTStartTime)
+        };
+
+        foreach (var p in s.Projects
+                     .Where(p => p.SlotIndex >= 0 && (p.Workers.Count > 0 || p.Vehicles.Count > 0 || p.PremixHoles > 0))
+                     .OrderBy(p => p.Shift.ToString(), StringComparer.Ordinal).ThenBy(p => p.SlotIndex))
+        {
+            parts.Add(string.Join("|",
+                p.Shift.ToString(), p.SlotIndex.ToString(CultureInfo.InvariantCulture),
+                Norm(p.ProjectID).ToUpperInvariant(), Math.Max(0, p.PremixHoles).ToString(CultureInfo.InvariantCulture),
+                NormList(p.Workers), NormList(p.Vehicles, upper: true), Norm(p.Remarks)));
+        }
+
+        foreach (var a in s.WorkerAttendance.Where(a => a.StaffID > 0).OrderBy(a => a.StaffID))
+        {
+            parts.Add(string.Join("|",
+                a.StaffID.ToString(CultureInfo.InvariantCulture), a.AttendanceStatus.ToString(),
+                NormTime(a.ClockInTime), NormTime(a.ClockOutTime), Norm(a.ProjectCheckIns),
+                NormDec(a.RegularShift), NormDec(a.AdditionalShifts), NormDec(a.OTHours), NormDec(a.AdditionalOTHours),
+                a.IsAllocated ? "1" : "0"));
+        }
+
+        return string.Join(Sep, parts);
+    }
+
+    private static DateTime? QueryBoardMaxUpdatedAt(PostgreSqlService db, DateOnly date) =>
+        ToUtcDateTime(db.Query<DateTime?>(ServerDispatcher.SqlScheduleBoardMaxUpdatedAt, new { ScheduleDate = date.ToDateTime(TimeOnly.MinValue) })
+            .FirstOrDefault());
+
+    /// <summary>
+    /// Server <c>updated_at</c> as a concurrency token. Kept exactly as Npgsql returned it (UTC for <c>timestamptz</c>,
+    /// Unspecified for <c>timestamp</c>) so it round-trips against the column's own type.
+    /// </summary>
+    private static DateTime? ToUtcDateTime(object? raw) => raw switch
+    {
+        DateTime dt => dt.Kind == DateTimeKind.Local ? DateTime.SpecifyKind(dt.ToUniversalTime(), DateTimeKind.Utc) : dt,
+        DateTimeOffset dto => DateTime.SpecifyKind(dto.UtcDateTime, DateTimeKind.Utc),
+        _ => null
+    };
+
+    // =========================================================================
+    // 1c. CONCURRENCY CONFLICT RESOLUTION ("Keep Server Values")
+    // =========================================================================
+    /// <summary>
+    /// After the pane wrote the server's values into the conflicting cells, re-reads ONLY the conflicting reference
+    /// rows and moves their baselines to the server's fingerprint + <c>updated_at</c>. A board conflict re-fetches the
+    /// date and re-renders the board + Daily Attendances (never the AttendanceEntriesTable) from the server copy.
+    /// Runs on the Excel macro thread (the pane wraps the action).
+    /// </summary>
+    internal static void AcceptServerConflictBaselines(IReadOnlyList<ConcurrencyConflict> conflicts)
+    {
+        if (conflicts == null || conflicts.Count == 0) return;
+        if (!ServerEnvironment.IsOnline)
+        {
+            AppLogger.Warn($"[{Module}] Keep Server Values: server offline, conflict baselines not refreshed.");
+            return;
+        }
+
+        List<string> KeysFor(string table) => conflicts
+            .Where(c => string.Equals(c.TableName, table, StringComparison.OrdinalIgnoreCase))
+            .Select(c => (c.RawKeyValue ?? string.Empty).Trim())
+            .Where(k => k.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        long[] prefIds = KeysFor("worker_preferences")
+            .Select(k => long.TryParse(k, NumberStyles.Integer, CultureInfo.InvariantCulture, out long id) ? id : 0)
+            .Where(id => id > 0).Distinct().ToArray();
+        string[] teamKeys = KeysFor("teams_master").Select(k => k.ToUpperInvariant()).ToArray();
+        string[] skillKeys = KeysFor("lookup_schedule_skills").Select(k => k.ToUpperInvariant()).ToArray();
+        string[] reqKeys = KeysFor("project_skill_requirements").ToArray();
+        var boardDates = KeysFor("daily_project_schedules")
+            .Select(k => DateOnly.TryParseExact(k, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var d) ? (DateOnly?)d : null)
+            .Where(d => d.HasValue).Select(d => d!.Value).Distinct().ToList();
+        int refreshed = 0;
+
+        try
+        {
+            var db = new PostgreSqlService();
+
+            if (prefIds.Length > 0)
+            {
+                foreach (var r in db.Query<dynamic>("SELECT * FROM worker_preferences WHERE staff_id = ANY(@Ids);", new { Ids = prefIds }))
+                {
+                    WorkerPreference p = MapPreference(r);
+                    PrefBaseline.UpsertEntry(p.StaffID, PrefFingerprint(p), p.ServerUpdatedAt);
+                    refreshed++;
+                }
+            }
+
+            if (teamKeys.Length > 0)
+            {
+                foreach (var r in db.Query<dynamic>("SELECT * FROM teams_master WHERE UPPER(TRIM(team_name)) = ANY(@Keys);", new { Keys = teamKeys }))
+                {
+                    TeamRecord t = MapTeam(r);
+                    TeamBaseline.UpsertEntry(TeamKey(t), TeamFingerprint(t), t.ServerUpdatedAt);
+                    refreshed++;
+                }
+            }
+
+            if (skillKeys.Length > 0)
+            {
+                foreach (var r in db.Query<dynamic>("SELECT skill_name, display_icon, updated_at FROM lookup_schedule_skills WHERE UPPER(TRIM(skill_name)) = ANY(@Keys);", new { Keys = skillKeys }))
+                {
+                    ScheduleSkillRecord s = MapSkill(r);
+                    SkillBaseline.UpsertEntry(SkillKey(s), SkillFingerprint(s), s.ServerUpdatedAt);
+                    refreshed++;
+                }
+            }
+
+            if (reqKeys.Length > 0)
+            {
+                foreach (var r in db.Query<dynamic>("SELECT project_type, required_skills, required_vehicles, updated_at FROM project_skill_requirements WHERE project_type = ANY(@Keys);", new { Keys = reqKeys }))
+                {
+                    ProjectSkillRequirement? req = MapProjectSkillRequirement(r);
+                    if (req == null) continue;
+                    ProjSkillReqBaseline.UpsertEntry(req.ProjectType, ProjSkillReqFingerprint(req), req.ServerUpdatedAt);
+                    refreshed++;
+                }
+            }
+
+            foreach (var date in boardDates)
+            {
+                // Reference baselines are NOT re-captured here: the Preference sheet is not repopulated, so its
+                // untouched rows must keep their original baselines.
+                var fresh = BuildFromServer(db, date, captureReferenceBaselines: false);
+                Hydrate(fresh);
+                SheetMapper.RefreshAfterSave(fresh);
+                refreshed++;
+            }
+
+            AppLogger.Info($"[{Module}] Keep Server Values: refreshed {refreshed} conflict baseline(s) " +
+                $"(prefs {prefIds.Length}, teams {teamKeys.Length}, skills {skillKeys.Length}, projSkillReqs {reqKeys.Length}, board dates {boardDates.Count}).");
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error($"[{Module}] AcceptServerConflictBaselines failed", ex);
+        }
     }
 
     // =========================================================================
@@ -80,7 +420,11 @@ internal static class ServerSyncCommands
             slot.ProjectName = Roster.FindProject(slot.ProjectID)?.Id ?? slot.ProjectName;
     }
 
-    private static ScheduleRecord BuildFromServer(PostgreSqlService db, DateOnly date)
+    /// <param name="captureReferenceBaselines">
+    /// False when only the board is re-rendered (Keep Server Values): the reference-table baselines must then keep
+    /// matching the Preference sheet, which is not repopulated.
+    /// </param>
+    private static ScheduleRecord BuildFromServer(PostgreSqlService db, DateOnly date, bool captureReferenceBaselines = true)
     {
         try { ServerDispatcher.EnsureScheduleSchema(); }
         catch (Exception ex) { AppLogger.Warn($"[{Module}] Schedule schema bootstrap skipped: {ex.Message}"); }
@@ -164,62 +508,39 @@ internal static class ServerSyncCommands
             });
         }
 
+        // Board concurrency token + baseline for this date (fingerprint taken from the rows just loaded).
+        record.BoardServerUpdatedAt = QueryBoardMaxUpdatedAt(db, date);
+        _baselineDate = date;
+        _baselineBoardFingerprint = BoardFingerprint(record);
+        _baselineBoardMaxUpdatedAt = record.BoardServerUpdatedAt;
+
         foreach (var r in db.Query<dynamic>("SELECT * FROM worker_preferences ORDER BY staff_id;"))
-        {
-            record.Preferences.Add(new WorkerPreference
-            {
-                StaffID = Convert.ToInt64(r.staff_id),
-                Team = Arr(r.team),
-                PrimarySkill = Text(r.primary_skill),
-                OtherSkills = Arr(r.other_skills),
-                BlacklistedSkills = Arr(r.blacklisted_skills),
-                PreferredVehicleType = Parse(r.preferred_vehicle_type, VehicleType.None),
-                DedicatedVehiclePlate = Text(r.dedicated_vehicle_plate),
-                PreferredShift = Parse(r.preferred_shift, Shifts.None),
-                MaxDaysPerWeek = Convert.ToInt32(r.max_days_per_week),
-                RestDayPreference = Parse(r.rest_day_preference, Days.None)
-            });
-        }
+            record.Preferences.Add(MapPreference(r));
 
         foreach (var r in db.Query<dynamic>("SELECT * FROM teams_master ORDER BY team_name;"))
-        {
-            object? leader = r.team_leader_staff_id;
-            record.Teams.Add(new TeamRecord
-            {
-                TeamName = Text(r.team_name),
-                TeamLeaderStaffID = leader != null ? Convert.ToInt64(leader) : 0,
-                DefaultVehicles = Arr(r.default_vehicles)
-            });
-        }
+            record.Teams.Add(MapTeam(r));
 
         // Preference[SkillsTable] (source 3 of the unified skill list).
-        foreach (var r in db.Query<dynamic>("SELECT skill_name, display_icon FROM lookup_schedule_skills ORDER BY skill_name;"))
-        {
-            record.Skills.Add(new ScheduleSkillRecord
-            {
-                SkillName = Text(r.skill_name),
-                DisplayIcon = Text(r.display_icon)
-            });
-        }
+        foreach (var r in db.Query<dynamic>("SELECT skill_name, display_icon, updated_at FROM lookup_schedule_skills ORDER BY skill_name;"))
+            record.Skills.Add(MapSkill(r));
         BoardContext.SetSkillLicenseTypes(QuerySkillLicenseTypes(db));
         BoardContext.SetSkills(record.Skills);
 
-        foreach (var r in db.Query<dynamic>("SELECT project_type, required_skills, required_vehicles FROM project_skill_requirements ORDER BY project_type;"))
+        foreach (var r in db.Query<dynamic>("SELECT project_type, required_skills, required_vehicles, updated_at FROM project_skill_requirements ORDER BY project_type;"))
         {
-            var pt = Parse(r.project_type, ProjectType.None);
-            if (pt == ProjectType.None) continue;
-            record.ProjectSkillRequirements.Add(new ProjectSkillRequirement
-            {
-                ProjectType = pt,
-                Skills = Arr(r.required_skills),
-                Vehicles = Arr((object?)r.required_vehicles)
-                    .Select(v => Parse(v, VehicleType.None))
-                    .Where(v => v != VehicleType.None)
-                    .Distinct()
-                    .ToList()
-            });
+            ProjectSkillRequirement? req = MapProjectSkillRequirement(r);
+            if (req != null) record.ProjectSkillRequirements.Add(req);
         }
         BoardContext.SetProjectSkillRequirements(record.ProjectSkillRequirements);
+
+        // Only reached when the server answered: an empty result is an authoritative (empty) baseline.
+        if (captureReferenceBaselines)
+        {
+            PrefBaseline.Capture(record.Preferences.Where(p => p.StaffID > 0), p => p.StaffID, PrefFingerprint, p => p.ServerUpdatedAt);
+            TeamBaseline.Capture(record.Teams.Where(t => !string.IsNullOrWhiteSpace(t.TeamName)), TeamKey, TeamFingerprint, t => t.ServerUpdatedAt);
+            SkillBaseline.Capture(record.Skills.Where(s => !string.IsNullOrWhiteSpace(s.SkillName)), SkillKey, SkillFingerprint, s => s.ServerUpdatedAt);
+            ProjSkillReqBaseline.Capture(record.ProjectSkillRequirements, r => r.ProjectType, ProjSkillReqFingerprint, r => r.ServerUpdatedAt);
+        }
 
         // Licensed skills are derived from StaffManager data, never stored with the preference.
         var vehicleLicenses = QueryVehicleLicenses(db);
@@ -535,7 +856,62 @@ internal static class ServerSyncCommands
     }
 
     // =========================================================================
-    // 5. DYNAMIC ROW HELPERS
+    // 5. REFERENCE ROW MAPPERS (shared by the load and the conflict re-query)
+    // =========================================================================
+    private static WorkerPreference MapPreference(dynamic r) => new()
+    {
+        StaffID = Convert.ToInt64(r.staff_id),
+        Team = Arr(r.team),
+        PrimarySkill = Text(r.primary_skill),
+        OtherSkills = Arr(r.other_skills),
+        BlacklistedSkills = Arr(r.blacklisted_skills),
+        PreferredVehicleType = Parse(r.preferred_vehicle_type, VehicleType.None),
+        DedicatedVehiclePlate = Text(r.dedicated_vehicle_plate),
+        PreferredShift = Parse(r.preferred_shift, Shifts.None),
+        MaxDaysPerWeek = Convert.ToInt32(r.max_days_per_week),
+        RestDayPreference = Parse(r.rest_day_preference, Days.None),
+        ServerUpdatedAt = ToUtcDateTime((object?)r.updated_at)
+    };
+
+    private static TeamRecord MapTeam(dynamic r)
+    {
+        object? leader = r.team_leader_staff_id;
+        return new TeamRecord
+        {
+            TeamName = Text(r.team_name),
+            TeamLeaderStaffID = leader != null ? Convert.ToInt64(leader) : 0,
+            DefaultVehicles = Arr(r.default_vehicles),
+            ServerUpdatedAt = ToUtcDateTime((object?)r.updated_at)
+        };
+    }
+
+    private static ScheduleSkillRecord MapSkill(dynamic r) => new()
+    {
+        SkillName = Text(r.skill_name),
+        DisplayIcon = Text(r.display_icon),
+        ServerUpdatedAt = ToUtcDateTime((object?)r.updated_at)
+    };
+
+    /// <summary>Null for an unknown / <c>None</c> project type.</summary>
+    private static ProjectSkillRequirement? MapProjectSkillRequirement(dynamic r)
+    {
+        ProjectType pt = Parse((object?)r.project_type, ProjectType.None);
+        if (pt == ProjectType.None) return null;
+        return new ProjectSkillRequirement
+        {
+            ProjectType = pt,
+            Skills = Arr((object?)r.required_skills),
+            Vehicles = Arr((object?)r.required_vehicles)
+                .Select(v => Parse(v, VehicleType.None))
+                .Where(v => v != VehicleType.None)
+                .Distinct()
+                .ToList(),
+            ServerUpdatedAt = ToUtcDateTime((object?)r.updated_at)
+        };
+    }
+
+    // =========================================================================
+    // 6. DYNAMIC ROW HELPERS
     // =========================================================================
     private static string Text(object? v) => v?.ToString() ?? string.Empty;
 

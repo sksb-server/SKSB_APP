@@ -13,7 +13,8 @@ public enum ValidationSeverity
 
 /// <summary>
 /// One structured validation finding. Carries the exact sheet / cell location so the Validation Task Pane
-/// can navigate straight to the offending cell.
+/// can navigate straight to the offending cell. For <see cref="IsConcurrencyConflict"/> issues,
+/// <see cref="OriginalValue"/> holds the server's value for that cell (written back by "Keep Server Values").
 /// </summary>
 public sealed record ValidationIssue(
     ValidationSeverity Severity,
@@ -25,7 +26,8 @@ public sealed record ValidationIssue(
     string Message,
     bool IsStackedHistoryEdit = false,
     object? OriginalValue = null,
-    string? RowKey = null)
+    string? RowKey = null,
+    bool IsConcurrencyConflict = false)
 {
     // =========================================================================
     // 1. DISPLAY HELPERS

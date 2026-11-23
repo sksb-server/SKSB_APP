@@ -2,6 +2,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Text.Json.Serialization;
 using SKSB_App.Core.Types.Attributes;
 
 // =========================================================================
@@ -79,6 +80,9 @@ public record StaffRecord
     public List<VehicleLicense> VehicleLicenses { get; set; } = new();
     public List<SkillLicense> SkillLicenses { get; set; } = new();
 
+    /// <summary>staff_master.updated_at as last read from the server (optimistic concurrency token; never in Excel/JSON).</summary>
+    [JsonIgnore]
+    public DateTime? ServerUpdatedAt { get; set; }
 }
 
 public record StaffDetails
@@ -206,6 +210,10 @@ public record VehicleLicense : StaffLicenseBase
     [ColumnDefault(DefaultKind.AutoIncrement)]
     public long VehicleLicenseID { get; set; } = 0;
 
+    /// <summary>staff_vehicle_licenses.updated_at as last read from the server (optimistic concurrency token).</summary>
+    [JsonIgnore]
+    public DateTime? ServerUpdatedAt { get; set; }
+
     [ExcelColumn("Vehicle License Class", isRequired: true)]
     [ColumnRule("VehicleLicenseClassList", IsRequired = true)]
     [ColumnDefault(DefaultKind.Literal, literalValue: "D")]
@@ -241,6 +249,10 @@ public record SkillLicense : StaffLicenseBase
     [ExcelColumn("Skill License ID", isRequired: true)]
     [ColumnDefault(DefaultKind.AutoIncrement)]
     public long SkillLicenseID { get; set; } = 0;
+
+    /// <summary>staff_skill_licenses.updated_at as last read from the server (optimistic concurrency token).</summary>
+    [JsonIgnore]
+    public DateTime? ServerUpdatedAt { get; set; }
 
     [ExcelColumn("Skill License Type", isRequired: true)]
     [ColumnRule("SkillLicenseTypesTable[Skill License Types]", IsRequired = true)]

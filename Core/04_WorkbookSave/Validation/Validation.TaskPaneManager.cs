@@ -115,7 +115,8 @@ public static class ValidationTaskPaneManager
         Action? onDebugQuitAnyway = null,
         Action? onRevertHistoryEdits = null,
         Action? onCloneHistoryAsNewRows = null,
-        bool showBlockingNotice = false)
+        bool showBlockingNotice = false,
+        Action? onKeepServerValues = null)
     {
         errors ??= new List<ValidationIssue>();
         warnings ??= new List<ValidationIssue>();
@@ -158,18 +159,22 @@ public static class ValidationTaskPaneManager
                 isClosing,
                 WrapMacro(onDebugQuitAnyway, "debug quit"),
                 WrapMacro(revertAction, "revert history edits"),
-                WrapMacro(cloneAction, "clone history edits as new rows"));
+                WrapMacro(cloneAction, "clone history edits as new rows"),
+                WrapMacro(onKeepServerValues, "keep server values"));
 
             entry.Pane.Visible = true;
 
-            string summary = errors.Count == 0 && warnings.Count == 0
+            bool isConflictMode = errors.Count == 0 && warnings.Any(w => w.IsConcurrencyConflict);
+            string summary = isConflictMode
+                ? $"{moduleName}: {warnings.Count} concurrent edit conflict(s) — see the Validation Issues pane."
+                : errors.Count == 0 && warnings.Count == 0
                 ? $"{moduleName}: all validation checks passed."
                 : $"{moduleName}: {errors.Count} error(s), {warnings.Count} warning(s) — see the Validation Issues pane.";
             SheetOperations.ShowStatusConfirmation(summary);
 
             if (showBlockingNotice && (errors.Count > 0 || warnings.Count > 0))
             {
-                ShowBlockingNotice(moduleName, errors.Count, warnings.Count, isClosing);
+                ShowBlockingNotice(moduleName, errors.Count, warnings.Count, isClosing, isConflictMode);
             }
         }
         catch (Exception ex)
@@ -353,7 +358,7 @@ public static class ValidationTaskPaneManager
     }
 
     /// <summary>Concise Excel-owned notice explaining why Save/Close did not complete. Never throws.</summary>
-    private static void ShowBlockingNotice(string moduleName, int errorCount, int warningCount, bool isClosing)
+    private static void ShowBlockingNotice(string moduleName, int errorCount, int warningCount, bool isClosing, bool isConflict = false)
     {
         try
         {
@@ -372,6 +377,13 @@ public static class ValidationTaskPaneManager
                     ? $"{errorCount} error(s) and {warningCount} warning(s) were found."
                     : $"{errorCount} error(s) were found.";
                 text = $"{prefix}\n\nSaving is blocked until all errors are resolved. Use the Validation Issues panel at the bottom of Excel to click, navigate to, and fix each error.";
+            }
+            else if (isConflict)
+            {
+                icon = MessageBoxIcon.Warning;
+                caption = $"{moduleName} — Concurrent Edit Conflict";
+                string actionLabel = isClosing ? "Overwrite & Close" : "Overwrite Server & Save";
+                text = $"{warningCount} concurrent edit conflict(s) were detected because another user updated the same record(s) on the server. Save is paused.\n\nUse the Validation Issues panel at the bottom of Excel to review each difference, click \"Keep Server Values\" to keep the server copy, or edit the cell(s) and click \"{actionLabel}\" to overwrite.";
             }
             else
             {

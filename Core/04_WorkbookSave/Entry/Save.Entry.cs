@@ -3,12 +3,15 @@ namespace SKSB_App.Core.WorkbookSave.Entry;
 using SKSB_App.Core.Diagnostics;
 using System;
 using System.Collections.Generic;
+using System.Globalization;
+using System.Linq;
 using System.Windows.Forms;
 using ExcelDna.Integration;
 using SKSB_App.Core.Integration.Database;
 using SKSB_App.Core.RuntimeUI.Progress;
 using SKSB_App.Core.RuntimeUI.Undo;
 using SKSB_App.Core.WorkbookOpen.Sheet;
+using SKSB_App.Core.WorkbookSave.SheetMapper;
 using SKSB_App.Core.WorkbookSave.Storage;
 using SKSB_App.Core.WorkbookSave.Validation;
 
@@ -23,19 +26,34 @@ public static class SaveEntry
     /// True when the user already reviewed the warnings in the Validation Task Pane and chose "Proceed with Save".
     /// Errors always block.
     /// </param>
-    public static bool TrySave<T>(SaveContract<T> contract, bool showSuccessNotification = true, bool repopulateAfterSave = true, bool bypassWarnings = false)
-        => TrySaveCore(contract, showSuccessNotification, repopulateAfterSave, bypassWarnings, showIssuesOverride: null);
+    /// <param name="forceOverwrite">
+    /// True when the user clicked "Overwrite Server &amp; Save" in the pane's Conflict Mode: concurrency checks are
+    /// skipped (and, in DEBUG, so is the Debug Save Intercept, since the user already confirmed explicitly).
+    /// </param>
+    public static bool TrySave<T>(
+        SaveContract<T> contract,
+        bool showSuccessNotification = true,
+        bool repopulateAfterSave = true,
+        bool bypassWarnings = false,
+        bool forceOverwrite = false)
+        => TrySaveCore(contract, showSuccessNotification, repopulateAfterSave, bypassWarnings, forceOverwrite, showIssuesOverride: null);
 
     /// <param name="showIssuesOverride">
     /// Replaces the default task-pane presentation when validation blocks the save (used by the close flow so the
     /// pane stays in "closing" mode).
+    /// </param>
+    /// <param name="showConflictsOverride">
+    /// Replaces the default Conflict Mode presentation when the commit is rolled back by concurrency conflicts (used
+    /// by the close flow so "Overwrite &amp; Close" closes the workbook afterwards).
     /// </param>
     private static bool TrySaveCore<T>(
         SaveContract<T> contract,
         bool showSuccessNotification,
         bool repopulateAfterSave,
         bool bypassWarnings,
-        Action<List<ValidationIssue>, List<ValidationIssue>>? showIssuesOverride)
+        bool forceOverwrite,
+        Action<List<ValidationIssue>, List<ValidationIssue>>? showIssuesOverride,
+        Action<IReadOnlyList<ConcurrencyConflict>>? showConflictsOverride = null)
     {
         if (SheetOperations.IsMasterTemplateFile() || SheetOperations.IsTemplateEditMode) return false;
 
@@ -115,49 +133,96 @@ public static class SaveEntry
                 }
 
 #if DEBUG
-                // DEBUG ONLY: confirm before every commit. Rule 2 modal exception: unfreeze + hide floating widgets first.
-                SKSB_App.Core.RuntimeUI.DropDown.Arrow.HideAll();
-                try { xlApp.EnableEvents = true; } catch { }
-                try { xlApp.ScreenUpdating = true; } catch { }
+                // DEBUG ONLY: confirm before every commit (skipped for "Overwrite Server & Save", already confirmed).
+                // Rule 2 modal exception: unfreeze + hide floating widgets first.
+                if (!forceOverwrite)
+                {
+                    SKSB_App.Core.RuntimeUI.DropDown.Arrow.HideAll();
+                    try { xlApp.EnableEvents = true; } catch { }
+                    try { xlApp.ScreenUpdating = true; } catch { }
 
-                using var debugPrompt = new ExitConflictDialog(
-                    contract.ModuleName,
-                    string.Empty,
-                    isClosing: false,
-                    isDebugPrompt: true
-                );
-                using (LoadingOverlay.Suspend())
-                {
-                    debugPrompt.ShowDialog();
-                }
-                switch (debugPrompt.Resolution)
-                {
-                    case ExitResolution.Retry:
-                        try { xlApp.ScreenUpdating = false; } catch { }
-                        break; // Proceed to contract.SaveToServer(data) below
-                    case ExitResolution.SaveLocallyAndQuit:
-                        LoadingOverlay.Report("Saving records to local offline storage...");
-                        contract.SaveOffline(data);
-                        ServerEnvironment.EnterOfflineMode("Saved records to local offline storage.");
-                        contract.UpdateWindowCaption();
-                        LoadingOverlay.Report("Refreshing worksheet tables...");
-                        if (repopulateAfterSave) (contract.RefreshAfterSave ?? contract.PopulateWorksheet)?.Invoke(data);
-                        StackedEntryGuard.RefreshWorkbookSnapshots(activeWb);
-                        UndoManager.ClearWorkbook(activeWb);
-                        try { ((dynamic)ExcelDnaUtil.Application).ActiveWorkbook.Saved = true; } catch { }
-                        if (showSuccessNotification)
-                            SaveNotificationDialog.ShowOffline(contract.ModuleName, "Debug: Records stashed to offline JSON storage.");
-                        return true;
-                    case ExitResolution.QuitAnyway:
-                    case ExitResolution.Cancel:
-                    default:
-                        AppLogger.Info($"[{contract.ModuleName}] Debug save cancelled by user.");
-                        return false;
+                    using var debugPrompt = new ExitConflictDialog(
+                        contract.ModuleName,
+                        string.Empty,
+                        isClosing: false,
+                        isDebugPrompt: true
+                    );
+                    using (LoadingOverlay.Suspend())
+                    {
+                        debugPrompt.ShowDialog();
+                    }
+                    switch (debugPrompt.Resolution)
+                    {
+                        case ExitResolution.Retry:
+                            try { xlApp.ScreenUpdating = false; } catch { }
+                            break; // Proceed to the server commit below
+                        case ExitResolution.SaveLocallyAndQuit:
+                            LoadingOverlay.Report("Saving records to local offline storage...");
+                            contract.SaveOffline(data);
+                            ServerEnvironment.EnterOfflineMode("Saved records to local offline storage.");
+                            contract.UpdateWindowCaption();
+                            LoadingOverlay.Report("Refreshing worksheet tables...");
+                            if (repopulateAfterSave) (contract.RefreshAfterSave ?? contract.PopulateWorksheet)?.Invoke(data);
+                            StackedEntryGuard.RefreshWorkbookSnapshots(activeWb);
+                            UndoManager.ClearWorkbook(activeWb);
+                            try { ((dynamic)ExcelDnaUtil.Application).ActiveWorkbook.Saved = true; } catch { }
+                            if (showSuccessNotification)
+                                SaveNotificationDialog.ShowOffline(contract.ModuleName, "Debug: Records stashed to offline JSON storage.");
+                            return true;
+                        case ExitResolution.QuitAnyway:
+                        case ExitResolution.Cancel:
+                        default:
+                            AppLogger.Info($"[{contract.ModuleName}] Debug save cancelled by user.");
+                            return false;
+                    }
                 }
 #endif
 
                 LoadingOverlay.Report("Committing records to PostgreSQL server...", "Executing database transaction...");
-                var (success, dbErrRelease) = contract.SaveToServer(data);
+                var (success, dbErrRelease, conflicts) = CommitToServer(contract, data, forceOverwrite);
+                if (!success && conflicts is { Count: > 0 })
+                {
+                    // Nothing was saved. List the field-level diffs in the docked pane (Conflict Mode): no popup.
+                    AppLogger.Warn($"[{contract.ModuleName}] Save rolled back: {conflicts.Count} concurrency conflict(s).");
+                    SKSB_App.Core.RuntimeUI.DropDown.Arrow.HideAll();
+                    try { xlApp.EnableEvents = true; } catch { }
+                    try { xlApp.ScreenUpdating = true; } catch { }
+
+                    if (showConflictsOverride != null)
+                    {
+                        showConflictsOverride(conflicts);
+                        return false;
+                    }
+
+                    object? wbRef = (object?)activeWb;
+                    var conflictIssues = BuildConflictIssues(wbRef, conflicts);
+                    Action overwrite = () =>
+                    {
+                        AppLogger.Info($"[{contract.ModuleName}] Concurrency conflict: user chose Overwrite Server & Save.");
+                        TrySave(contract, showSuccessNotification, repopulateAfterSave, bypassWarnings: true, forceOverwrite: true);
+                    };
+                    Action keepServer = () =>
+                    {
+                        AppLogger.Info($"[{contract.ModuleName}] Concurrency conflict: user chose Keep Server Values.");
+                        ApplyServerValuesToWorkbook(wbRef, conflictIssues);
+                        contract.OnAcceptServerValues?.Invoke(conflicts);
+                        ValidateAndShow(contract, () => TrySave(contract, showSuccessNotification, repopulateAfterSave, bypassWarnings: true, forceOverwrite: false));
+                    };
+
+                    ValidationTaskPaneManager.ShowIssues(
+                        contract.ModuleName,
+                        new List<ValidationIssue>(),
+                        conflictIssues,
+                        onRevalidate: null,
+                        onProceedWithSave: overwrite,
+                        isClosing: false,
+                        onKeepServerValues: keepServer,
+                        showBlockingNotice: true);
+                    SheetOperations.ShowStatusConfirmation(
+                        $"{contract.ModuleName}: save paused — {conflictIssues.Count} concurrent edit conflict(s). See the Validation Issues pane.");
+                    return false;
+                }
+
                 if (success)
                 {
                     AppLogger.Info($"[{contract.ModuleName}] Save committed to PostgreSQL.");
@@ -218,6 +283,326 @@ public static class SaveEntry
             try { xlApp.EnableEvents = origEvents; } catch { }
             try { xlApp.ScreenUpdating = origUpdating; } catch { }
         }
+    }
+
+    /// <summary>Uses the module's concurrency-aware save when wired, else the plain <see cref="SaveContract{T}.SaveToServer"/>.</summary>
+    private static (bool Success, string ErrorMessage, IReadOnlyList<ConcurrencyConflict>? Conflicts) CommitToServer<T>(
+        SaveContract<T> contract, T data, bool forceOverwrite)
+    {
+        if (contract.SaveToServerWithConflictCheck != null)
+            return contract.SaveToServerWithConflictCheck(data, forceOverwrite);
+
+        var (success, error) = contract.SaveToServer(data);
+        return (success, error, null);
+    }
+
+    // =========================================================================
+    // 1b. CONCURRENCY CONFLICTS (Validation Task Pane "Conflict Mode")
+    // =========================================================================
+    /// <summary>Bulk-read snapshot of one ListObject, used to locate conflicting rows / columns.</summary>
+    private sealed class ConflictTableSnapshot
+    {
+        public string SheetName = string.Empty;
+        public int FirstRow;
+        public int FirstCol;
+        public int RowCount;
+        public string[] Headers = Array.Empty<string>();
+        public object[,] Body = new object[2, 2];
+
+        public int FindColumn(string header)
+        {
+            if (string.IsNullOrWhiteSpace(header)) return 0;
+            for (int j = 0; j < Headers.Length; j++)
+            {
+                if (string.Equals(Headers[j], header.Trim(), StringComparison.OrdinalIgnoreCase)) return FirstCol + j;
+            }
+            return 0;
+        }
+
+        /// <summary>Excel row whose <paramref name="keyHeader"/> cell equals <paramref name="rawKey"/> (0 = not found).</summary>
+        public int FindRow(string keyHeader, string rawKey)
+        {
+            int keyCol = FindColumn(keyHeader);
+            if (keyCol == 0 || string.IsNullOrWhiteSpace(rawKey)) return 0;
+            int j = keyCol - FirstCol + 1;
+            for (int i = 1; i <= RowCount; i++)
+            {
+                if (KeysMatch(Body[i, j], rawKey)) return FirstRow + i - 1;
+            }
+            return 0;
+        }
+
+        /// <summary>Numeric keys compare as integers (so "0001" matches 1 / 1.0); anything else as trimmed text.</summary>
+        private static bool KeysMatch(object? cell, string rawKey)
+        {
+            if (cell == null) return false;
+            string cellText = (Convert.ToString(cell, CultureInfo.InvariantCulture) ?? string.Empty).Trim();
+            string key = rawKey.Trim();
+            if (TryParseKey(cell, cellText, out long a) && long.TryParse(key, NumberStyles.Integer, CultureInfo.InvariantCulture, out long b))
+                return a == b;
+            return string.Equals(cellText, key, StringComparison.OrdinalIgnoreCase);
+        }
+
+        private static bool TryParseKey(object cell, string text, out long value)
+        {
+            if (cell is double d && Math.Abs(d - Math.Round(d)) < 1e-9 && d >= long.MinValue && d <= long.MaxValue)
+            {
+                value = (long)Math.Round(d);
+                return true;
+            }
+            return long.TryParse(text, NumberStyles.Integer, CultureInfo.InvariantCulture, out value);
+        }
+    }
+
+    /// <summary>Scans the workbook's ListObjects once and snapshots the requested tables (header + body, bulk 2D reads).</summary>
+    private static Dictionary<string, ConflictTableSnapshot> SnapshotConflictTables(object? wbObj, IEnumerable<string> tableNames)
+    {
+        var wanted = new HashSet<string>(tableNames.Where(n => !string.IsNullOrWhiteSpace(n)), StringComparer.OrdinalIgnoreCase);
+        var result = new Dictionary<string, ConflictTableSnapshot>(StringComparer.OrdinalIgnoreCase);
+        if (wbObj == null || wanted.Count == 0) return result;
+
+        try
+        {
+            dynamic wb = wbObj;
+            foreach (dynamic ws in wb.Worksheets)
+            {
+                string sheetName = string.Empty;
+                try { sheetName = Convert.ToString((object)ws.Name) ?? string.Empty; } catch { }
+
+                foreach (dynamic lo in ws.ListObjects)
+                {
+                    string name = string.Empty;
+                    try { name = Convert.ToString((object)lo.Name) ?? string.Empty; } catch { }
+                    if (!wanted.Contains(name) || result.ContainsKey(name)) continue;
+
+                    var snap = new ConflictTableSnapshot { SheetName = sheetName };
+                    try
+                    {
+                        dynamic header = lo.HeaderRowRange;
+                        int colCount = (int)header.Columns.Count;
+                        snap.FirstCol = (int)header.Column;
+                        object[,] headerValues = TableMapper.GetRange2DValues(header, 1, colCount);
+                        snap.Headers = new string[colCount];
+                        for (int j = 1; j <= colCount; j++)
+                            snap.Headers[j - 1] = (Convert.ToString(headerValues[1, j], CultureInfo.InvariantCulture) ?? string.Empty).Trim();
+
+                        dynamic? body = null;
+                        try { body = lo.DataBodyRange; } catch { }
+                        if (body != null)
+                        {
+                            snap.FirstRow = (int)body.Row;
+                            snap.RowCount = (int)body.Rows.Count;
+                            snap.Body = TableMapper.GetRange2DValues(body, snap.RowCount, colCount);
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        AppLogger.Warn($"[SaveEntry] Could not read table '{name}' for conflict mapping: {ex.Message}");
+                    }
+                    result[name] = snap;
+                }
+                if (result.Count == wanted.Count) break;
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn($"[SaveEntry] Conflict table scan failed: {ex.Message}");
+        }
+        return result;
+    }
+
+    /// <summary>
+    /// Turns server-side concurrency conflicts into Conflict-Mode pane issues: one per differing column, pointing at
+    /// the exact sheet cell, with the server value carried in <see cref="ValidationIssue.OriginalValue"/>. Conflicts
+    /// without field diffs (or whose row is not on the sheet) produce a single row-level issue.
+    /// </summary>
+    internal static List<ValidationIssue> BuildConflictIssues(object? wbObj, IReadOnlyList<ConcurrencyConflict> conflicts)
+    {
+        var issues = new List<ValidationIssue>();
+        var tables = SnapshotConflictTables(wbObj, conflicts.Select(c => c.ExcelTableName));
+
+        foreach (var conflict in conflicts)
+        {
+            ConflictTableSnapshot? table = null;
+            if (!string.IsNullOrWhiteSpace(conflict.ExcelTableName)) tables.TryGetValue(conflict.ExcelTableName, out table);
+
+            string sheetName = table?.SheetName ?? string.Empty;
+            int excelRow = table?.FindRow(conflict.KeyColumnHeader, conflict.RawKeyValue) ?? 0;
+            string? rowKey = string.IsNullOrWhiteSpace(conflict.RawKeyValue) ? null : conflict.RawKeyValue;
+
+            if (conflict.FieldDiffs is { Count: > 0 } diffs)
+            {
+                foreach (var diff in diffs)
+                {
+                    int excelCol = excelRow > 0 ? table!.FindColumn(diff.ColumnHeader) : 0;
+                    issues.Add(new ValidationIssue(
+                        ValidationSeverity.Warning,
+                        sheetName,
+                        conflict.ExcelTableName,
+                        excelRow,
+                        excelCol,
+                        diff.ColumnHeader,
+                        $"{conflict.RecordKey}: Server has \"{diff.ServerDisplay}\" — your save would replace it with \"{diff.LocalDisplay}\".",
+                        IsStackedHistoryEdit: false,
+                        OriginalValue: diff.ServerExcelValue,
+                        RowKey: rowKey,
+                        IsConcurrencyConflict: true));
+                }
+            }
+            else
+            {
+                issues.Add(new ValidationIssue(
+                    ValidationSeverity.Warning,
+                    sheetName,
+                    conflict.ExcelTableName,
+                    excelRow,
+                    0,
+                    conflict.KeyColumnHeader,
+                    conflict.Description,
+                    IsStackedHistoryEdit: false,
+                    OriginalValue: null,
+                    RowKey: rowKey,
+                    IsConcurrencyConflict: true));
+            }
+        }
+        return issues;
+    }
+
+    /// <summary>
+    /// "Keep Server Values": writes each conflict issue's server value into its exact cell (only cell-located issues;
+    /// conflicts are a handful of scattered cells, so no bulk range applies), then resets the stacked-edit snapshots
+    /// and undo history. Excel state is frozen and restored in <c>finally</c>. Must run on the macro thread.
+    /// </summary>
+    internal static void ApplyServerValuesToWorkbook(object? wbObj, List<ValidationIssue> conflictIssues)
+    {
+        if (wbObj == null) return;
+        var targets = conflictIssues.Where(i => i.IsConcurrencyConflict && i.ExcelRow > 0 && i.ExcelCol > 0).ToList();
+
+        dynamic xlApp = ExcelDnaUtil.Application;
+        bool origUpdating = true;
+        bool origEvents = true;
+        object? origCalc = null;
+        try { origUpdating = (bool)xlApp.ScreenUpdating; } catch { }
+        try { origEvents = (bool)xlApp.EnableEvents; } catch { }
+        try { origCalc = (object)xlApp.Calculation; } catch { }
+
+        int written = 0;
+        try
+        {
+            try { xlApp.ScreenUpdating = false; } catch { }
+            try { xlApp.EnableEvents = false; } catch { }
+            try { xlApp.Calculation = -4135; } catch { } // xlCalculationManual
+
+            dynamic wb = wbObj;
+            foreach (var group in targets.GroupBy(i => i.SheetName, StringComparer.OrdinalIgnoreCase))
+            {
+                dynamic? ws = null;
+                try { ws = wb.Worksheets[group.Key]; } catch { }
+                if (ws == null)
+                {
+                    AppLogger.Warn($"[SaveEntry] Keep Server Values: sheet '{group.Key}' not found.");
+                    continue;
+                }
+
+                foreach (var issue in group)
+                {
+                    try
+                    {
+                        ws.Cells[issue.ExcelRow, issue.ExcelCol].Value2 = ToExcelCellValue(issue.OriginalValue);
+                        written++;
+                    }
+                    catch (Exception ex)
+                    {
+                        AppLogger.Warn($"[SaveEntry] Keep Server Values: could not write {group.Key}!{issue.CellAddress}: {ex.Message}");
+                    }
+                }
+            }
+
+            StackedEntryGuard.RefreshWorkbookSnapshots(wbObj);
+            UndoManager.ClearWorkbook(wbObj);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("[SaveEntry] Keep Server Values failed", ex);
+        }
+        finally
+        {
+            try { if (origCalc != null) xlApp.Calculation = origCalc; else xlApp.Calculation = -4105; } catch { } // xlCalculationAutomatic
+            try { xlApp.EnableEvents = origEvents; } catch { }
+            try { xlApp.ScreenUpdating = origUpdating; } catch { }
+        }
+
+        AppLogger.Info($"[SaveEntry] Keep Server Values: wrote {written}/{targets.Count} conflicting cell(s).");
+        SheetOperations.ShowStatusConfirmation($"Restored {written} cell(s) to the server's values.");
+    }
+
+    /// <summary>Server value -> COM-safe Value2 (OADate for dates, double for numbers; null clears the cell).</summary>
+    private static object? ToExcelCellValue(object? value) => value switch
+    {
+        null => null,
+        DateTime dt => dt.ToOADate(),
+        DateOnly d => d.ToDateTime(TimeOnly.MinValue).ToOADate(),
+        decimal m => (double)m,
+        long l => (double)l,
+        int i => (double)i,
+        string s when s.Length == 0 => null,
+        _ => value
+    };
+
+    /// <summary>
+    /// Close-time Conflict Mode: "Overwrite &amp; Close" force-saves then closes; "Keep Server Values" restores the
+    /// conflicting cells and re-validates in closing mode so the user can review before "Save &amp; Close".
+    /// Must run on the macro thread (outside <c>WorkbookBeforeClose</c>).
+    /// </summary>
+    private static void ShowClosingConflicts<T>(
+        SaveContract<T> contract,
+        object? wbObj,
+        IReadOnlyList<ConcurrencyConflict> conflicts,
+        List<ValidationIssue> conflictIssues,
+        Action forceClose)
+    {
+        Action overwrite = () =>
+        {
+            AppLogger.Info($"[{contract.ModuleName}] Close: concurrency conflict, user chose Overwrite & Close.");
+            bool saved = TrySaveCore(
+                contract,
+                showSuccessNotification: false,
+                repopulateAfterSave: false,
+                bypassWarnings: true,
+                forceOverwrite: true,
+                showIssuesOverride: (e, w) => ShowClosingIssues(contract, e, w, forceClose, showBlockingNotice: true));
+            if (saved) forceClose();
+        };
+        Action keepServer = () =>
+        {
+            AppLogger.Info($"[{contract.ModuleName}] Close: concurrency conflict, user chose Keep Server Values.");
+            ApplyServerValuesToWorkbook(wbObj, conflictIssues);
+            contract.OnAcceptServerValues?.Invoke(conflicts);
+            var (e, w) = RunValidation(contract);
+            SKSB_App.Core.RuntimeUI.DropDown.Arrow.HideAll();
+            ShowClosingIssues(contract, e, w, forceClose, showBlockingNotice: false);
+        };
+
+        ValidationTaskPaneManager.ShowIssues(
+            contract.ModuleName,
+            new List<ValidationIssue>(),
+            conflictIssues,
+            onRevalidate: null,
+            onProceedWithSave: overwrite,
+            isClosing: true,
+#if DEBUG
+            onDebugQuitAnyway: () =>
+            {
+                AppLogger.Info($"[{contract.ModuleName}] Debug close: user chose Quit Anyway from the conflict pane.");
+                forceClose();
+            },
+#else
+            onDebugQuitAnyway: null,
+#endif
+            onKeepServerValues: keepServer,
+            showBlockingNotice: true);
+        SheetOperations.ShowStatusConfirmation(
+            $"{contract.ModuleName}: close paused — {conflictIssues.Count} concurrent edit conflict(s). See the Validation Issues pane.");
     }
 
     // =========================================================================
@@ -386,43 +771,46 @@ public static class SaveEntry
                 }
 
 #if DEBUG
-                // DEBUG ONLY: confirm before every commit. ScreenUpdating / EnableEvents are already true here (step 3 above).
-                using var closePrompt = new ExitConflictDialog(
-                    contract.ModuleName,
-                    string.Empty,
-                    isClosing: true,
-                    isDebugPrompt: true
-                );
-                using (LoadingOverlay.Suspend())
+                // DEBUG ONLY: confirm before every commit. ("Overwrite & Close" runs through TrySaveCore instead.)
+                // ScreenUpdating / EnableEvents are already true here (step 3 above).
                 {
-                    closePrompt.ShowDialog();
-                }
-                switch (closePrompt.Resolution)
-                {
-                    case ExitResolution.Retry:
-                        break; // Proceed to freeze + contract.SaveToServer(data) below
-                    case ExitResolution.SaveLocallyAndQuit:
-                        LoadingOverlay.Report("Saving records to local offline storage...");
-                        contract.SaveOffline(data);
-                        ServerEnvironment.EnterOfflineMode("Saved records to local offline storage.");
-                        isExiting = true;
-                        unEventHooks();
-                        wb.Saved = true;
-                        cancel = false;
-                        QuitExcelIfLastWorkbook();
-                        return;
-                    case ExitResolution.QuitAnyway:
-                        AppLogger.Info($"[{contract.ModuleName}] Debug close: user chose Quit Anyway (discarded unsaved changes).");
-                        isExiting = true;
-                        unEventHooks();
-                        wb.Saved = true;
-                        cancel = false;
-                        QuitExcelIfLastWorkbook();
-                        return;
-                    case ExitResolution.Cancel:
-                    default:
-                        cancel = true;
-                        return;
+                    using var closePrompt = new ExitConflictDialog(
+                        contract.ModuleName,
+                        string.Empty,
+                        isClosing: true,
+                        isDebugPrompt: true
+                    );
+                    using (LoadingOverlay.Suspend())
+                    {
+                        closePrompt.ShowDialog();
+                    }
+                    switch (closePrompt.Resolution)
+                    {
+                        case ExitResolution.Retry:
+                            break; // Proceed to freeze + server commit below
+                        case ExitResolution.SaveLocallyAndQuit:
+                            LoadingOverlay.Report("Saving records to local offline storage...");
+                            contract.SaveOffline(data);
+                            ServerEnvironment.EnterOfflineMode("Saved records to local offline storage.");
+                            isExiting = true;
+                            unEventHooks();
+                            wb.Saved = true;
+                            cancel = false;
+                            QuitExcelIfLastWorkbook();
+                            return;
+                        case ExitResolution.QuitAnyway:
+                            AppLogger.Info($"[{contract.ModuleName}] Debug close: user chose Quit Anyway (discarded unsaved changes).");
+                            isExiting = true;
+                            unEventHooks();
+                            wb.Saved = true;
+                            cancel = false;
+                            QuitExcelIfLastWorkbook();
+                            return;
+                        case ExitResolution.Cancel:
+                        default:
+                            cancel = true;
+                            return;
+                    }
                 }
 #endif
 
@@ -430,7 +818,27 @@ public static class SaveEntry
                 try { xlApp.EnableEvents = false; } catch { }
 
                 LoadingOverlay.Report("Committing records to PostgreSQL server...", "Executing database transaction...");
-                var (success, dbError) = contract.SaveToServer(data);
+                var (success, dbError, conflicts) = CommitToServer(contract, data, forceOverwrite: false);
+
+                if (!success && conflicts is { Count: > 0 })
+                {
+                    // Nothing was saved: keep the workbook open and list the field-level diffs in the docked pane
+                    // (Conflict Mode) once this COM event has returned. Bulk reads only here; writes happen later.
+                    AppLogger.Warn($"[{contract.ModuleName}] Close: save rolled back by {conflicts.Count} concurrency conflict(s).");
+                    var conflictIssues = BuildConflictIssues((object)wb, conflicts);
+
+                    SKSB_App.Core.RuntimeUI.DropDown.Arrow.HideAll();
+                    try { xlApp.EnableEvents = true; } catch { }
+                    try { xlApp.ScreenUpdating = true; } catch { }
+                    cancel = true;
+                    showingIssuePane = true;
+
+                    object wbRef = (object)wb;
+                    Action forceClose = onForceClose ?? (() => DefaultForceClose(wbRef, unEventHooks));
+                    var capturedConflicts = conflicts;
+                    ExcelAsyncUtil.QueueAsMacro(() => ShowClosingConflicts(contract, wbRef, capturedConflicts, conflictIssues, forceClose));
+                    return;
+                }
 
                 if (success)
                 {
@@ -529,7 +937,15 @@ public static class SaveEntry
                     showSuccessNotification: false,
                     repopulateAfterSave: false,
                     bypassWarnings: true,
-                    showIssuesOverride: (e, w) => ShowClosingIssues(contract, e, w, forceClose, showBlockingNotice: true));
+                    forceOverwrite: false,
+                    showIssuesOverride: (e, w) => ShowClosingIssues(contract, e, w, forceClose, showBlockingNotice: true),
+                    // A conflict on "Save & Close" stays in closing mode so "Overwrite & Close" still closes.
+                    showConflictsOverride: conflicts =>
+                    {
+                        object? wbObj = null;
+                        try { wbObj = ((dynamic)ExcelDnaUtil.Application).ActiveWorkbook; } catch { }
+                        ShowClosingConflicts(contract, wbObj, conflicts, BuildConflictIssues(wbObj, conflicts), forceClose);
+                    });
                 if (saved) forceClose();
             },
             isClosing: true,

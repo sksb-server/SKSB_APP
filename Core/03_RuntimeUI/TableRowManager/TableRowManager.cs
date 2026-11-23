@@ -36,6 +36,38 @@ public static partial class TableRowManager
     private static readonly ConcurrentDictionary<string, TableNature> TableNatures =
         new(StringComparer.OrdinalIgnoreCase);
 
+    /// <summary>Master tables whose server rows are history-preserving (never hard-deleted), so row deletion is blocked.</summary>
+    private static readonly HashSet<string> NoHardDeleteMasterTables =
+        new(StringComparer.OrdinalIgnoreCase)
+        {
+            "AllStaffsTable",
+            "iJobProjectsTable", "MWOProjectsTable", "PVTProjectsTable", "AllProjectsTable",
+            "CompaniesTable", "AllCompaniesTable",
+            "AllVehiclesTable",
+            "WorkshopsTable", "InsuranceCompaniesTable", "FuelCardsTable", "FuelCompanyNamesTable",
+            "WorkerPreferencesTable", "TeamTable", "SkillsTable", "ProjectRequirementsTable",
+            "ProjectTypeRequirementsTable", "SkillIconsTable", "DailyAttendanceTable"
+        };
+
+    /// <summary>Per-table guidance shown when row deletion is blocked on a history-preserving master table.</summary>
+    private static string NoHardDeleteGuidance(string tableName)
+    {
+        if (string.Equals(tableName, "AllStaffsTable", StringComparison.OrdinalIgnoreCase))
+            return "to preserve historical staff records.\n\n" +
+                   "To deactivate a staff member, set their 'Resign Date' or 'Contract Status' instead.";
+        if (tableName.EndsWith("ProjectsTable", StringComparison.OrdinalIgnoreCase))
+            return "to preserve historical project records.\n\n" +
+                   "To close a project, set its 'Status' to 'Cancelled' or 'Completed' instead.";
+        if (string.Equals(tableName, "AllVehiclesTable", StringComparison.OrdinalIgnoreCase))
+            return "to preserve historical vehicle records.\n\n" +
+                   "To retire a vehicle, fill in its 'Sold Date' (Status becomes 'Decommissioned') or set its 'Status' to 'Suspended' instead.";
+        if (tableName is "WorkshopsTable" or "InsuranceCompaniesTable" or "FuelCardsTable" or "FuelCompanyNamesTable")
+            return "to preserve historical records.\n\n" +
+                   "Past maintenances, insurances and fuel transactions still reference this entry; edit the row instead.";
+        return "to preserve historical records.\n\n" +
+               "Existing rows are kept so past projects and records that reference them stay valid; edit the row instead.";
+    }
+
     static TableRowManager()
     {
         // =========================================================================
@@ -386,6 +418,20 @@ public static partial class TableRowManager
                     MessageBoxIcon.Warning
                 );
                 SheetOperations.ShowStatusConfirmation($"Deletion blocked: '{tableName}' is an Additive log table.");
+                return;
+            }
+
+            // GUARD: History-preserving master tables (server rows are never hard-deleted)
+            if (NoHardDeleteMasterTables.Contains(tableName))
+            {
+                MessageBox.Show(
+                    $"Row deletion is disabled for '{tableName}' {NoHardDeleteGuidance(tableName)} " +
+                    "(To remove an unsaved blank/draft row, simply clear its cells.)",
+                    "Deletion Blocked (History Preserved)",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning
+                );
+                SheetOperations.ShowStatusConfirmation($"Deletion blocked: '{tableName}' preserves historical records.");
                 return;
             }
 

@@ -44,8 +44,23 @@ public class Events : ManagerEventsBase<List<VehicleRecord>>
         // otherwise fuel companies / workshops / cards never load until the user presses Load.
         PopulateStartupWhenEmpty = true,
         SaveToServer = list => (ServerSyncCommands.SaveVehiclesSilent(list, out string err), err),
+        SaveToServerWithConflictCheck = (list, force) =>
+        {
+            bool ok = ServerSyncCommands.SaveVehiclesWithDelta(list, force, out string err, out var conflicts);
+            return (ok, err, conflicts);
+        },
+        // "Keep Server Values" in the pane's Conflict Mode: re-baseline only the conflicting rows.
+        OnAcceptServerValues = ServerSyncCommands.AcceptServerConflictBaselines,
         SaveToOffline = list => ServerSyncCommands.SaveVehiclesOffline(list),
         PopulateWorksheet = list => SheetMapper.PopulateWorksheet(list),
+        // Authoritative re-fetch after a delta save: brings back server-assigned child / workshop IDs and rows
+        // added by other users, and refreshes every delta baseline (auxiliary tables are re-fetched by
+        // PopulateWorksheet itself).
+        RefreshAfterSave = savedList =>
+        {
+            var fresh = ServerSyncCommands.FetchVehicleRecords();
+            SheetMapper.PopulateWorksheet(fresh ?? savedList);
+        },
         FetchFromServer = () => ServerSyncCommands.FetchVehicleRecords(),
         ValidateOfflinePayload = list => list.Count > 0 && list.TrueForAll(v => !string.IsNullOrWhiteSpace(v.VehiclePlate)),
         FormatConflictSummary = (local, server) =>
