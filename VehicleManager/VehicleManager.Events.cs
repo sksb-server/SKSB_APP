@@ -29,6 +29,8 @@ public class Events : ManagerEventsBase<List<VehicleRecord>>
             typeof(VehicleType),
             typeof(ServiceType),
             typeof(MaintenanceStatus),
+            typeof(ServiceCategory),
+            typeof(VehicleServiceStatus),
             typeof(VehicleStatus),
             typeof(VehiclePermitType),
             typeof(VehiclePermitStatus),

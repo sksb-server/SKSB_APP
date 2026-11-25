@@ -33,7 +33,8 @@ public enum StateConditionKind
     ColumnNotEmpty,     // True if ANY ReferenceHeaders cell is not blank (e.g. Sold Date != "")
     ColumnEquals,       // True if ReferenceHeaders cell equals ExpectedValue
     DateGreaterThan,
-    DateReached         // True if ANY ReferenceHeaders date <= Today
+    DateReached,        // True if ANY ReferenceHeaders date <= Today
+    DateExpiredOrNumberReached // 3 ReferenceHeaders: [0]=date column, [1]=current numeric column, [2]=target numeric column; true if date < Today OR (target > 0 && current >= target)
 }
 
 public enum TransformKind

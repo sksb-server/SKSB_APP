@@ -32,7 +32,63 @@ internal static partial class SheetMapper
         {
             if (string.IsNullOrWhiteSpace(vehicle.VehiclePlate)) continue;
             RuleCalculator.ApplyRecordCalculations(vehicle, null, null, anchor, DateFilterScope.All_Time);
+            ApplyNextServiceRollup(vehicle);
         }
+    }
+
+    /// <summary>
+    /// Fills the UI-only Next Service Type / Odometer / Date columns of 'AllVehiclesTable' from the latest
+    /// non-cancelled service of each <see cref="ServiceCategory"/> (each category is its own service cycle).
+    /// </summary>
+    private static void ApplyNextServiceRollup(VehicleRecord vehicle)
+    {
+        var detail = vehicle.VehicleDetail ??= new VehicleDetail();
+
+        var latestPerCategory = (vehicle.Services ?? new List<VehicleService>())
+            .Where(s => s.Status != VehicleServiceStatus.Cancelled)
+            .GroupBy(s => s.ServiceCategory)
+            .Select(g => g.OrderByDescending(s => s.ServiceDate).ThenByDescending(s => s.ServiceID).First())
+            .ToList();
+
+        var odos = latestPerCategory
+            .Where(s => s.NextServiceOdometer.HasValue && s.NextServiceOdometer.Value > 0m)
+            .Select(s => s.NextServiceOdometer!.Value)
+            .ToList();
+        detail.NextServiceOdometer = odos.Count > 0 ? odos.Min() : null;
+
+        var dates = latestPerCategory
+            .Where(s => s.NextServiceDate.HasValue && s.NextServiceDate.Value.Year > 1900)
+            .Select(s => s.NextServiceDate!.Value)
+            .ToList();
+        detail.NextServiceDate = dates.Count > 0 ? dates.Min() : null;
+
+        DateOnly today = DateOnly.FromDateTime(DateTime.Today);
+        decimal curOdo = detail.CurrentOdometer ?? 0m;
+
+        var overdue = latestPerCategory
+            .Where(s => (s.NextServiceDate.HasValue && s.NextServiceDate.Value.Year > 1900 && s.NextServiceDate.Value < today) ||
+                        (s.NextServiceOdometer.HasValue && s.NextServiceOdometer.Value > 0m && curOdo >= s.NextServiceOdometer.Value))
+            .Select(s => s.ServiceCategory.ToString())
+            .Distinct()
+            .ToList();
+
+        if (overdue.Count > 0)
+        {
+            detail.NextServiceType = string.Join(", ", overdue);
+            return;
+        }
+
+        var candidates = latestPerCategory
+            .Where(s => (s.NextServiceDate.HasValue && s.NextServiceDate.Value.Year > 1900) ||
+                        (s.NextServiceOdometer.HasValue && s.NextServiceOdometer.Value > 0m))
+            .ToList();
+
+        var withDates = candidates.Where(s => s.NextServiceDate.HasValue && s.NextServiceDate.Value.Year > 1900).ToList();
+        VehicleService? chosen = withDates.Count > 0
+            ? withDates.OrderBy(s => s.NextServiceDate!.Value).First()
+            : candidates.OrderBy(s => s.NextServiceOdometer ?? decimal.MaxValue).FirstOrDefault();
+
+        detail.NextServiceType = chosen?.ServiceCategory.ToString() ?? string.Empty;
     }
 
     // =========================================================================

@@ -94,7 +94,7 @@ public static partial class RuleRegistry
         if (isInt && (defaultAttr?.Kind == DefaultKind.AutoIncrement || h.EndsWith(" ID", StringComparison.OrdinalIgnoreCase)))
             return ColumnFormatKind.Id;
 
-        if (prop.Name is "CurrentOdometer" or "OdometerBefore" or "OdometerIn" or "OdometerOut" or "OdometerDifference")
+        if (prop.Name is "CurrentOdometer" or "OdometerBefore" or "OdometerIn" or "OdometerOut" or "OdometerDifference" or "OdometerAtService" or "NextServiceOdometer")
             return ColumnFormatKind.OdometerDynamic;
         if (Has("Odometer")) return ColumnFormatKind.Kilometers;
         if (Has("Years Old")) return ColumnFormatKind.Years;

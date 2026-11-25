@@ -1,4 +1,4 @@
-﻿namespace SKSB_App.Core.RuntimeUI.RuleEngine;
+namespace SKSB_App.Core.RuntimeUI.RuleEngine;
 
 using System;
 using System.Collections.Generic;
@@ -894,6 +894,7 @@ public static class RuleEvaluator
             // B) Check StateGuards on this column
             var forbiddenStates = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             string? forcedState = null;
+            string? forcedSkipList = null;
 
             foreach (var guard in rule.StateGuards)
             {
@@ -901,6 +902,8 @@ public static class RuleEvaluator
                 if (condTrue)
                 {
                     forcedState = guard.ForcedValueWhenTrue;
+                    // Comma-separated SkipIfCurrentEquals values stay selectable (they are preserved by EvaluateStateGuardsForCell)
+                    forcedSkipList = guard.SkipIfCurrentEquals;
                     break;
                 }
                 else if (guard.DisallowForcedValueWhenFalse)
@@ -923,7 +926,7 @@ public static class RuleEvaluator
 
                 if (valid && forcedState != null)
                 {
-                    valid = RuleDataCache.ValuesMatch(opt.Raw, forcedState);
+                    valid = RuleDataCache.ValuesMatch(opt.Raw, forcedState) || MatchesSkipList(opt.Raw, forcedSkipList);
                 }
                 else if (valid && forbiddenStates.Count > 0)
                 {
@@ -1082,8 +1085,7 @@ public static class RuleEvaluator
 
         foreach (var guard in rule.StateGuards)
         {
-            if (!string.IsNullOrWhiteSpace(guard.SkipIfCurrentEquals) &&
-            RuleDataCache.ValuesMatch(currentVal, guard.SkipIfCurrentEquals))
+            if (MatchesSkipList(currentVal, guard.SkipIfCurrentEquals))
             {
                 return null; // Keeps currentVal exactly as it is (e.g., "Reserved" or "Decommissioned")
             }
@@ -1113,6 +1115,39 @@ public static class RuleEvaluator
         return null;
     }
 
+    /// <summary>
+    /// True if <paramref name="value"/> matches any comma-separated token of <paramref name="skipList"/>
+    /// (e.g. <c>SkipIfCurrentEquals = "In_Shop,Reserved,Suspended"</c>).
+    /// </summary>
+    internal static bool MatchesSkipList(string? value, string? skipList)
+    {
+        if (string.IsNullOrWhiteSpace(skipList) || string.IsNullOrWhiteSpace(value)) return false;
+        foreach (var token in skipList.Split(','))
+        {
+            string t = token.Trim();
+            if (t.Length > 0 && RuleDataCache.ValuesMatch(value, t)) return true;
+        }
+        return false;
+    }
+
+    private static bool TryParseDecimalCell(object? raw, string? str, out decimal value)
+    {
+        value = 0m;
+        switch (raw)
+        {
+            case double dbl: value = (decimal)dbl; return true;
+            case decimal dec: value = dec; return true;
+            case float f: value = (decimal)f; return true;
+            case int i: value = i; return true;
+            case long l: value = l; return true;
+            case short s: value = s; return true;
+        }
+
+        string text = (str ?? raw?.ToString() ?? string.Empty).Trim();
+        if (text.Length == 0 || text == "—") return false;
+        return decimal.TryParse(text, NumberStyles.Any, CultureInfo.InvariantCulture, out value);
+    }
+
     internal static bool EvaluateCondition(
         StateConditionKind condition,
         string[] referenceHeaders,
@@ -1123,6 +1158,26 @@ public static class RuleEvaluator
     {
         if (referenceHeaders == null || referenceHeaders.Length == 0) return false;
         DateOnly today = DateOnly.FromDateTime(DateTime.Today);
+
+        if (condition == StateConditionKind.DateExpiredOrNumberReached)
+        {
+            // [0] = date column, [1] = current numeric column, [2] = target numeric column
+            if (referenceHeaders.Length < 3) return false;
+
+            int cDate = FindColumnByHeader(colHeaders, referenceHeaders[0]);
+            if (cDate >= 1 && RuleDataCache.TryParseDate(rawObjects[cDate], out DateOnly due) && due.Year > 1900 && due < today)
+                return true;
+
+            int cCur = FindColumnByHeader(colHeaders, referenceHeaders[1]);
+            int cTgt = FindColumnByHeader(colHeaders, referenceHeaders[2]);
+            if (cCur >= 1 && cTgt >= 1 &&
+                TryParseDecimalCell(rawObjects[cCur], rowValues[cCur], out decimal current) &&
+                TryParseDecimalCell(rawObjects[cTgt], rowValues[cTgt], out decimal target) &&
+                target > 0m && current >= target)
+                return true;
+
+            return false;
+        }
 
         foreach (var refHeader in referenceHeaders)
         {
@@ -1236,10 +1291,63 @@ public static class RuleEvaluator
         rowValues[targetRel] = countText;
     }
 
+    private static readonly HashSet<string> ChineseSurnames = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "ANG", "AW", "BEH", "BOH", "BOO", "BOON", "CHAI", "CHAM", "CHAN", "CHANG", "CHAU", "CHEA",
+        "CHEAH", "CHEE", "CHEN", "CHENG", "CHEONG", "CHEW", "CHIA", "CHIAH", "CHIAM", "CHIANG", "CHIEW", "CHIN",
+        "CHING", "CHIONG", "CHNG", "CHO", "CHOA", "CHOH", "CHOK", "CHONG", "CHOO", "CHOOI", "CHOW", "CHOY",
+        "CHU", "CHUA", "CHUAH", "CHUNG", "EE", "ENG", "EOW", "EU", "FAN", "FANG", "FOH", "FOK",
+        "FONG", "FOO", "FOONG", "FU", "FUNG", "GAN", "GEE", "GOH", "GUAN", "GUI", "HAN", "HAU",
+        "HEE", "HENG", "HEW", "HIA", "HII", "HING", "HO", "HOH", "HON", "HONG", "HOO", "HOOI",
+        "HOR", "HOU", "HOW", "HSU", "HU", "HUA", "HUANG", "HUI", "HUNG", "HWANG", "JIN", "KAM",
+        "KANG", "KAO", "KEE", "KEK", "KEONG", "KEW", "KHAW", "KHOO", "KHOR", "KIEW", "KIU", "KO",
+        "KOAY", "KOH", "KOK", "KONG", "KOO", "KOON", "KOR", "KOW", "KU", "KUA", "KUAH", "KUAN",
+        "KUANG", "KUEK", "KUNG", "KUO", "KUOK", "KWA", "KWAN", "KWOK", "KWONG", "LAI", "LAM", "LAU",
+        "LAW", "LEE", "LEI", "LENG", "LEO", "LEONG", "LEOW", "LEW", "LI", "LIAN", "LIANG", "LIAO",
+        "LIAU", "LIAW", "LIEW", "LIM", "LIN", "LING", "LIOW", "LIU", "LO", "LOH", "LOI", "LOK",
+        "LOKE", "LONG", "LOO", "LOOI", "LOONG", "LOU", "LOW", "LOY", "LU", "LUI", "LUK", "LUM",
+        "LUNG", "LYE", "MA", "MAH", "MAK", "MOK", "MOO", "MUI", "NEO", "NG", "NGAI", "NGAN",
+        "NGEOW", "NGO", "NGOH", "NGOI", "NGUI", "NI", "OOI", "ONG", "OW", "PAH", "PAN", "PANG",
+        "PAU", "PEE", "PEH", "PEI", "PENG", "PHAN", "PHANG", "PHEE", "PHENG", "PHUA", "PHUAH", "PNG",
+        "POH", "PONG", "POO", "POON", "PUA", "PUAH", "PUN", "QUAH", "QUEK", "QUOK", "SAW", "SEAH",
+        "SEE", "SEET", "SENG", "SEOW", "SHAM", "SHAO", "SHEN", "SHEW", "SHIA", "SHIH", "SHIM", "SHIU",
+        "SHUM", "SIA", "SIAH", "SIEW", "SII", "SIM", "SIN", "SING", "SIO", "SIOW", "SIT", "SIU",
+        "SO", "SOH", "SONG", "SOO", "SOON", "SOONG", "SU", "SUEN", "SUM", "SUN", "SUNG", "SZE",
+        "TAI", "TAM", "TAN", "TANG", "TAO", "TAY", "TEE", "TEH", "TENG", "TEO", "TEOH", "TEOW",
+        "TEW", "THAM", "THEAN", "THENG", "THIAN", "THIEN", "THIO", "THNG", "THO", "THONG", "THOO", "THUM",
+        "TIAN", "TIEW", "TIN", "TING", "TIONG", "TOH", "TONG", "TOO", "TSAI", "TSANG", "TSE", "TSEN",
+        "TSENG", "TSOI", "TU", "TUNG", "UNG", "VOO", "VOON", "WAI", "WAN", "WANG", "WEE", "WEI",
+        "WEN", "WONG", "WOO", "WOON", "WU", "XIE", "XU", "YAN", "YANG", "YAO", "YAP", "YAU",
+        "YEE", "YEO", "YEOH", "YEOW", "YEW", "YI", "YIM", "YIN", "YING", "YIP", "YONG", "YOO",
+        "YOON", "YOONG", "YOU", "YOW", "YU", "YUAN", "YUE", "YUEN", "YUNG", "ZENG", "ZHANG", "ZHAO",
+        "ZHENG", "ZHOU", "ZHU"
+    };
+
+    private static readonly HashSet<string> PatronymicConnectors = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "BIN", "BINTI", "BT", "BT.", "B", "B.", "ANAK", "AK", "A/L", "A/P", "S/O", "D/O"
+    };
+
+    private static readonly HashSet<string> MalayGivenPrefixes = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "MOHD", "MOHD.", "MOHAMAD", "MOHAMMAD", "MUHAMAD", "MUHAMMAD", "ABDUL", "ABD", "ABD.", "NUR", "NOR", "SITI", "AHMAD"
+    };
+
+    /// <summary>True for 3-word Malaysian Chinese names (surname + 2-part given name) that should keep all words.</summary>
+    private static bool IsChineseThreeWordName(string[] parts)
+    {
+        if (parts.Length != 3 || !ChineseSurnames.Contains(parts[0])) return false;
+        if (parts.Any(p => PatronymicConnectors.Contains(p))) return false;
+        if (parts[1].StartsWith("B.", StringComparison.OrdinalIgnoreCase) ||
+            parts[1].StartsWith("BT.", StringComparison.OrdinalIgnoreCase)) return false;
+        return !MalayGivenPrefixes.Contains(parts[1]);
+    }
+
     private static string FormatShortName(string fullName, int maxWords)
     {
         var parts = fullName.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
         if (parts.Length <= maxWords) return string.Join(" ", parts);
+        if (maxWords == 2 && IsChineseThreeWordName(parts)) return string.Join(" ", parts);
         if (maxWords == 2) return $"{parts[0]} {parts[^1]}";
         return $"{parts[0]} {parts[1]} {parts[^1]}";
     }

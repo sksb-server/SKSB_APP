@@ -341,8 +341,18 @@ internal static partial class SheetMapper
                 else if (!Roster.IsActiveOn(staff, scheduleDate))
                     errors.Add($"  [Daily Schedule - {label}]: '{worker}' was not employed on {scheduleDate:yyyy-MM-dd} ({Roster.DescribeInactive(staff, scheduleDate)}).");
             }
-            foreach (var plate in slot.Vehicles.Where(p => Roster.FindVehicle(p) == null).Distinct(StringComparer.OrdinalIgnoreCase))
-                warnings.Add($"  [Daily Schedule - {label}]: vehicle '{plate}' was not found in vehicle master.");
+            foreach (var plate in slot.Vehicles.Distinct(StringComparer.OrdinalIgnoreCase))
+            {
+                var vehicle = Roster.FindVehicle(plate);
+                if (vehicle == null)
+                {
+                    warnings.Add($"  [Daily Schedule - {label}]: vehicle '{plate}' was not found in vehicle master.");
+                    continue;
+                }
+                var eval = Roster.EvaluateVehicleOn(vehicle, scheduleDate);
+                if (!eval.IsValid)
+                    warnings.Add($"  [Daily Schedule - {label}]: vehicle '{plate}' is invalid on {scheduleDate:dd/MM/yyyy} ({eval.ShortNote}).");
+            }
         }
 
         foreach (var p in record.Preferences.Where(p => p.StaffID > 0 && Roster.FindStaff(p.StaffID) == null))
@@ -400,8 +410,18 @@ internal static partial class SheetMapper
         foreach (var day in dayEntries.Where(e => e.IsApproved).GroupBy(e => e.StaffID))
         {
             var ordered = day.OrderBy(e => e.Date).ThenBy(e => e.Time).ToList();
-            if (ordered[0].EntryType == AttendanceEntryType.CheckOut)
+            var effective = AttendanceRollupService.EffectiveTimeline(ordered);
+            if (effective.Count > 0 && effective[0].EntryType == AttendanceEntryType.CheckOut)
                 warnings.Add($"  [Attendance Entries]: Staff {day.Key} on {scheduleDate:dd/MM/yyyy} starts with a CheckOut and has no earlier CheckIn.");
+
+            foreach (var entryType in new[] { AttendanceEntryType.CheckIn, AttendanceEntryType.CheckOut })
+            {
+                var ofType = ordered.Where(e => e.EntryType == entryType).ToList();
+                if (ofType.Any(AttendanceRollupService.IsManualOverride)) continue;
+                if (ofType.Any(e => e.Source == AttendanceSource.Manual && string.IsNullOrWhiteSpace(e.OverrideReason))
+                    && ofType.Any(e => e.Source != AttendanceSource.Manual))
+                    warnings.Add($"  [Attendance Entries]: Staff {day.Key} on {scheduleDate:dd/MM/yyyy} has a Manual {entryType} with no 'Override Reason' alongside a non-manual {entryType}; add an Override Reason if it is meant to override the other punch.");
+            }
         }
 
         int pending = dayEntries.Count(e => !e.IsApproved);

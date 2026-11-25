@@ -186,6 +186,7 @@ public sealed class VehicleDeltaPayload
 {
     public TableDelta<VehicleRecord> Vehicles { get; init; } = new();
     public TableDelta<Maintenance> Maintenances { get; init; } = new();
+    public TableDelta<VehicleService> Services { get; init; } = new();
     public TableDelta<RoadTax> RoadTaxes { get; init; } = new();
     public TableDelta<Inspection> Inspections { get; init; } = new();
     public TableDelta<VehiclePermit> Permits { get; init; } = new();

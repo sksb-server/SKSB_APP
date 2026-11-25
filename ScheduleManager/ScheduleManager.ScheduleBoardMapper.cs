@@ -535,6 +535,7 @@ internal static class ScheduleBoardMapper
             var typeComments = new string?[slotCount];
             var windowComments = new string?[slotCount];
             var workerComments = new string?[WorkerRowsPerBand, slotCount];
+            var vehicleComments = new string?[VehicleRowsPerBand, slotCount];
 
             for (int slot = 0; slot < slotCount; slot++)
             {
@@ -590,10 +591,13 @@ internal static class ScheduleBoardMapper
                         vehicleTypes.Add(v.Type);
                         vehicles[i, c0 + 1] = BoardContext.IconFor(v.Type);
                         vehicles[i, c0 + 2] = v.Odometer > 0 ? (double)v.Odometer : EmptyOdometerDash;
+                        var eval = Roster.EvaluateVehicleOn(v, date);
+                        if (!eval.IsValid) vehicleComments[i, slot] = eval.FormatComment(date);
                     }
                     else
                     {
                         vehicles[i, c0 + 2] = EmptyOdometerDash;
+                        vehicleComments[i, slot] = $"⚠ Vehicle '{data.Vehicles[i]}' was not found in vehicle master.";
                     }
                 }
 
@@ -629,6 +633,14 @@ internal static class ScheduleBoardMapper
                 {
                     if (string.IsNullOrEmpty(workerComments[i, slot])) continue;
                     try { ApplySizedComment(ws.Cells[band.FirstWorkerRow + i, SlotColumn(slot)], workerComments[i, slot]!); } catch { }
+                }
+
+            try { ws.Range[ws.Cells[band.FirstVehicleRow, FirstSlotColumn], ws.Cells[band.LastVehicleRow, FirstSlotColumn + cols - 1]].ClearComments(); } catch { }
+            for (int slot = 0; slot < slotCount; slot++)
+                for (int i = 0; i < VehicleRowsPerBand; i++)
+                {
+                    if (string.IsNullOrEmpty(vehicleComments[i, slot])) continue;
+                    try { ApplySizedComment(ws.Cells[band.FirstVehicleRow + i, SlotColumn(slot)], vehicleComments[i, slot]!); } catch { }
                 }
 
             try { ws.Range[ws.Cells[band.HeaderRow, FirstSlotColumn], ws.Cells[band.HeaderRow, FirstSlotColumn + cols - 1]].ClearComments(); } catch { }
@@ -1097,11 +1109,25 @@ internal static class ScheduleBoardMapper
         catch { /* filter is advisory */ }
 
         var ranked = Roster.Vehicles
-            .Select(v => (Vehicle: v, IsMismatch: typeFilter != null && !MatchesTypeFilter(v.Type, typeFilter)))
-            .OrderBy(x => x.IsMismatch ? 1 : 0)
+            .Select(v =>
+            {
+                var eval = Roster.EvaluateVehicleOn(v, date);
+                string label = v.Plate;
+                if (v.Type != VehicleType.None)
+                {
+                    string typeName = v.Type.ToString().Replace('_', ' ');
+                    string icon = BoardContext.IconFor(v.Type);
+                    label = icon.Length > 0 ? $"{icon} {v.Plate} — {typeName}" : $"{v.Plate} — {typeName}";
+                }
+                if (!eval.IsValid) label = $"{label} ({eval.ShortNote})";
+                bool isMismatch = typeFilter != null && !MatchesTypeFilter(v.Type, typeFilter);
+                return (Vehicle: v, Display: label, IsMismatch: isMismatch, IsInvalid: !eval.IsValid || isMismatch);
+            })
+            .OrderBy(x => x.IsInvalid ? 1 : 0)
+            .ThenBy(x => x.IsMismatch ? 1 : 0)
             .ThenBy(x => slot.RequiredVehicleTypes.Contains(x.Vehicle.Type) ? 0 : 1)
             .ThenBy(x => x.Vehicle.Plate, NaturalStringComparer.Instance)
-            .Select((x, i) => new DropdownOption { Display = x.Vehicle.Plate, Raw = x.Vehicle.Plate, Section = i, IsValid = !x.IsMismatch })
+            .Select((x, i) => new DropdownOption { Display = x.Display, Raw = x.Vehicle.Plate, Section = i, IsValid = !x.IsInvalid })
             .ToList();
         return new CustomDropdownResult(ranked, (c, opt) => c.Value2 = opt.Raw);
     }

@@ -10,14 +10,14 @@ Authoritative implementation rules for `SKSB_App`. Follow all stack, build, data
 **MSBuild Hooks (`Directory.Build.props`, `Portal.csproj`):**
 - Portal and Excel add-ins run from `%TEMP%\SKSB_Debug_Shadow` in Debug mode; `KillExistingExcelAndPortalOnBuild` only runs when `-p:KillOnBuild=true` is explicitly passed, so `dotnet build` is safe while Excel/Portal are open.
 - Every build copies binaries/`*-AddIn*.xll` to `./AddIns/`.
-- `Clean` wipes `./AddIns/`; `dotnet clean -c Release` also wipes non-`Data` files in `%USERPROFILE%\Documents\SKSB_App`.
+- `Clean` wipes `./AddIns/`; `dotnet clean -c Release` also wipes non-`Data` files in `%LOCALAPPDATA%\SKSB_App`.
 
 **Commands:**
 - Build single module (fast iteration): `dotnet build <Project>/<Project>.csproj -c Debug`
 - Build full solution: `dotnet build SKSB_App.slnx -c Debug` (or `-c Release`)
 - Clean (Debug-safe): `dotnet clean SKSB_App.slnx -c Debug`
 - Publish release: `dotnet publish Launcher/Launcher.csproj -c Release` or `powershell -NoProfile -ExecutionPolicy Bypass -File .\publish.ps1`
-- **Verification:** No xUnit/NUnit project; verify via `dotnet build` and in-Excel DEBUG Ribbon (`ServerEnvironment.SimulateOffline`, `AppLogger` trace at `%USERPROFILE%\Documents\SKSB_App\Data\SKSB_Runtime_Trace.log`, DEBUG `ExitConflictDialog` save intercept).
+- **Verification:** No xUnit/NUnit project; verify via `dotnet build` and in-Excel DEBUG Ribbon (`ServerEnvironment.SimulateOffline`, `AppLogger` trace at `%LOCALAPPDATA%\SKSB_App\Data\SKSB_Runtime_Trace.log`, DEBUG `ExitConflictDialog` save intercept).
 
 ## 3. Code Conventions
 - **File-scoped namespaces** at line 1; `using` directives **inside** the namespace.
@@ -38,7 +38,7 @@ Authoritative implementation rules for `SKSB_App`. Follow all stack, build, data
 - **Enums:** Store as text via `.ToString()`; parse with `Enum.TryParse<TEnum>(..., ignoreCase: true, out var res)` + safe fallback.
 - **Keys:** Normalize string PKs (`VehiclePlate`, `ProjectID`) with `.Trim().ToUpperInvariant()`; filter uninitialized rows (`StaffID > 0`, `!string.IsNullOrWhiteSpace(VehiclePlate)`).
 - **Transactions:** Multi-table saves run in `Db.ExecuteInTransaction((conn, trans) => { ... })`. On `isFullBatch == true`, delete child tables then master using `!= ALL(@ActiveIds)` / `!= ALL(@ActivePlates)` before `INSERT ... ON CONFLICT (...) DO UPDATE` (always update `updated_at = CURRENT_TIMESTAMP`).
-- **Offline Fallback:** Respect `ServerEnvironment.SimulateOffline` / `GuardConnection()` and fall back to `OfflineSnapshot.Load<List<TRecord>>()` (`%USERPROFILE%\Documents\SKSB_App\Data\<typename>_data.json`).
+- **Offline Fallback:** Respect `ServerEnvironment.SimulateOffline` / `GuardConnection()` and fall back to `OfflineSnapshot.Load<List<TRecord>>()` (`%LOCALAPPDATA%\SKSB_App\Data\<typename>_data.json`).
 
 ## 5. Excel-DNA STA & COM Guardrails
 1. **Marshal COM via `ExcelAsyncUtil.QueueAsMacro`:** Never mutate sheets, tables, cells, or named ranges directly from `AutoOpen`, `AutoClose`, Ribbon callbacks, WinForms handlers, or background `Task`s. Defer COM event continuations (`WorkbookBeforeSave`/`Close`) via `QueueAsMacro` or `xlcOnTime`.

@@ -1,4 +1,4 @@
-﻿namespace SKSB_App.Core.Bootstrap.Storage;
+namespace SKSB_App.Core.Bootstrap.Storage;
 
 using System;
 using System.IO;
@@ -8,7 +8,7 @@ public static class FolderRegistry
 {
     // Canonical deployed runtime path for clients / Release
     private static readonly string ReleaseRootPath = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.MyDocuments),
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
         "SKSB_App"
     );
 
@@ -27,7 +27,7 @@ public static class FolderRegistry
     public static AppFolder AddIns { get; } = new AppFolder(ResolveFolder("AddIns"));
     public static AppFolder Data { get; } = new AppFolder(ResolveFolder("Data"));
 #else
-    // In Release: Root is strictly the client deployment directory (Documents\SKSB_App)
+    // In Release: Root is strictly the client deployment directory (%LOCALAPPDATA%\SKSB_App)
     public static AppFolder SKSB_App { get; } = new AppFolder(ReleaseRootPath);
     public static AppFolder AddIns { get; } = new AppFolder(Path.Combine(ReleaseRootPath, "AddIns"));
     public static AppFolder Templates { get; } = new AppFolder(Path.Combine(ReleaseRootPath, "Templates"));

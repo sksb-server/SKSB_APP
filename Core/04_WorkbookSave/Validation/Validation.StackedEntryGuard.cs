@@ -41,6 +41,7 @@ public static class StackedEntryGuard
         ["VehicleLicensesTable"] = "Vehicle License",
         ["SkillLicensesTable"] = "Skill License",
         ["MaintenancesTable"] = "Vehicle Maintenance",
+        ["ServicesTable"] = "Vehicle Service",
         ["InsurancesTable"] = "Vehicle Insurance",
         ["InsuranceClaimsTable"] = "Insurance Claim",
         ["PermitsTable"] = "Vehicle Permit",

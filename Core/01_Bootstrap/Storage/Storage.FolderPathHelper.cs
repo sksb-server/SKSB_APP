@@ -1,4 +1,4 @@
-﻿namespace SKSB_App.Core.Bootstrap.Storage;
+namespace SKSB_App.Core.Bootstrap.Storage;
 
 using System;
 using System.IO;
@@ -92,7 +92,7 @@ public sealed class TemplateAddInPair
 
         return siblingPath;
 #else
-        // In Release: Strictly use the deployed Documents\SKSB_App\AddIns folder
+        // In Release: Strictly use the deployed %LOCALAPPDATA%\SKSB_App\AddIns folder
         return Path.Combine(FolderRegistry.AddIns.GetPath(), addInFileName);
 #endif
     }

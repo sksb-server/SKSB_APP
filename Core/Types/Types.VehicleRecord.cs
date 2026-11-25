@@ -17,13 +17,23 @@ public enum VehicleType
 
 public enum VehicleStatus
 {
-    Active, In_Shop, Expired, Reserved, Decommissioned, Suspended, None
+    Active, Service_Needed, In_Shop, Expired, Reserved, Decommissioned, Suspended, None
 }
 
 public enum ServiceType
 {
-    Regular_Service, Breakdown_Repair, Tyre_Service, Battery_Replacement,
+    Breakdown_Repair, Tyre_Service, Battery_Replacement,
     Aircond_Service, Bodywork_Paint, Puspakom_Prep, Accident_Repair, Other, None
+}
+
+public enum ServiceCategory
+{
+    General_Service, Major_Service, Gearbox_ATF, Timing_Belt, Hydraulic_Service, Coolant_Flush, Other, None
+}
+
+public enum VehicleServiceStatus
+{
+    Scheduled, Completed, Cancelled, None
 }
 
 public enum MaintenanceStatus
@@ -92,9 +102,11 @@ public record VehicleRecord
     [ColumnDefault(DefaultKind.Literal, literalValue: "Active")]
     [ColumnStateGuard(1, StateConditionKind.ColumnNotEmpty, "Decommissioned", "Active", "Sold Date", DisallowForcedValueWhenFalse = true)]
     [ColumnStateGuard(2, StateConditionKind.DateExpired, "Expired", "Active", "Road Tax Expiry", "Inspection Expiry", "Insurance Expiry", "Permit Expiry")]
+    [ColumnStateGuard(3, StateConditionKind.DateExpiredOrNumberReached, "Service_Needed", "Active", "Next Service Date", "Current Odometer", "Next Service Odometer", SkipIfCurrentEquals = "In_Shop,Reserved,Suspended", DisallowForcedValueWhenFalse = true)]
     public VehicleStatus VehicleStatus { get; set; } = VehicleStatus.Active;
 
     public List<Maintenance> Maintenances { get; set; } = new();
+    public List<VehicleService> Services { get; set; } = new();
     public List<VehiclePermit> Permits { get; set; } = new();
     public List<RoadTax> RoadTaxes { get; set; } = new();
     public List<Inspection> Inspections { get; set; } = new();
@@ -166,6 +178,24 @@ public record VehicleDetail
     [ExcelColumn("Used At")]
     public string UsedAt { get; set; } = string.Empty;
 
+    // ---- UI-only next-service rollups from 'ServicesTable' (computed in ApplyNextServiceRollup; never persisted) ----
+
+    [JsonIgnore]
+    [ExcelColumn("Next Service Type")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
+    public string NextServiceType { get; set; } = string.Empty;
+
+    [JsonIgnore]
+    [ExcelColumn("Next Service Odometer")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
+    [ColumnFormat(ColumnFormatKind.OdometerDynamic)]
+    public decimal? NextServiceOdometer { get; set; }
+
+    [JsonIgnore]
+    [ExcelColumn("Next Service Date")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
+    public DateOnly? NextServiceDate { get; set; }
+
     // ---- UI-only calculated / rollup columns of 'AllVehiclesTable' (never persisted) ----
     // Cost rollups are All-Time totals; the per-date breakdown lives on the 'Vehicle Summary' sheet.
 
@@ -183,6 +213,11 @@ public record VehicleDetail
     [ColumnRollup(nameof(VehicleRecord.OdometerLogs), RollupKind.Sum, nameof(OdometerLog.Amount), DateProperty = nameof(OdometerLog.Date))]
     [ExcelColumn("Fuel Cost")]
     public decimal? FuelCost { get; set; }
+
+    [JsonIgnore]
+    [ColumnRollup(nameof(VehicleRecord.Services), RollupKind.Sum, nameof(VehicleService.Cost), DateProperty = nameof(VehicleService.ServiceDate))]
+    [ExcelColumn("Service Cost")]
+    public decimal? ServiceCost { get; set; }
 
     [JsonIgnore]
     [ColumnRollup(nameof(VehicleRecord.Maintenances), RollupKind.Sum, nameof(Maintenance.RepairCost), DateProperty = nameof(Maintenance.DateIn))]
@@ -211,7 +246,7 @@ public record VehicleDetail
     public decimal? InsuranceClaimAmount { get; set; }
 
     [JsonIgnore]
-    [ColumnCalculate("[Fuel Cost] + [Maintenance Cost] + [Insurance Cost] + [Permit Cost] + [Road Tax and Inspection Cost] - IF([Insurance Claim] > 0, [Insurance Claim], 0)")]
+    [ColumnCalculate("[Fuel Cost] + [Service Cost] + [Maintenance Cost] + [Insurance Cost] + [Permit Cost] + [Road Tax and Inspection Cost] - IF([Insurance Claim] > 0, [Insurance Claim], 0)")]
     [ExcelColumn("Total Cost")]
     public decimal? TotalCost { get; set; }
 }
@@ -273,8 +308,8 @@ public record Maintenance : VehicleChildRecord
 
     [ExcelColumn("Service Type", isRequired: true)]
     [ColumnRule("ServiceTypeList", IsRequired = true)]
-    [ColumnDefault(DefaultKind.Literal, literalValue: "Regular_Service")]
-    public ServiceType ServiceType { get; set; } = ServiceType.Regular_Service;
+    [ColumnDefault(DefaultKind.Literal, literalValue: "Breakdown_Repair")]
+    public ServiceType ServiceType { get; set; } = ServiceType.Breakdown_Repair;
 
     [ExcelColumn("Date In", isRequired: true)]
     [ColumnDefault(DefaultKind.Today)]
@@ -314,7 +349,7 @@ public record Maintenance : VehicleChildRecord
     public MaintenanceStatus MaintenanceStatus { get; set; } = MaintenanceStatus.In_Progress;
 
     [ExcelColumn("Repair Total Cost")]
-    [ColumnCalculate("[Tyre] + [Brake] + [Clutch] + [Service] + [Fuel Pump] + [Aircond] + [Wiring] + [Battery] + [Towing] + [Cushion] + [Parts]")]
+    [ColumnCalculate("[Tyre] + [Brake] + [Clutch] + [Fuel Pump] + [Aircond] + [Wiring] + [Battery] + [Towing] + [Cushion] + [Parts]")]
     public decimal? RepairCost { get; set; }
 
     [ExcelColumn("Tyre")]
@@ -325,9 +360,6 @@ public record Maintenance : VehicleChildRecord
 
     [ExcelColumn("Clutch")]
     public decimal? ClutchCost { get; set; }
-
-    [ExcelColumn("Service")]
-    public decimal? ServiceCost { get; set; }
 
     [ExcelColumn("Fuel Pump")]
     public decimal? FuelPumpCost { get; set; }
@@ -349,6 +381,61 @@ public record Maintenance : VehicleChildRecord
 
     [ExcelColumn("Parts")]
     public decimal? PartsCost { get; set; }
+
+    [ExcelColumn("Remarks")]
+    public string Remarks { get; set; } = string.Empty;
+}
+
+// =========================================================================
+// 3b. VEHICLE SERVICE TABLE ("ServicesTable") - multi-cycle routine servicing
+// =========================================================================
+
+[ExcelTable("ServicesTable")]
+public record VehicleService : VehicleChildRecord
+{
+    [ExcelColumn("Service ID", isRequired: true)]
+    [ColumnDefault(DefaultKind.AutoIncrement)]
+    public long ServiceID { get; set; }
+
+    [ExcelColumn("Service Category", isRequired: true)]
+    [ColumnRule("ServiceCategoryList", IsRequired = true)]
+    [ColumnDefault(DefaultKind.Literal, literalValue: "General_Service")]
+    public ServiceCategory ServiceCategory { get; set; } = ServiceCategory.General_Service;
+
+    [ExcelColumn("Service Date", isRequired: true)]
+    [ColumnDefault(DefaultKind.Today)]
+    public DateOnly ServiceDate { get; set; } = DateOnly.FromDateTime(DateTime.Today);
+
+    [ExcelColumn("Odometer at Service")]
+    [ColumnFormat(ColumnFormatKind.OdometerDynamic)]
+    public decimal? OdometerAtService { get; set; }
+
+    [ExcelColumn("Next Service Odometer")]
+    [ColumnFormat(ColumnFormatKind.OdometerDynamic)]
+    public decimal? NextServiceOdometer { get; set; }
+
+    [ExcelColumn("Next Service Date")]
+    [ColumnDefault(DefaultKind.DateOffsetMonths, referenceHeader: "Service Date", offset: 6)]
+    [ColumnDateGreaterThan("Service Date")]
+    public DateOnly? NextServiceDate { get; set; }
+
+    [ExcelColumn("Workshop Name")]
+    [ColumnRule("WorkshopsTable[Workshop Name]", IsRequired = false, IsWarningOnly = true)]
+    [ColumnSync("Workshop Address", "WorkshopsTable[Workshop Name]", "WorkshopsTable[Workshop Address]")]
+    public string WorkshopName { get; set; } = string.Empty;
+
+    [ExcelColumn("Workshop Address")]
+    [ColumnRule("WorkshopsTable[Workshop Address]", IsWarningOnly = true, IsRequired = false)]
+    [ColumnSync("Workshop Name", "WorkshopsTable[Workshop Address]", "WorkshopsTable[Workshop Name]")]
+    public string WorkshopAddress { get; set; } = string.Empty;
+
+    [ExcelColumn("Status", isRequired: true)]
+    [ColumnRule("VehicleServiceStatusList", IsRequired = true)]
+    [ColumnDefault(DefaultKind.Literal, literalValue: "Completed")]
+    public VehicleServiceStatus Status { get; set; } = VehicleServiceStatus.Completed;
+
+    [ExcelColumn("Cost")]
+    public decimal? Cost { get; set; }
 
     [ExcelColumn("Remarks")]
     public string Remarks { get; set; } = string.Empty;
@@ -385,16 +472,19 @@ public record Workshop
     // ---- UI-only cross-table rollups from 'MaintenancesTable' (never persisted) ----
     [JsonIgnore]
     [ColumnRollup("MaintenancesTable", RollupKind.Count, "Maintenance ID", ForeignKeyHeader = "Workshop Name", LocalKeyHeader = "Workshop Name", DateProperty = "Date In")]
+    [ColumnRollup("ServicesTable", RollupKind.Count, "Service ID", ForeignKeyHeader = "Workshop Name", LocalKeyHeader = "Workshop Name", DateProperty = "Service Date")]
     [ExcelColumn("Number of Vehicle Fixed")]
     public int? NumberOfVehiclesFixed { get; set; }
 
     [JsonIgnore]
     [ColumnRollup("MaintenancesTable", RollupKind.DistinctJoin, "Vehicle Plate", ForeignKeyHeader = "Workshop Name", LocalKeyHeader = "Workshop Name", DateProperty = "Date In")]
+    [ColumnRollup("ServicesTable", RollupKind.DistinctJoin, "Vehicle Plate", ForeignKeyHeader = "Workshop Name", LocalKeyHeader = "Workshop Name", DateProperty = "Service Date")]
     [ExcelColumn("Fixed Vehicle Plates")]
     public string FixedVehiclePlates { get; set; } = string.Empty;
 
     [JsonIgnore]
     [ColumnRollup("MaintenancesTable", RollupKind.Sum, "Repair Total Cost", ForeignKeyHeader = "Workshop Name", LocalKeyHeader = "Workshop Name", DateProperty = "Date In")]
+    [ColumnRollup("ServicesTable", RollupKind.Sum, "Cost", ForeignKeyHeader = "Workshop Name", LocalKeyHeader = "Workshop Name", DateProperty = "Service Date")]
     [ExcelColumn("Total Cost")]
     public decimal? TotalCost { get; set; }
 
@@ -769,6 +859,11 @@ public record VehicleSummaryRow
     [ColumnRule(IsRequired = false, IsReadOnly = true)]
     [ColumnFormat(ColumnFormatKind.Currency)]
     public decimal? FuelCost { get; set; }
+
+    [ExcelColumn("Service Cost")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
+    [ColumnFormat(ColumnFormatKind.Currency)]
+    public decimal? ServiceCost { get; set; }
 
     [ExcelColumn("Maintenance Cost")]
     [ColumnRule(IsRequired = false, IsReadOnly = true)]

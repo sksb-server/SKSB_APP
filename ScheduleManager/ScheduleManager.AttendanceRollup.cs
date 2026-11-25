@@ -106,9 +106,42 @@ internal static class AttendanceRollupService
         entries.Where(e => e.IsApproved && e.StaffID > 0 && DeviceSyncManager.IsInWorkingDay(e.Date, e.Time, date, dayStartTime, nextDayStartTime))
                .OrderBy(e => e.Date).ThenBy(e => e.Time).ToList();
 
+    /// <summary>An approved Manual entry with a non-empty Override Reason: an intentional, audited override.</summary>
+    internal static bool IsManualOverride(AttendanceEntry entry) =>
+        entry.Source == AttendanceSource.Manual && !string.IsNullOrWhiteSpace(entry.OverrideReason);
+
+    /// <summary>
+    /// One worker's chronologically ordered approved punches with manual-override precedence applied:
+    /// an override CheckOut drops all non-override CheckOuts; an override CheckIn drops non-override CheckIns
+    /// that are earlier than the earliest override CheckIn or belong to a project the overrides cover.
+    /// </summary>
+    internal static List<AttendanceEntry> EffectiveTimeline(IReadOnlyList<AttendanceEntry> orderedWorkerPunches)
+    {
+        var overrideOuts = orderedWorkerPunches.Any(p => p.EntryType == AttendanceEntryType.CheckOut && IsManualOverride(p));
+        var overrideIns = orderedWorkerPunches.Where(p => p.EntryType == AttendanceEntryType.CheckIn && IsManualOverride(p)).ToList();
+
+        AttendanceEntry? earliestOverrideIn = overrideIns.Count > 0 ? overrideIns[0] : null;
+        var overrideInProjects = overrideIns.Select(EntryProject).Where(p => p.Length > 0).ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var result = new List<AttendanceEntry>(orderedWorkerPunches.Count);
+        foreach (var p in orderedWorkerPunches)
+        {
+            if (IsManualOverride(p)) { result.Add(p); continue; }
+            if (p.EntryType == AttendanceEntryType.CheckOut && overrideOuts) continue;
+            if (p.EntryType == AttendanceEntryType.CheckIn && earliestOverrideIn != null)
+            {
+                bool earlier = (p.Date, p.Time).CompareTo((earliestOverrideIn.Date, earliestOverrideIn.Time)) < 0;
+                if (earlier || overrideInProjects.Contains(EntryProject(p))) continue;
+            }
+            result.Add(p);
+        }
+        return result;
+    }
+
     /// <summary>
     /// Per (staff, project): every in -> out span. A span ends at the worker's next punch of any kind
     /// (a CheckOut, or a CheckIn to another project), and stays open when nothing follows.
+    /// Manual overrides (Manual source with an Override Reason) take precedence via <see cref="EffectiveTimeline"/>.
     /// </summary>
     internal static Dictionary<(long StaffId, string ProjectId), List<WorkerProjectSpan>> BuildSpans(
         IEnumerable<AttendanceEntry> entries, DateOnly date, TimeOnly dayStartTime, TimeOnly? nextDayStartTime = null)
@@ -116,7 +149,7 @@ internal static class AttendanceRollupService
         var result = new Dictionary<(long, string), List<WorkerProjectSpan>>();
         foreach (var worker in ApprovedFor(entries, date, dayStartTime, nextDayStartTime).GroupBy(e => e.StaffID))
         {
-            var timeline = worker.ToList();
+            var timeline = EffectiveTimeline(worker.ToList());
             for (int i = 0; i < timeline.Count; i++)
             {
                 if (timeline[i].EntryType != AttendanceEntryType.CheckIn) continue;
@@ -241,6 +274,8 @@ internal static class AttendanceRollupService
     /// Day-band overtime is the time clocked after <paramref name="otStartTime"/> (floored to 0.5 h).
     /// Un-punched staff with a SQL Payroll leave in <paramref name="leavesByStaffId"/> get that leave status instead of
     /// <see cref="AttendanceStatus.Absence"/>.
+    /// Manual overrides (Manual source with an Override Reason) take precedence: the earliest override CheckIn and
+    /// latest override CheckOut define clock-in / clock-out, and conflicting non-manual punches are ignored.
     /// </summary>
     internal static List<DailyWorkerAttendance> Run(
         DateOnly date,
@@ -285,20 +320,26 @@ internal static class AttendanceRollupService
             mySlots ??= new List<DailyProjectSchedule>();
             existingById.TryGetValue(id, out var prior);
 
-            var checkIns = punches.Where(p => p.EntryType == AttendanceEntryType.CheckIn).ToList();
-            var checkOuts = punches.Where(p => p.EntryType == AttendanceEntryType.CheckOut).ToList();
-            TimeOnly? clockIn = checkIns.Count > 0 ? checkIns[0].Time : null;
-            TimeOnly? clockOut = checkOuts.Count > 0 && (clockIn == null || checkOuts[^1].Date != checkIns[0].Date || checkOuts[^1].Time != clockIn)
-                ? checkOuts[^1].Time
-                : null;
+            var effectivePunches = EffectiveTimeline(punches);
+            var checkIns = effectivePunches.Where(p => p.EntryType == AttendanceEntryType.CheckIn).ToList();
+            var checkOuts = effectivePunches.Where(p => p.EntryType == AttendanceEntryType.CheckOut).ToList();
+            var manualCheckIns = checkIns.Where(IsManualOverride).ToList();
+            var manualCheckOuts = checkOuts.Where(IsManualOverride).ToList();
+            AttendanceEntry? clockInEntry = manualCheckIns.Count > 0 ? manualCheckIns[0] : checkIns.Count > 0 ? checkIns[0] : null;
+            AttendanceEntry? clockOutEntry = manualCheckOuts.Count > 0 ? manualCheckOuts[^1] : checkOuts.Count > 0 ? checkOuts[^1] : null;
+            if (clockOutEntry != null && clockInEntry != null && clockOutEntry.Date == clockInEntry.Date && clockOutEntry.Time == clockInEntry.Time)
+                clockOutEntry = null;
+            TimeOnly? clockIn = clockInEntry?.Time;
+            TimeOnly? clockOut = clockOutEntry?.Time;
             // Exact offsets from the working-day start (never wrap at 24 h, so >24 h working days stay correct).
-            TimeSpan inOffset = checkIns.Count > 0 ? ShiftOffset(checkIns[0].Date, checkIns[0].Time, date, dayStartTime) : TimeSpan.Zero;
-            TimeSpan outOffset = clockOut.HasValue ? ShiftOffset(checkOuts[^1].Date, checkOuts[^1].Time, date, dayStartTime) : inOffset;
+            TimeSpan inOffset = clockInEntry != null ? ShiftOffset(clockInEntry.Date, clockInEntry.Time, date, dayStartTime) : TimeSpan.Zero;
+            TimeSpan outOffset = clockOutEntry != null ? ShiftOffset(clockOutEntry.Date, clockOutEntry.Time, date, dayStartTime) : inOffset;
 
             // Distinct checked-in projects in chronological order, strictly from Attendance Entries.
+            // Collected from all punches so an override CheckIn with a blank Project ID never erases ProjectCheckIns.
             var projectsDone = new List<string>();
             var seenProjects = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            foreach (var ci in checkIns)
+            foreach (var ci in punches.Where(p => p.EntryType == AttendanceEntryType.CheckIn))
             {
                 string project = EntryProject(ci);
                 if (project.Length > 0 && seenProjects.Add(project))

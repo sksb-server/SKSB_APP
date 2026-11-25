@@ -2,11 +2,11 @@
   <!-- ============================================================= -->
   <!-- GLOBAL PATH DEFINITIONS                                       -->
   <!-- Source & Development root: C:\Users\<user>\Documents\codes\SKSB_App -->
-  <!-- Deployment Release target: C:\Users\<user>\Documents\SKSB_App -->
+  <!-- Deployment Release target: %LOCALAPPDATA%\SKSB_App -->
   <!-- ============================================================= -->
   <PropertyGroup>
     <SourceAddInsDir>$(MSBuildThisFileDirectory)AddIns</SourceAddInsDir>
-    <ReleaseDeploymentDir>$(UserProfile)\Documents\SKSB_App</ReleaseDeploymentDir>
+    <ReleaseDeploymentDir>$(LocalAppData)\SKSB_App</ReleaseDeploymentDir>
     <!-- Prevent Excel-DNA from auto-exporting public static helper methods as UDFs -->
     <ExcelAddInExplicitExports>true</ExcelAddInExplicitExports>
   </PropertyGroup>
@@ -30,7 +30,7 @@
           Command="powershell -NoProfile -ExecutionPolicy Bypass -Command &quot;if (Test-Path '$(SourceAddInsDir)') { Remove-Item -Path '$(SourceAddInsDir)\$(TargetName).*','$(SourceAddInsDir)\$(TargetName)-AddIn*' -Force -ErrorAction SilentlyContinue }&quot;"
           IgnoreExitCode="true" />
 
-    <!-- 1c. Only wipe Documents\SKSB_App when cleaning in RELEASE mode -->
+    <!-- 1c. Only wipe %LOCALAPPDATA%\SKSB_App when cleaning in RELEASE mode -->
     <Exec Condition="'$(Configuration)' == 'Release' and '$(MSBuildProjectName)' == 'Launcher'"
           Command="powershell -NoProfile -ExecutionPolicy Bypass -Command &quot;if (Test-Path '$(ReleaseDeploymentDir)') { Get-ChildItem -Path '$(ReleaseDeploymentDir)' -Recurse -File -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch '\\Data\\' } | Remove-Item -Force -ErrorAction SilentlyContinue }&quot;"
           IgnoreExitCode="true" />

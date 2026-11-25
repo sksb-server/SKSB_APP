@@ -63,7 +63,7 @@ public static partial class TableRowManager
                    "To retire a vehicle, fill in its 'Sold Date' (Status becomes 'Decommissioned') or set its 'Status' to 'Suspended' instead.";
         if (tableName is "WorkshopsTable" or "InsuranceCompaniesTable" or "FuelCardsTable" or "FuelCompanyNamesTable")
             return "to preserve historical records.\n\n" +
-                   "Past maintenances, insurances and fuel transactions still reference this entry; edit the row instead.";
+                   "Past maintenances, services, insurances and fuel transactions still reference this entry; edit the row instead.";
         return "to preserve historical records.\n\n" +
                "Existing rows are kept so past projects and records that reference them stay valid; edit the row instead.";
     }
@@ -105,6 +105,7 @@ public static partial class TableRowManager
         // Additive Tables (Append-Only Event Logs / Transaction Ledgers)
         TableNatures["OdometersTable"] = TableNature.Additive;
         TableNatures["MaintenancesTable"] = TableNature.Additive;
+        TableNatures["ServicesTable"] = TableNature.Additive;
         TableNatures["RoadTaxesTable"] = TableNature.Additive;
         TableNatures["InspectionsTable"] = TableNature.Additive;
         TableNatures["PermitsTable"] = TableNature.Additive;
@@ -147,6 +148,7 @@ public static partial class TableRowManager
         // Additive log heuristics
         if (norm.Contains("odometer") ||
             norm.Contains("maintenance") ||
+            norm.Contains("service") ||
             norm.Contains("inspection") ||
             norm.Contains("roadtax") ||
             norm.Contains("permit") ||

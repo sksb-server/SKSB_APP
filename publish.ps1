@@ -95,6 +95,14 @@ foreach ($extra in @("ProjectManager", "ScheduleManager")) {
     }
 }
 
+# 3b. Publish standalone single-file Launcher (SKSB_App.exe); distributed separately, not part of the update zip
+Write-Host "Publishing standalone Launcher (SKSB_App.exe)..." -ForegroundColor Cyan
+& dotnet publish (Join-Path $ScriptDir "Launcher\Launcher.csproj") -c Release --nologo -v:minimal -p:_AutoDeployRan=true
+if ($LASTEXITCODE -ne 0) { throw "Launcher single-file publish failed (exit code $LASTEXITCODE). Aborting publish." }
+$LauncherExe = Join-Path $ScriptDir "Launcher\bin\Release\net8.0-windows\win-x64\publish\SKSB_App.exe"
+if (-not (Test-Path $LauncherExe)) { throw "Standalone Launcher missing after publish: $LauncherExe" }
+Write-Host "Standalone Launcher published: $LauncherExe" -ForegroundColor Green
+
 # 4. Collect Portal.exe and runtime dependencies (Release only)
 $PortalBin = Join-Path $ScriptDir "Portal\bin\Release\net8.0-windows"
 if (-not (Test-Path $PortalBin)) { throw "Portal Release output not found: $PortalBin" }
@@ -155,7 +163,7 @@ Remove-Item $StagingDir -Recurse -Force
 Write-Host "Package bundled: $ZipOut" -ForegroundColor Green
 
 # 9. Upload to server (any failure aborts with a non-zero exit code)
-if ($SkipUpload) { Write-Host "SkipUpload set: package built at $ZipOut (not uploaded)." -ForegroundColor Yellow; return }
+if ($SkipUpload) { Write-Host "SkipUpload set: package built at $ZipOut (not uploaded)." -ForegroundColor Yellow; Write-Host "Distributable Launcher: $LauncherExe" -ForegroundColor Green; return }
 Write-Host "Deploying to server at: $ServerHost/api/update/publish..." -ForegroundColor Yellow
 $PublishUrl = "$ServerHost/api/update/publish"
 $curlCmd = Get-Command curl.exe -ErrorAction SilentlyContinue
@@ -178,3 +186,4 @@ if ($curlCmd -and $curlCmd.Source) {
 
 $ManifestJson | Out-File $VersionFile -Encoding utf8
 Write-Host "DEPLOYMENT SUCCESS! Server activated version: v$FinalVersion" -ForegroundColor Green
+Write-Host "Distributable Launcher: $LauncherExe" -ForegroundColor Green

@@ -14,7 +14,24 @@ internal sealed record StaffInfo(
     long Id, string ShortName, string FullName,
     DateOnly? JoinDate, DateOnly? ResignDate, ContractStatus Status, string Department);
 
-internal sealed record VehicleInfo(string Plate, VehicleType Type, decimal Odometer);
+internal sealed record VehicleRenewalSpan(DateOnly? StartDate, DateOnly ExpiryDate, string Status);
+internal sealed record VehicleMaintenanceSpan(DateOnly DateIn, DateOnly? DateCompleted, MaintenanceStatus Status);
+internal sealed record VehicleInspectionSpan(DateOnly ScheduleDateIn, DateOnly DateOut, InspectionStatus Status);
+
+/// <summary>Date-effective vehicle validity: <see cref="ShortNote"/> for dropdown labels, <see cref="Issues"/> for comments / warnings.</summary>
+internal sealed record VehicleEvaluation(bool IsValid, string ShortNote, IReadOnlyList<string> Issues)
+{
+    internal string FormatComment(DateOnly date) =>
+        IsValid ? string.Empty
+                : $"⚠ Invalid vehicle on {date.ToString("dd/MM/yyyy", CultureInfo.InvariantCulture)}\n• " + string.Join("\n• ", Issues);
+}
+
+internal sealed record VehicleInfo(
+    string Plate, VehicleType Type, decimal Odometer, VehicleStatus Status,
+    DateOnly? BoughtDate, DateOnly? SoldDate, DateOnly? RoadTaxExpiry, DateOnly? InspectionExpiry,
+    IReadOnlyList<VehicleRenewalSpan> RoadTaxes, IReadOnlyList<VehicleInspectionSpan> Inspections,
+    IReadOnlyList<VehicleRenewalSpan> Insurances, IReadOnlyList<VehicleRenewalSpan> Permits,
+    IReadOnlyList<VehicleMaintenanceSpan> Maintenances);
 internal sealed record ProjectInfo(
     string Id, IReadOnlyList<ProjectType> Types,
     ProjectStatus Status, ProjectCategory Category,
@@ -222,15 +239,64 @@ internal static class Roster
             }
 
             _vehicles = new List<VehicleInfo>();
-            foreach (var r in db.Query<dynamic>("SELECT vehicle_plate, vehicle_type, current_odometer FROM vehicle_master ORDER BY vehicle_plate;"))
+            var roadTaxes = LoadRenewals(db, "SELECT vehicle_plate, renew_date, expiry_date, status FROM vehicle_road_taxes;", "renew_date", "vehicle_road_taxes");
+            var inspections = new Dictionary<string, List<VehicleInspectionSpan>>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                foreach (var r in db.Query<dynamic>("SELECT vehicle_plate, schedule_date_in, date_out, status FROM vehicle_inspections;"))
+                {
+                    string key = ((string)r.vehicle_plate).Trim().ToUpperInvariant();
+                    object? sin = r.schedule_date_in;
+                    object? dout = r.date_out;
+                    string? st = r.status;
+                    var dateIn = NullIfUnset(ToDate(sin));
+                    var dateOut = NullIfUnset(ToDate(dout));
+                    if (dateIn == null || dateOut == null) continue;
+                    if (!inspections.TryGetValue(key, out var list)) inspections[key] = list = new();
+                    list.Add(new VehicleInspectionSpan(dateIn.Value, dateOut.Value,
+                        Enum.TryParse<InspectionStatus>(st, true, out var ist) ? ist : InspectionStatus.Scheduled));
+                }
+            }
+            catch (Exception ex) { AppLogger.Warn($"[ScheduleManager.Roster] vehicle_inspections load skipped: {ex.Message}"); }
+            var insurances = LoadRenewals(db, "SELECT vehicle_plate, renew_date, expiry_date, status FROM vehicle_insurances;", "renew_date", "vehicle_insurances");
+            var permits = LoadRenewals(db, "SELECT vehicle_plate, renew_date, expiry_date, status FROM vehicle_permits;", "renew_date", "vehicle_permits");
+            var maintenances = new Dictionary<string, List<VehicleMaintenanceSpan>>(StringComparer.OrdinalIgnoreCase);
+            try
+            {
+                foreach (var r in db.Query<dynamic>("SELECT vehicle_plate, date_in, date_completed, status FROM vehicle_maintenance;"))
+                {
+                    string key = ((string)r.vehicle_plate).Trim().ToUpperInvariant();
+                    object? din = r.date_in;
+                    object? dcomp = r.date_completed;
+                    string? st = r.status;
+                    var dateIn = NullIfUnset(ToDate(din));
+                    if (dateIn == null) continue;
+                    if (!maintenances.TryGetValue(key, out var list)) maintenances[key] = list = new();
+                    list.Add(new VehicleMaintenanceSpan(dateIn.Value, NullIfUnset(ToDate(dcomp)),
+                        Enum.TryParse<MaintenanceStatus>(st, true, out var ms) ? ms : MaintenanceStatus.None));
+                }
+            }
+            catch (Exception ex) { AppLogger.Warn($"[ScheduleManager.Roster] vehicle_maintenance load skipped: {ex.Message}"); }
+
+            foreach (var r in db.Query<dynamic>("SELECT vehicle_plate, vehicle_type, current_odometer, status, bought_date, sold_date, road_tax_expiry, inspection_expiry FROM vehicle_master ORDER BY vehicle_plate;"))
             {
                 string plate = ((string)r.vehicle_plate).Trim().ToUpperInvariant();
                 string? typeText = r.vehicle_type;
                 object? odo = r.current_odometer;
+                string? statusText = r.status;
+                object? bought = r.bought_date;
+                object? sold = r.sold_date;
+                object? rtExp = r.road_tax_expiry;
+                object? inExp = r.inspection_expiry;
                 _vehicles.Add(new VehicleInfo(
                     plate,
                     Enum.TryParse<VehicleType>(typeText, true, out var vt) ? vt : VehicleType.None,
-                    odo != null ? Convert.ToDecimal(odo) : 0m));
+                    odo != null ? Convert.ToDecimal(odo) : 0m,
+                    Enum.TryParse<VehicleStatus>(statusText, true, out var vs) ? vs : VehicleStatus.None,
+                    NullIfUnset(ToDate(bought)), NullIfUnset(ToDate(sold)), NullIfUnset(ToDate(rtExp)), NullIfUnset(ToDate(inExp)),
+                    roadTaxes.GetValueOrDefault(plate) ?? new(), inspections.GetValueOrDefault(plate) ?? new(),
+                    insurances.GetValueOrDefault(plate) ?? new(), permits.GetValueOrDefault(plate) ?? new(),
+                    maintenances.GetValueOrDefault(plate) ?? new()));
             }
 
             _projects = new List<ProjectInfo>();
@@ -290,7 +356,16 @@ internal static class Roster
             .ToList();
         _vehicles = (OfflineSnapshot.Load<List<VehicleRecord>>() ?? new())
             .Where(v => !string.IsNullOrWhiteSpace(v.VehiclePlate))
-            .Select(v => new VehicleInfo(v.VehiclePlate.Trim().ToUpperInvariant(), v.VehicleDetail.Type, v.VehicleDetail.CurrentOdometer ?? 0m))
+            .Select(v => new VehicleInfo(
+                v.VehiclePlate.Trim().ToUpperInvariant(), v.VehicleDetail.Type, v.VehicleDetail.CurrentOdometer ?? 0m, v.VehicleStatus,
+                NullIfUnset(v.VehicleDetail.BoughtDate), NullIfUnset(v.VehicleDetail.SoldDate),
+                NullIfUnset(v.VehicleDetail.RoadTaxExpiry), NullIfUnset(v.VehicleDetail.InspectionExpiry),
+                v.RoadTaxes.Select(x => new VehicleRenewalSpan(NullIfUnset(x.RenewDate), x.ExpiryDate, x.Status.ToString())).ToList(),
+                v.Inspections.Where(x => NullIfUnset(x.ScheduleDateIn) != null && NullIfUnset(x.DateOut) != null)
+                    .Select(x => new VehicleInspectionSpan(x.ScheduleDateIn, x.DateOut, x.Status)).ToList(),
+                v.Insurances.Select(x => new VehicleRenewalSpan(NullIfUnset(x.RenewDate), x.ExpiryDate, x.Status.ToString())).ToList(),
+                v.Permits.Select(x => new VehicleRenewalSpan(NullIfUnset(x.RenewDate), x.ExpiryDate, x.Status.ToString())).ToList(),
+                v.Maintenances.Select(x => new VehicleMaintenanceSpan(x.DateIn, NullIfUnset(x.DateCompleted), x.MaintenanceStatus)).ToList()))
             .ToList();
         _projects = (OfflineSnapshot.Load<List<ProjectRecord>>() ?? new())
             .Where(p => !string.IsNullOrWhiteSpace(p.ProjectCode))
@@ -300,6 +375,108 @@ internal static class Roster
                 p.ProjectDetails.Status, p.Category,
                 p.ProjectDetails.StartDate, p.ProjectDetails.TargetEndDate, p.ProjectDetails.ActualEndDate))
             .ToList();
+    }
+
+    private static DateOnly? NullIfUnset(DateOnly? d) => d is { Year: <= 1900 } ? null : d;
+
+    private static Dictionary<string, List<VehicleRenewalSpan>> LoadRenewals(PostgreSqlService db, string sql, string startColumn, string table)
+    {
+        var map = new Dictionary<string, List<VehicleRenewalSpan>>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            foreach (IDictionary<string, object?> r in db.Query<dynamic>(sql))
+            {
+                string key = Convert.ToString(r["vehicle_plate"])?.Trim().ToUpperInvariant() ?? string.Empty;
+                var expiry = NullIfUnset(ToDate(r["expiry_date"]));
+                if (key.Length == 0 || expiry == null) continue;
+                var start = NullIfUnset(ToDate(r[startColumn]));
+                if (!map.TryGetValue(key, out var list)) map[key] = list = new();
+                list.Add(new VehicleRenewalSpan(start, expiry.Value, Convert.ToString(r["status"]) ?? string.Empty));
+            }
+        }
+        catch (Exception ex) { AppLogger.Warn($"[ScheduleManager.Roster] {table} load skipped: {ex.Message}"); }
+        return map;
+    }
+
+    /// <summary>Is the vehicle usable on <paramref name="date"/>? Checks status, ownership, maintenance and document validity.</summary>
+    internal static VehicleEvaluation EvaluateVehicleOn(VehicleInfo v, DateOnly date)
+    {
+        var issues = new List<(string Short, string Detail)>();
+        const string F = "dd/MM/yyyy";
+        var ic = CultureInfo.InvariantCulture;
+        var today = DateOnly.FromDateTime(DateTime.Today);
+
+        if (v.BoughtDate.HasValue && v.BoughtDate.Value > date)
+            issues.Add(("not yet owned", $"Not yet owned (bought {v.BoughtDate.Value.ToString(F, ic)})"));
+
+        if (v.SoldDate.HasValue && date > v.SoldDate.Value)
+            issues.Add(("decommissioned", $"Decommissioned (sold on {v.SoldDate.Value.ToString(F, ic)})"));
+        else if (!v.SoldDate.HasValue && v.Status == VehicleStatus.Decommissioned)
+            issues.Add(("decommissioned", "Vehicle is Decommissioned"));
+
+        if (v.Status == VehicleStatus.Suspended) issues.Add(("suspended", "Vehicle is Suspended"));
+        if (v.Status == VehicleStatus.Reserved) issues.Add(("reserved", "Vehicle is Reserved"));
+
+        var shop = v.Maintenances.FirstOrDefault(m => m.Status != MaintenanceStatus.Cancelled &&
+            ((m.DateCompleted.HasValue && m.DateIn <= date && date <= m.DateCompleted.Value) ||
+             (!m.DateCompleted.HasValue && m.Status == MaintenanceStatus.In_Progress && m.DateIn <= date)));
+        if (shop != null)
+            issues.Add(("in shop", shop.DateCompleted.HasValue
+                ? $"In shop ({shop.DateIn.ToString(F, ic)} – {shop.DateCompleted.Value.ToString(F, ic)})"
+                : $"In shop since {shop.DateIn.ToString(F, ic)}"));
+        else if (v.Status == VehicleStatus.In_Shop && date >= today)
+            issues.Add(("in shop", "Vehicle is In Shop"));
+
+        int docIssues = 0;
+        void CheckDocument(string docName, IReadOnlyList<VehicleRenewalSpan> spans, DateOnly? masterFallbackExpiry)
+        {
+            var valid = spans.Where(s => !s.Status.Equals("Cancelled", StringComparison.OrdinalIgnoreCase)
+                                      && !s.Status.Equals("Failed", StringComparison.OrdinalIgnoreCase)).ToList();
+            if (valid.Count > 0)
+            {
+                if (valid.Any(s => (s.StartDate == null || s.StartDate.Value <= date) && date <= s.ExpiryDate)) return;
+                var past = valid.Where(s => s.ExpiryDate < date).ToList();
+                if (past.Count > 0)
+                {
+                    var latest = past.MaxBy(s => s.ExpiryDate)!;
+                    issues.Add(($"{docName} expired", $"{docName} expired on {latest.ExpiryDate.ToString(F, ic)}"));
+                    docIssues++;
+                }
+                else
+                {
+                    var future = valid.Where(s => s.StartDate.HasValue && s.StartDate.Value > date).ToList();
+                    if (future.Count > 0)
+                    {
+                        var earliest = future.MinBy(s => s.StartDate!.Value)!;
+                        issues.Add(($"{docName} not yet valid", $"{docName} not valid until {earliest.StartDate!.Value.ToString(F, ic)}"));
+                        docIssues++;
+                    }
+                }
+            }
+            else if (masterFallbackExpiry.HasValue && masterFallbackExpiry.Value < date)
+            {
+                issues.Add(($"{docName} expired", $"{docName} expired on {masterFallbackExpiry.Value.ToString(F, ic)}"));
+                docIssues++;
+            }
+        }
+        CheckDocument("Road Tax", v.RoadTaxes, v.RoadTaxExpiry);
+        CheckDocument("Insurance", v.Insurances, null);
+        CheckDocument("Permit", v.Permits, null);
+
+        // Expired inspection is OK; only the inspection window itself makes the vehicle unavailable.
+        var insp = v.Inspections.FirstOrDefault(i => i.ScheduleDateIn <= date && date <= i.DateOut);
+        if (insp != null)
+            issues.Add(("in inspection", insp.ScheduleDateIn == insp.DateOut
+                ? $"In inspection ({insp.ScheduleDateIn.ToString(F, ic)})"
+                : $"In inspection ({insp.ScheduleDateIn.ToString(F, ic)} – {insp.DateOut.ToString(F, ic)})"));
+
+        if (docIssues == 0 && v.Status == VehicleStatus.Expired && date >= today && !(v.InspectionExpiry.HasValue && v.InspectionExpiry.Value < today))
+            issues.Add(("expired", "Vehicle status is Expired"));
+
+        string shortNote = issues.Count == 0 ? string.Empty
+            : issues.Count == 1 ? issues[0].Short
+            : $"{issues[0].Short}, +{issues.Count - 1} more";
+        return new VehicleEvaluation(issues.Count == 0, shortNote, issues.Select(i => i.Detail).ToList());
     }
 
     private static DateOnly? ToDate(object? raw) =>

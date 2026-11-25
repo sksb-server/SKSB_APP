@@ -68,6 +68,7 @@ public static partial class ServerDispatcher
     private static readonly (string Table, string IdColumn, string Sequence)[] VehicleSequences =
     {
         ("vehicle_maintenance", "maintenance_id", "vehicle_maintenance_maintenance_id_seq"),
+        ("vehicle_services", "service_id", "vehicle_services_service_id_seq"),
         ("vehicle_road_taxes", "road_tax_id", "vehicle_road_taxes_road_tax_id_seq"),
         ("vehicle_inspections", "inspection_id", "vehicle_inspections_inspection_id_seq"),
         ("vehicle_permits", "permit_id", "vehicle_permits_permit_id_seq"),
@@ -79,7 +80,7 @@ public static partial class ServerDispatcher
 
     private static readonly string[] VehicleConcurrencyTables =
     {
-        "vehicle_master", "vehicle_maintenance", "vehicle_road_taxes", "vehicle_inspections", "vehicle_permits",
+        "vehicle_master", "vehicle_maintenance", "vehicle_services", "vehicle_road_taxes", "vehicle_inspections", "vehicle_permits",
         "vehicle_insurances", "vehicle_insurance_claims", "vehicle_odometers",
         "vehicle_workshops", "vehicle_insurance_companies", "vehicle_fuel_cards"
     };
@@ -107,6 +108,25 @@ CREATE TABLE IF NOT EXISTS vehicle_insurance_claims (
     claim_amount    NUMERIC(14,2) DEFAULT 0,
     remarks         TEXT DEFAULT '',
     updated_at      TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);", transaction: trans);
+
+        // Routine multi-cycle servicing (split out of vehicle_maintenance).
+        conn.Execute(@"
+CREATE TABLE IF NOT EXISTS vehicle_services (
+    service_id            BIGINT PRIMARY KEY,
+    vehicle_plate         VARCHAR(32) NOT NULL,
+    service_category      VARCHAR(64) NOT NULL DEFAULT 'General_Service',
+    service_date          DATE NOT NULL,
+    odometer_at_service   NUMERIC(12,1) NULL,
+    next_service_odometer NUMERIC(12,1) NULL,
+    next_service_date     DATE NULL,
+    workshop_name         VARCHAR(256) DEFAULT '',
+    workshop_address      TEXT DEFAULT '',
+    status                VARCHAR(32) NOT NULL DEFAULT 'Completed',
+    cost                  NUMERIC(14,2) NULL,
+    remarks               TEXT DEFAULT '',
+    created_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+    updated_at            TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );", transaction: trans);
 
         // Odometers / engine-hour meters carry 1 decimal place (NUMERIC(12,1)).
@@ -201,7 +221,6 @@ ALTER TABLE vehicle_odometers ADD COLUMN IF NOT EXISTS fuel_amount NUMERIC(12,4)
         TyreCost = m.TyreCost,
         BrakeCost = m.BrakeCost,
         ClutchCost = m.ClutchCost,
-        ServiceCost = m.ServiceCost,
         FuelPumpCost = m.FuelPumpCost,
         AircondCost = m.AircondCost,
         WiringCost = m.WiringCost,
@@ -209,6 +228,23 @@ ALTER TABLE vehicle_odometers ADD COLUMN IF NOT EXISTS fuel_amount NUMERIC(12,4)
         TowingCost = m.TowingCost,
         CushionCost = m.CushionCost,
         PartsCost = m.PartsCost,
+        ExpectedUpdatedAt = ToConcurrencyToken(expectedUpdatedAt)
+    };
+
+    private static object ToServiceParams(VehicleService s, DateTime? expectedUpdatedAt = null) => new
+    {
+        ServiceId = s.ServiceID,
+        VehiclePlate = NormalizePlate(s.VehiclePlate),
+        ServiceCategory = s.ServiceCategory.ToString(),
+        ServiceDate = ToDbDate(s.ServiceDate),
+        OdometerAtService = RoundOdo(s.OdometerAtService),
+        NextServiceOdometer = RoundOdo(s.NextServiceOdometer),
+        NextServiceDate = ToDbDateN(s.NextServiceDate),
+        WorkshopName = s.WorkshopName ?? string.Empty,
+        WorkshopAddress = s.WorkshopAddress ?? string.Empty,
+        Status = s.Status.ToString(),
+        Cost = s.Cost,
+        Remarks = s.Remarks ?? string.Empty,
         ExpectedUpdatedAt = ToConcurrencyToken(expectedUpdatedAt)
     };
 
@@ -430,8 +466,13 @@ WHERE vehicle_plate = @VehiclePlate
         "vehicle_maintenance", "maintenance_id", "vehicle_maintenance_maintenance_id_seq",
         "vehicle_plate", "service_type", "date_in", "estimated_return", "date_completed", "odometer_in", "odometer_out",
         "repair_cost", "workshop_name", "workshop_address", "status", "remarks",
-        "tyre_cost", "brake_cost", "clutch_cost", "service_cost", "fuel_pump_cost",
+        "tyre_cost", "brake_cost", "clutch_cost", "fuel_pump_cost",
         "aircond_cost", "wiring_cost", "battery_cost", "towing_cost", "cushion_cost", "parts_cost");
+
+    private static readonly VehicleTableSql ServiceSql = BuildVehicleTableSql(
+        "vehicle_services", "service_id", "vehicle_services_service_id_seq",
+        "vehicle_plate", "service_category", "service_date", "odometer_at_service", "next_service_odometer",
+        "next_service_date", "workshop_name", "workshop_address", "status", "cost", "remarks");
 
     private static readonly VehicleTableSql InspectionSql = BuildVehicleTableSql(
         "vehicle_inspections", "inspection_id", "vehicle_inspections_inspection_id_seq",
@@ -509,6 +550,15 @@ WHERE vehicle_plate = @VehiclePlate
         IsValid = IsValidVehicleChild, Key = m => m.MaintenanceID, ToParams = ToMaintenanceParams,
         Describe = m => $"{NormalizePlate(m.VehiclePlate)}, {m.ServiceType}",
         Diff = ConflictDiff.ForMaintenance
+    };
+
+    private static readonly VehicleTableSpec<VehicleService> ServiceSpec = new()
+    {
+        DbTable = "vehicle_services", KeyColumn = "service_id", Label = "Service",
+        ExcelTable = "ServicesTable", KeyHeader = "Service ID", Sql = ServiceSql, UsesSequence = true,
+        IsValid = IsValidVehicleChild, Key = s => s.ServiceID, ToParams = ToServiceParams,
+        Describe = s => $"{NormalizePlate(s.VehiclePlate)}, {s.ServiceCategory}",
+        Diff = ConflictDiff.ForService
     };
 
     private static readonly VehicleTableSpec<RoadTax> RoadTaxSpec = new()
@@ -719,6 +769,7 @@ WHERE vehicle_plate = @VehiclePlate
 
             ApplyVehicleTableDelta(conn, trans, VehicleMasterSpec, UpsertOnly(valid), true, conflicts);
             ApplyVehicleTableDelta(conn, trans, MaintenanceSpec, UpsertOnly(CollectVehicleChildren(valid, v => v.Maintenances)), true, conflicts);
+            ApplyVehicleTableDelta(conn, trans, ServiceSpec, UpsertOnly(CollectVehicleChildren(valid, v => v.Services)), true, conflicts);
             ApplyVehicleTableDelta(conn, trans, RoadTaxSpec, UpsertOnly(CollectVehicleChildren(valid, v => v.RoadTaxes)), true, conflicts);
             ApplyVehicleTableDelta(conn, trans, InspectionSpec, UpsertOnly(CollectVehicleChildren(valid, v => v.Inspections)), true, conflicts);
             ApplyVehicleTableDelta(conn, trans, PermitSpec, UpsertOnly(CollectVehicleChildren(valid, v => v.Permits)), true, conflicts);
@@ -787,6 +838,7 @@ WHERE vehicle_plate = @VehiclePlate
             // b. vehicle_master, then its child tables.
             ApplyVehicleTableDelta(conn, trans, VehicleMasterSpec, delta.Vehicles, forceOverwrite, conflicts);
             ApplyVehicleTableDelta(conn, trans, MaintenanceSpec, delta.Maintenances, forceOverwrite, conflicts);
+            ApplyVehicleTableDelta(conn, trans, ServiceSpec, delta.Services, forceOverwrite, conflicts);
             ApplyVehicleTableDelta(conn, trans, RoadTaxSpec, delta.RoadTaxes, forceOverwrite, conflicts);
             ApplyVehicleTableDelta(conn, trans, InspectionSpec, delta.Inspections, forceOverwrite, conflicts);
             ApplyVehicleTableDelta(conn, trans, PermitSpec, delta.Permits, forceOverwrite, conflicts);
@@ -805,6 +857,7 @@ WHERE vehicle_plate = @VehiclePlate
         AppLogger.Info($"[ServerDispatcher] Vehicle delta saved (force={forceOverwrite}): " + string.Join("; ",
             Stats("vehicles", delta.Vehicles),
             Stats("maintenance", delta.Maintenances),
+            Stats("services", delta.Services),
             Stats("road tax", delta.RoadTaxes),
             Stats("inspections", delta.Inspections),
             Stats("permits", delta.Permits),
@@ -1634,7 +1687,6 @@ WHERE vehicle_plate = @VehiclePlate
             AddNum(diffs, "Tyre", DecN(row, "tyre_cost"), local.TyreCost, 2, money: true);
             AddNum(diffs, "Brake", DecN(row, "brake_cost"), local.BrakeCost, 2, money: true);
             AddNum(diffs, "Clutch", DecN(row, "clutch_cost"), local.ClutchCost, 2, money: true);
-            AddNum(diffs, "Service", DecN(row, "service_cost"), local.ServiceCost, 2, money: true);
             AddNum(diffs, "Fuel Pump", DecN(row, "fuel_pump_cost"), local.FuelPumpCost, 2, money: true);
             AddNum(diffs, "Aircond", DecN(row, "aircond_cost"), local.AircondCost, 2, money: true);
             AddNum(diffs, "Wiring", DecN(row, "wiring_cost"), local.WiringCost, 2, money: true);
@@ -1642,6 +1694,26 @@ WHERE vehicle_plate = @VehiclePlate
             AddNum(diffs, "Towing", DecN(row, "towing_cost"), local.TowingCost, 2, money: true);
             AddNum(diffs, "Cushion", DecN(row, "cushion_cost"), local.CushionCost, 2, money: true);
             AddNum(diffs, "Parts", DecN(row, "parts_cost"), local.PartsCost, 2, money: true);
+            AddText(diffs, "Remarks", Text(row, "remarks"), local.Remarks);
+            return diffs;
+        }
+
+        public static List<FieldConflict> ForService(System.Data.IDbConnection conn, System.Data.IDbTransaction trans, VehicleService local)
+        {
+            var diffs = new List<FieldConflict>();
+            var row = QueryRow(conn, trans, "SELECT * FROM vehicle_services WHERE service_id = @Key;", new { Key = local.ServiceID });
+            if (row == null) return diffs;
+
+            AddText(diffs, "Vehicle Plate", Text(row, "vehicle_plate"), NormalizePlate(local.VehiclePlate));
+            AddParsedEnum(diffs, "Service Category", Text(row, "service_category"), local.ServiceCategory);
+            AddDate(diffs, "Service Date", Date(row, "service_date"), local.ServiceDate);
+            AddNum(diffs, "Odometer at Service", DecN(row, "odometer_at_service"), local.OdometerAtService, 1, money: false);
+            AddNum(diffs, "Next Service Odometer", DecN(row, "next_service_odometer"), local.NextServiceOdometer, 1, money: false);
+            AddDate(diffs, "Next Service Date", Date(row, "next_service_date"), local.NextServiceDate);
+            AddText(diffs, "Workshop Name", Text(row, "workshop_name"), local.WorkshopName);
+            AddText(diffs, "Workshop Address", Text(row, "workshop_address"), local.WorkshopAddress);
+            AddParsedEnum(diffs, "Status", Text(row, "status"), local.Status);
+            AddNum(diffs, "Cost", DecN(row, "cost"), local.Cost, 2, money: true);
             AddText(diffs, "Remarks", Text(row, "remarks"), local.Remarks);
             return diffs;
         }

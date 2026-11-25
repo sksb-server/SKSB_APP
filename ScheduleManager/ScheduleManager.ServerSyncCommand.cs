@@ -675,7 +675,7 @@ internal static class ServerSyncCommands
         DateTime d = date.ToDateTime(TimeOnly.MinValue);
         var record = new ScheduleRecord { DailyScheduleDate = date };
 
-        // Per-date attendance parameters; no row => ScheduleRecord defaults (06:00 / 11:00 / 18:00).
+        // Per-date attendance parameters; no row => ScheduleRecord defaults (06:00 / 10:30 / 18:00).
         // The next date's Day Start Time is the exclusive end boundary of this working day.
         DateTime dNext = date.AddDays(1).ToDateTime(TimeOnly.MinValue);
         foreach (var r in db.Query<dynamic>(

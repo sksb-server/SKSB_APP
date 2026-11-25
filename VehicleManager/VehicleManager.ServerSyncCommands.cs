@@ -68,6 +68,7 @@ internal static class ServerSyncCommands
     // cover the persisted user-editable fields only (rollups / calculated / UI-only lookup columns are excluded).
     private static readonly TableBaseline<string> VehicleBaseline = new();
     private static readonly TableBaseline<long> MaintenanceBaseline = new();
+    private static readonly TableBaseline<long> ServiceBaseline = new();
     private static readonly TableBaseline<long> RoadTaxBaseline = new();
     private static readonly TableBaseline<long> InspectionBaseline = new();
     private static readonly TableBaseline<long> PermitBaseline = new();
@@ -107,9 +108,14 @@ internal static class ServerSyncCommands
         Norm(m.MaintenanceID), PlateKey(m.VehiclePlate), m.ServiceType.ToString(),
         Norm(m.DateIn), Norm(m.EstimatedReturn), Norm(m.DateCompleted), NormOdo(m.OdometerIn), NormOdo(m.OdometerOut),
         Norm(m.WorkshopName), Norm(m.WorkshopAddress), m.MaintenanceStatus.ToString(),
-        Norm(m.TyreCost), Norm(m.BrakeCost), Norm(m.ClutchCost), Norm(m.ServiceCost), Norm(m.FuelPumpCost),
+        Norm(m.TyreCost), Norm(m.BrakeCost), Norm(m.ClutchCost), Norm(m.FuelPumpCost),
         Norm(m.AircondCost), Norm(m.WiringCost), Norm(m.BatteryCost), Norm(m.TowingCost), Norm(m.CushionCost),
         Norm(m.PartsCost), Norm(m.Remarks));
+
+    private static string ServiceFingerprint(VehicleService s) => string.Join(Sep,
+        Norm(s.ServiceID), PlateKey(s.VehiclePlate), s.ServiceCategory.ToString(), Norm(s.ServiceDate),
+        NormOdo(s.OdometerAtService), NormOdo(s.NextServiceOdometer), Norm(s.NextServiceDate),
+        Norm(s.WorkshopName), Norm(s.WorkshopAddress), s.Status.ToString(), Norm(s.Cost), Norm(s.Remarks));
 
     private static string RenewalFingerprint(VehicleRenewalRecord r) => string.Join(Sep,
         PlateKey(r.VehiclePlate), Norm(r.RenewDate), Norm(r.ExpiryDate), Norm(r.Amount), Norm(r.Remarks));
@@ -165,6 +171,7 @@ internal static class ServerSyncCommands
         }
 
         CaptureChild(MaintenanceBaseline, "vehicle_maintenance", v => v.Maintenances, m => m.MaintenanceID, MaintenanceFingerprint);
+        CaptureChild(ServiceBaseline, "vehicle_services", v => v.Services, s => s.ServiceID, ServiceFingerprint);
         CaptureChild(RoadTaxBaseline, "vehicle_road_taxes", v => v.RoadTaxes, r => r.RoadTaxID, RoadTaxFingerprint);
         CaptureChild(InspectionBaseline, "vehicle_inspections", v => v.Inspections, i => i.InspectionID, InspectionFingerprint);
         CaptureChild(PermitBaseline, "vehicle_permits", v => v.Permits, p => p.PermitID, PermitFingerprint);
@@ -232,7 +239,7 @@ internal static class ServerSyncCommands
                     foreach (var c in rows ?? Enumerable.Empty<VehicleChildRecord>())
                         if (string.IsNullOrWhiteSpace(c.VehiclePlate)) c.VehiclePlate = v.VehiclePlate;
                 }
-                Inherit(v.Maintenances); Inherit(v.RoadTaxes); Inherit(v.Inspections); Inherit(v.Permits);
+                Inherit(v.Maintenances); Inherit(v.Services); Inherit(v.RoadTaxes); Inherit(v.Inspections); Inherit(v.Permits);
                 Inherit(v.Insurances); Inherit(v.InsuranceClaims); Inherit(v.OdometerLogs);
             }
 
@@ -245,6 +252,7 @@ internal static class ServerSyncCommands
             {
                 Vehicles = VehicleBaseline.Diff(vehicles, v => PlateKey(v.VehiclePlate), VehicleFingerprint),
                 Maintenances = MaintenanceBaseline.Diff(Children(v => v.Maintenances), m => m.MaintenanceID, MaintenanceFingerprint),
+                Services = ServiceBaseline.Diff(Children(v => v.Services), s => s.ServiceID, ServiceFingerprint),
                 RoadTaxes = RoadTaxBaseline.Diff(Children(v => v.RoadTaxes), r => r.RoadTaxID, RoadTaxFingerprint),
                 Inspections = InspectionBaseline.Diff(Children(v => v.Inspections), i => i.InspectionID, InspectionFingerprint),
                 Permits = PermitBaseline.Diff(Children(v => v.Permits), p => p.PermitID, PermitFingerprint),
@@ -261,7 +269,7 @@ internal static class ServerSyncCommands
 
             AppLogger.Info(
                 $"[{Module}] Delta save (force={forceOverwrite}): Vehicles={vehicles.Count}, Maintenances={vehicles.Sum(v => v.Maintenances.Count)}, " +
-                $"RoadTaxes={vehicles.Sum(v => v.RoadTaxes.Count)}, Inspections={vehicles.Sum(v => v.Inspections.Count)}, " +
+                $"Services={vehicles.Sum(v => v.Services?.Count ?? 0)}, RoadTaxes={vehicles.Sum(v => v.RoadTaxes.Count)}, Inspections={vehicles.Sum(v => v.Inspections.Count)}, " +
                 $"Permits={vehicles.Sum(v => v.Permits.Count)}, Insurances={vehicles.Sum(v => v.Insurances.Count)}, " +
                 $"InsuranceClaims={vehicles.Sum(v => v.InsuranceClaims?.Count ?? 0)}, Odometers={vehicles.Sum(v => v.OdometerLogs.Count)}");
 
@@ -347,6 +355,7 @@ internal static class ServerSyncCommands
             }
 
             RefreshChild("vehicle_maintenance", "maintenance_id", MaintenanceBaseline, MapMaintenanceRow, m => m.MaintenanceID, MaintenanceFingerprint);
+            RefreshChild("vehicle_services", "service_id", ServiceBaseline, MapServiceRow, s => s.ServiceID, ServiceFingerprint);
             RefreshChild("vehicle_road_taxes", "road_tax_id", RoadTaxBaseline, MapRoadTaxRow, r => r.RoadTaxID, RoadTaxFingerprint);
             RefreshChild("vehicle_inspections", "inspection_id", InspectionBaseline, MapInspectionRow, i => i.InspectionID, InspectionFingerprint);
             RefreshChild("vehicle_permits", "permit_id", PermitBaseline, MapPermitRow, p => p.PermitID, PermitFingerprint);
@@ -437,6 +446,7 @@ internal static class ServerSyncCommands
             }
 
             LoadChildren("vehicle_maintenance", "maintenance_id", v => v.Maintenances, MapMaintenanceRow);
+            LoadChildren("vehicle_services", "service_id", v => v.Services, MapServiceRow);
             LoadChildren("vehicle_road_taxes", "road_tax_id", v => v.RoadTaxes, MapRoadTaxRow);
             LoadChildren("vehicle_inspections", "inspection_id", v => v.Inspections, MapInspectionRow);
             LoadChildren("vehicle_permits", "permit_id", v => v.Permits, MapPermitRow);
@@ -454,7 +464,7 @@ internal static class ServerSyncCommands
 
             SKSB_App.Core.Diagnostics.AppLogger.Info(
                 $"[Server Assembly Summary] Vehicles={serverVehicles.Count}, Maintenances={serverVehicles.Sum(v => v.Maintenances.Count)}, " +
-                $"RoadTaxes={totalRoadTaxes}, Inspections={totalInspections}, Permits={totalPermits}, Insurances={totalInsurances}, InsuranceClaims={totalInsuranceClaims}, Odometers={totalOdometers}");
+                $"Services={serverVehicles.Sum(v => v.Services.Count)}, RoadTaxes={totalRoadTaxes}, Inspections={totalInspections}, Permits={totalPermits}, Insurances={totalInsurances}, InsuranceClaims={totalInsuranceClaims}, Odometers={totalOdometers}");
 
             // Only reached when the server answered (offline-cache rows must never become a baseline).
             CaptureVehicleBaselines(serverVehicles, failedChildTables);
@@ -502,6 +512,7 @@ internal static class ServerSyncCommands
             SoldPrice = DecN(v, "sold_price")
         },
         Maintenances = new List<Maintenance>(),
+        Services = new List<VehicleService>(),
         RoadTaxes = new List<RoadTax>(),
         Inspections = new List<Inspection>(),
         Permits = new List<VehiclePermit>(),
@@ -529,7 +540,6 @@ internal static class ServerSyncCommands
         TyreCost = DecN(m, "tyre_cost"),
         BrakeCost = DecN(m, "brake_cost"),
         ClutchCost = DecN(m, "clutch_cost"),
-        ServiceCost = DecN(m, "service_cost"),
         FuelPumpCost = DecN(m, "fuel_pump_cost"),
         AircondCost = DecN(m, "aircond_cost"),
         WiringCost = DecN(m, "wiring_cost"),
@@ -538,6 +548,23 @@ internal static class ServerSyncCommands
         CushionCost = DecN(m, "cushion_cost"),
         PartsCost = DecN(m, "parts_cost"),
         ServerUpdatedAt = UpdatedAt(m)
+    };
+
+    private static VehicleService MapServiceRow(object s, string plate) => new()
+    {
+        ServiceID = Lng(s, "service_id"),
+        VehiclePlate = plate,
+        ServiceCategory = ParseEnum(s, "service_category", ServiceCategory.General_Service),
+        ServiceDate = DateOr(s, "service_date", Today),
+        OdometerAtService = OdoN(s, "odometer_at_service"),
+        NextServiceOdometer = OdoN(s, "next_service_odometer"),
+        NextServiceDate = DateN(s, "next_service_date"),
+        WorkshopName = Txt(s, "workshop_name"),
+        WorkshopAddress = Txt(s, "workshop_address"),
+        Status = ParseEnum(s, "status", VehicleServiceStatus.Completed),
+        Cost = DecN(s, "cost"),
+        Remarks = Txt(s, "remarks"),
+        ServerUpdatedAt = UpdatedAt(s)
     };
 
     private static RoadTax MapRoadTaxRow(object r, string plate) => new()
@@ -723,6 +750,24 @@ internal static class ServerSyncCommands
         if (vehicle.VehicleStatus == VehicleStatus.Suspended && date >= today)
             return VehicleStatus.Suspended;
 
+        // Service due (lowest priority): latest non-cancelled service per category as of 'date'.
+        var latestServices = (vehicle.Services ?? new List<VehicleService>())
+            .Where(s => s.Status != VehicleServiceStatus.Cancelled && s.ServiceDate <= date)
+            .GroupBy(s => s.ServiceCategory)
+            .Select(g => g.OrderByDescending(s => s.ServiceDate).ThenByDescending(s => s.ServiceID).First())
+            .ToList();
+
+        if (latestServices.Any(s => s.NextServiceDate.HasValue && s.NextServiceDate.Value.Year > 1900 && s.NextServiceDate.Value < date))
+            return VehicleStatus.Service_Needed;
+
+        if (date >= today)
+        {
+            decimal curOdo = vehicle.VehicleDetail.CurrentOdometer ?? 0m;
+            if (latestServices.Any(s => s.NextServiceOdometer.HasValue && s.NextServiceOdometer.Value > 0m && curOdo >= s.NextServiceOdometer.Value)
+                || vehicle.VehicleStatus == VehicleStatus.Service_Needed)
+                return VehicleStatus.Service_Needed;
+        }
+
         return VehicleStatus.Active;
     }
 
@@ -760,6 +805,7 @@ internal static class ServerSyncCommands
         var dates = new HashSet<DateOnly>();
         dates.UnionWith(vehicle.OdometerLogs.Select(o => o.Date));
         dates.UnionWith(vehicle.Maintenances.Select(m => m.DateIn));
+        dates.UnionWith(vehicle.Services.Select(s => s.ServiceDate));
         dates.UnionWith(vehicle.Insurances.Select(i => i.RenewDate));
         dates.UnionWith(vehicle.Permits.Select(p => p.RenewDate));
         dates.UnionWith(vehicle.RoadTaxes.Select(r => r.RenewDate));
@@ -786,6 +832,7 @@ internal static class ServerSyncCommands
             }
 
             decimal? fuel = odos.Count > 0 ? odos.Sum(o => o.Amount) : null;
+            decimal? service = SumOrNull(vehicle.Services.Where(s => s.ServiceDate == date && s.Status != VehicleServiceStatus.Cancelled).Select(s => s.Cost));
             decimal? maint = SumOrNull(vehicle.Maintenances.Where(m => m.DateIn == date).Select(m => m.RepairCost));
             decimal? ins = SumOrNull(vehicle.Insurances.Where(i => i.RenewDate == date).Select(i => i.Amount));
             decimal? permit = SumOrNull(vehicle.Permits.Where(p => p.RenewDate == date).Select(p => p.Amount));
@@ -794,8 +841,8 @@ internal static class ServerSyncCommands
             decimal? claim = SumOrNull(claims.Select(c => c.ClaimAmount));
 
             decimal? total = null;
-            if (fuel.HasValue || maint.HasValue || ins.HasValue || permit.HasValue || roadInspect.HasValue || claim.HasValue)
-                total = (fuel ?? 0m) + (maint ?? 0m) + (ins ?? 0m) + (permit ?? 0m) + (roadInspect ?? 0m)
+            if (fuel.HasValue || service.HasValue || maint.HasValue || ins.HasValue || permit.HasValue || roadInspect.HasValue || claim.HasValue)
+                total = (fuel ?? 0m) + (service ?? 0m) + (maint ?? 0m) + (ins ?? 0m) + (permit ?? 0m) + (roadInspect ?? 0m)
                         - ((claim ?? 0m) > 0m ? claim!.Value : 0m);
 
             rows.Add(new VehicleSummaryRow
@@ -806,6 +853,7 @@ internal static class ServerSyncCommands
                 UsedAt = JoinDistinct(projects),
                 OdometerUsed = deltas.Count > 0 ? Math.Round(deltas.Sum(), 1) : null,
                 FuelCost = fuel,
+                ServiceCost = service,
                 MaintenanceCost = maint,
                 InsuranceCost = ins,
                 PermitCost = permit,

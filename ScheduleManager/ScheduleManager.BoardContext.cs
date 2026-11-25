@@ -41,7 +41,7 @@ internal static class BoardContext
     /// <summary>Last-read Lookups[SkillIconsTable] overlay, reused when icons are rebuilt without the sheet.</summary>
     private static Dictionary<string, string> _legendIcons = new(StringComparer.OrdinalIgnoreCase);
     public static readonly TimeOnly DefaultDayStartTime = new(6, 0);
-    public static readonly TimeOnly DefaultLateCutOff = new(11, 0);
+    public static readonly TimeOnly DefaultLateCutOff = new(10, 30);
     public static readonly TimeOnly DefaultOtStartTime = new(18, 0);
 
     private static TimeOnly _dayStartTime = DefaultDayStartTime;

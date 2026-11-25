@@ -129,8 +129,8 @@ public record ScheduleRecord
     /// <summary>Day Start Time for <see cref="DailyScheduleDate"/> + 1 (end boundary of this working day). Default 06:00.</summary>
     public TimeOnly NextDayStartTime { get; set; } = new(6, 0);
 
-    /// <summary>Late Checked In Cut Off Time for <see cref="DailyScheduleDate"/> (Daily Attendances D2). Default 11:00.</summary>
-    public TimeOnly LateCutOffTime { get; set; } = new(11, 0);
+    /// <summary>Late Checked In Cut Off Time for <see cref="DailyScheduleDate"/> (Daily Attendances D2). Default 10:30.</summary>
+    public TimeOnly LateCutOffTime { get; set; } = new(10, 30);
 
     /// <summary>OT Start Time for <see cref="DailyScheduleDate"/> (Daily Attendances E2). Default 18:00.</summary>
     public TimeOnly OTStartTime { get; set; } = new(18, 0);

@@ -14,6 +14,7 @@ internal static partial class SheetMapper
 
     internal static readonly string[] AllVehicleAliases = { "All Vehicles", "AllVehicles", "Vehicle_Master", "Vehicles" };
     internal static readonly string[] MaintenanceAliases = { "Maintenances", "Maintenance", "Vehicle_Maintenance" };
+    internal static readonly string[] ServiceAliases = { "Services", "Service", "Vehicle_Services" };
     internal static readonly string[] WorkshopAliases = { "Workshops", "Workshop" };
     internal static readonly string[] RoadTaxAliases = { "Road Taxes", "RoadTaxes", "Road Tax" };
     internal static readonly string[] InspectionAliases = { "Inspections", "Inspection" };
@@ -41,6 +42,8 @@ internal static partial class SheetMapper
             // Date-based child tables are populated newest-date-on-top (not grouped by master plate order).
             Child<Maintenance>(MaintenanceAliases, "Maintenances", "MaintenancesTable", v => v.Maintenances, m => m.VehiclePlate, (m, plate) => m.VehiclePlate = plate,
                 list => list.OrderByDescending(m => m.DateIn).ThenByDescending(m => m.MaintenanceID).ToList()),
+            Child<VehicleService>(ServiceAliases, "Services", "ServicesTable", v => v.Services, s => s.VehiclePlate, (s, plate) => s.VehiclePlate = plate,
+                list => list.OrderByDescending(s => s.ServiceDate).ThenByDescending(s => s.ServiceID).ToList()),
             Child<RoadTax>(RoadTaxAliases, "Road Taxes", "RoadTaxesTable", v => v.RoadTaxes, r => r.VehiclePlate, (r, plate) => r.VehiclePlate = plate,
                 list => list.OrderByDescending(r => r.RenewDate).ThenByDescending(r => r.RoadTaxID).ToList()),
             Child<Inspection>(InspectionAliases, "Inspections", "InspectionsTable", v => v.Inspections, i => i.VehiclePlate, (i, plate) => i.VehiclePlate = plate,
@@ -95,6 +98,7 @@ internal static partial class SheetMapper
             "InsuranceCompaniesTable",
             "FuelCardsTable",
             "MaintenancesTable",
+            "ServicesTable",
             "RoadTaxesTable",
             "InspectionsTable",
             "PermitsTable",
@@ -111,7 +115,7 @@ internal static partial class SheetMapper
         MasterLabel = "Vehicle Profiles",
         InspectTables = new[]
         {
-            "AllVehiclesTable", "MaintenancesTable", "WorkshopsTable", "RoadTaxesTable",
+            "AllVehiclesTable", "MaintenancesTable", "ServicesTable", "WorkshopsTable", "RoadTaxesTable",
             "InspectionsTable", "PermitsTable", "InsurancesTable", "InsuranceCompaniesTable",
             "InsuranceClaimsTable", "OdometersTable", "FuelCardsTable", "FuelCompanyNamesTable"
         }

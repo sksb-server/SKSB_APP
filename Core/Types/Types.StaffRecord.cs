@@ -1,4 +1,4 @@
-﻿namespace SKSB_App.Core.Types;
+namespace SKSB_App.Core.Types;
 
 using System;
 using System.Collections.Generic;
@@ -161,10 +161,7 @@ public record StaffDetails
 
             if (string.IsNullOrWhiteSpace(StaffName)) return string.Empty;
 
-            var parts = StaffName.Trim().Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
-            if (parts.Length <= 1) return StaffName.Trim();
-
-            return $"{parts[0]} {parts[^1]}";
+            return SKSB_App.Core.RuntimeUI.RuleEngine.RuleEvaluator.ApplyTextTransform(StaffName, TransformKind.ShortNameFirstLast);
         }
         set => _staffShortName = value;
     }
