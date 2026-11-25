@@ -22,6 +22,12 @@ public static partial class SheetMapper
     internal static readonly string[] MasterSheetAliases = { "All Staffs", "AllStaffs", "Staff_Master", "Staffs", "All Staff", "All Workers" };
     private static readonly string[] VehicleLicenseAliases = { "Vehicle Licenses", "VehicleLicenses", "Vehicle License", "Staff_Licenses" };
     private static readonly string[] SkillLicenseAliases = { "Skill Licenses", "SkillLicenses", "Skill License", "Staff_Skills" };
+    private static readonly string[] StaffSalaryAliases = { "Staff Salaries", "StaffSalaries", "Salaries" };
+    private const string StaffSalariesSheetName = "Staff Salaries";
+    private const string StaffSalaryTableName = "StaffSalaryTable";
+    private static readonly string[] StaffLeaveAliases = { "Staff Leaves", "StaffLeaves", "Leaves" };
+    private const string StaffLeavesSheetName = "Staff Leaves";
+    private const string StaffLeavesTableName = "StaffLeavesTable";
 
     // =========================================================================
     // 1. DECLARATIVE WORKBOOK MAPPING (MASTER + CHILD TABLES)
@@ -71,6 +77,40 @@ public static partial class SheetMapper
                 ChildPrimaryKeyLabel = "Skill License ID",
                 ValidateForeignKeyExists = true,
                 OrderChildRecords = list => list.OrderByDescending(l => l.RenewDate).ThenByDescending(l => l.SkillLicenseID).ToList()
+            },
+            new ChildTableBinding<StaffRecord, StaffSalary, long>
+            {
+                SheetAliases = StaffSalaryAliases,
+                DefaultSheetName = StaffSalariesSheetName,
+                TableName = StaffSalaryTableName,
+                ForeignKeySelector = w => w.StaffID,
+                ParentCollectionSelector = s => s.Salaries,
+                BackfillFromParent = (s, w) =>
+                {
+                    if (w.StaffID <= 0) w.StaffID = s.StaffID;
+                    if (string.IsNullOrWhiteSpace(w.StaffName)) w.StaffName = s.StaffDetails.StaffName;
+                },
+                ChildPrimaryKeySelector = w => w.SalaryID,
+                ChildPrimaryKeyLabel = "Salary ID",
+                ValidateForeignKeyExists = true,
+                OrderChildRecords = list => list.OrderByDescending(w => w.EffectiveDate).ThenBy(w => w.StaffID).ToList()
+            },
+            new ChildTableBinding<StaffRecord, StaffLeave, long>
+            {
+                SheetAliases = StaffLeaveAliases,
+                DefaultSheetName = StaffLeavesSheetName,
+                TableName = StaffLeavesTableName,
+                ForeignKeySelector = l => l.StaffID,
+                ParentCollectionSelector = s => s.Leaves,
+                BackfillFromParent = (s, l) =>
+                {
+                    if (l.StaffID <= 0) l.StaffID = s.StaffID;
+                    if (string.IsNullOrWhiteSpace(l.StaffName)) l.StaffName = s.StaffDetails.StaffName;
+                },
+                ChildPrimaryKeySelector = l => l.LeaveID,
+                ChildPrimaryKeyLabel = "Leave ID",
+                ValidateForeignKeyExists = false,
+                OrderChildRecords = list => list.OrderByDescending(l => l.LeaveDate).ThenByDescending(l => l.LeaveID).ToList()
             }
         },
 
@@ -94,12 +134,13 @@ public static partial class SheetMapper
         OnPopulateAuxiliaryTables = (wb, masters) =>
         {
             PopulateSkillLicenseTypesFromCache((object)wb);
+            ApplySalaryRowFormats((object)wb, masters);
             InitializeStaffSummaryContext((object)wb, masters);
         },
 
         AuditTitle = "Staff Manager Populate Audit",
         MasterLabel = "Staff Profiles",
-        InspectTables = new[] { "AllStaffsTable", "VehicleLicensesTable", "SkillLicensesTable", "SkillLicenseTypesTable" }
+        InspectTables = new[] { "AllStaffsTable", "VehicleLicensesTable", "SkillLicensesTable", "SkillLicenseTypesTable", StaffSalaryTableName, StaffLeavesTableName }
     };
 
     // =========================================================================
@@ -114,6 +155,169 @@ public static partial class SheetMapper
 
     public static void PopulateWorksheet(List<StaffRecord> records)
         => WorkbookMapper.PopulateMasterAndChildren(Mapping, records);
+
+    // =========================================================================
+    // 2b. PER-ROW SALARY NUMBER FORMATS ("/mth" vs "/day")
+    // =========================================================================
+    /// <summary>
+    /// Post-populate: applies the monthly / daily salary number format per row to AllStaffsTable[Current Salary],
+    /// StaffSalaryTable[Salary Rate] and StaffSalaryTable[Salary Before]. Key columns are read in one bulk call;
+    /// contiguous rows sharing a format are written as one range. Blank / em-dash cells are left untouched. Never
+    /// selects or activates.
+    /// </summary>
+    private static void ApplySalaryRowFormats(object wbObj, List<StaffRecord> masters)
+    {
+        try
+        {
+            var basisById = masters
+                .Where(s => s.StaffID > 0)
+                .GroupBy(s => s.StaffID)
+                .ToDictionary(g => g.Key, g => g.First().StaffDetails.CurrentSalaryBasis);
+
+            // Salary Before basis keyed by (Staff ID, Date): unique per staff after SQL Payroll reconstruction.
+            var beforeBasisByKey = new Dictionary<(long, DateOnly), SalaryBasis>();
+            foreach (var s in masters.Where(s => s.StaffID > 0))
+            {
+                s.ResolveSalaryBeforeBases();
+                foreach (var row in s.Salaries.Where(r => r.SalaryBefore.HasValue))
+                    beforeBasisByKey[(s.StaffID, row.EffectiveDate)] = row.SalaryBeforeBasis;
+            }
+
+            RunFrozen(() =>
+            {
+                // a. AllStaffsTable[Current Salary]: basis looked up by Staff ID.
+                dynamic? masterWs = SheetMapperHelper.ResolveSheetSafely(wbObj, MasterSheetAliases, MasterSheetName);
+                if (masterWs != null)
+                {
+                    ApplyPerRowFormat((object)masterWs, MasterTableName, "Staff ID", "Current Salary", key =>
+                    {
+                        long id = ToLong(key);
+                        return id > 0 && basisById.TryGetValue(id, out var b) ? b : SalaryBasis.Monthly;
+                    });
+                }
+
+                dynamic? salaryWs = SheetMapperHelper.ResolveSheetSafely(wbObj, StaffSalaryAliases, StaffSalariesSheetName);
+                if (salaryWs != null)
+                {
+                    // b. StaffSalaryTable[Salary Rate]: basis read from the row's own New Salary Basis cell.
+                    ApplyPerRowFormat((object)salaryWs, StaffSalaryTableName, "New Salary Basis", "Salary Rate", key =>
+                        Enum.TryParse<SalaryBasis>(Convert.ToString(key)?.Trim(), ignoreCase: true, out var b) ? b : SalaryBasis.Monthly);
+
+                    // c. StaffSalaryTable[Salary Before]: basis of the preceding revision (SalaryBeforeBasis).
+                    ApplySalaryBeforeFormats((object)salaryWs, beforeBasisByKey);
+                }
+            });
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn($"[StaffManager] Applying salary row formats failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Formats StaffSalaryTable[Salary Before] per row with <see cref="StaffSalary.SalaryBeforeBasis"/>, matched by the
+    /// row's (Staff ID, Date). Staff ID / Date are bulk-read once; formats are written in contiguous runs.
+    /// </summary>
+    private static void ApplySalaryBeforeFormats(object wsObj, IReadOnlyDictionary<(long, DateOnly), SalaryBasis> beforeBasisByKey)
+    {
+        dynamic ws = wsObj;
+        dynamic? table = null;
+        try { table = ws.ListObjects[StaffSalaryTableName]; } catch { }
+        if (table == null) return;
+
+        dynamic? idBody = null, dateBody = null;
+        try { idBody = table.ListColumns["Staff ID"].DataBodyRange; } catch { }
+        try { dateBody = table.ListColumns["Date"].DataBodyRange; } catch { }
+        if (idBody == null || dateBody == null) return;
+
+        int rows = (int)idBody.Rows.Count;
+        if (rows <= 0) return;
+
+        object[,] ids = TableMapper.GetRange2DValues(idBody, rows, 1);
+        object[,] dates = TableMapper.GetRange2DValues(dateBody, rows, 1);
+        int i0 = ids.GetLowerBound(0), ic = ids.GetLowerBound(1);
+        int d0 = dates.GetLowerBound(0), dc = dates.GetLowerBound(1);
+
+        var basisAt = new SalaryBasis[rows];
+        for (int i = 0; i < rows; i++)
+        {
+            long id = ToLong(ids[i0 + i, ic]);
+            DateOnly? date = ToDateOnly(dates[d0 + i, dc]);
+            basisAt[i] = id > 0 && date.HasValue && beforeBasisByKey.TryGetValue((id, date.Value), out var b) && b != SalaryBasis.None
+                ? b
+                : SalaryBasis.Monthly;
+        }
+
+        ApplyPerRowFormat(wsObj, StaffSalaryTableName, "Staff ID", "Salary Before", _ => SalaryBasis.Monthly, rowIndex => basisAt[rowIndex]);
+    }
+
+    private static DateOnly? ToDateOnly(object? v) => v switch
+    {
+        double d => DateOnly.FromDateTime(DateTime.FromOADate(d)),
+        DateTime dt => DateOnly.FromDateTime(dt),
+        string s when DateTime.TryParse(s, out var parsed) => DateOnly.FromDateTime(parsed),
+        _ => null
+    };
+
+    private static long ToLong(object? v) => v switch
+    {
+        double d => (long)d,
+        long l => l,
+        int i => i,
+        _ => long.TryParse(Convert.ToString(v)?.Trim(), out long n) ? n : 0
+    };
+
+    private static void ApplyPerRowFormat(object wsObj, string tableName, string keyHeader, string valueHeader,
+        Func<object?, SalaryBasis> basisFor, Func<int, SalaryBasis>? basisAtRow = null)
+    {
+        dynamic ws = wsObj;
+        dynamic? table = null;
+        try { table = ws.ListObjects[tableName]; } catch { }
+        if (table == null) return;
+
+        dynamic? keyBody = null, valueBody = null;
+        try { keyBody = table.ListColumns[keyHeader].DataBodyRange; } catch { }
+        try { valueBody = table.ListColumns[valueHeader].DataBodyRange; } catch { }
+        if (keyBody == null || valueBody == null) return;
+
+        int rows = (int)valueBody.Rows.Count;
+        if (rows <= 0) return;
+
+        object[,] keys = TableMapper.GetRange2DValues(keyBody, rows, 1);
+        object[,] values = TableMapper.GetRange2DValues(valueBody, rows, 1);
+        int k0 = keys.GetLowerBound(0), kc = keys.GetLowerBound(1);
+        int v0 = values.GetLowerBound(0), vc = values.GetLowerBound(1);
+
+        string? FormatAt(int i)
+        {
+            object? raw = values[v0 + i, vc];
+            if (raw == null) return null;
+            if (raw is string s && (s.Trim().Length == 0 || s.Trim() == "—" || s.Trim() == "-")) return null;
+            SalaryBasis basis = basisAtRow != null ? basisAtRow(i) : basisFor(keys[k0 + i, kc]);
+            return basis == SalaryBasis.Daily ? RuleRegistry.WageDailyFormat : RuleRegistry.WageMonthlyFormat;
+        }
+
+        // Contiguous runs of the same format -> one NumberFormat write per run.
+        int runStart = -1;
+        string? runFmt = null;
+        for (int i = 0; i <= rows; i++)
+        {
+            string? fmt = i < rows ? FormatAt(i) : null;
+            if (fmt == runFmt && i < rows) continue;
+
+            if (runFmt != null && runStart >= 0)
+            {
+                try
+                {
+                    dynamic runRange = ws.Range[valueBody.Cells[runStart + 1, 1], valueBody.Cells[i, 1]];
+                    runRange.NumberFormat = runFmt;
+                }
+                catch { }
+            }
+            runStart = i;
+            runFmt = fmt;
+        }
+    }
 
     // =========================================================================
     // 3. SKILL LICENSE TYPES (AUXILIARY REFERENCE TABLE)

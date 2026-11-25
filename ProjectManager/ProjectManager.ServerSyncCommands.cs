@@ -3,6 +3,7 @@ namespace SKSB_App.ProjectManager;
 using ExcelDna.Integration;
 using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.Integration.Database;
+using SKSB_App.Core.Integration.Erp;
 using SKSB_App.Core.Types;
 using SKSB_App.Core.WorkbookOpen.Sync;
 using SKSB_App.Core.WorkbookSave.Storage;
@@ -128,6 +129,7 @@ internal static class ServerSyncCommands
             d.Status.ToString(),
             d.CompanyID.ToString(CultureInfo.InvariantCulture),
             Norm(d.CompanyName),
+            Norm(d.SqlAccountProjectCode),
             (d.StaffID ?? 0).ToString(CultureInfo.InvariantCulture),
             Norm(d.PIC),
             d.District.ToString(),
@@ -144,7 +146,8 @@ internal static class ServerSyncCommands
     private static string CompanyFingerprint(CompanyRecord c) => string.Join("\u001F",
         c.CompanyID.ToString(CultureInfo.InvariantCulture),
         Norm(c.LegalCompanyName),
-        Norm(c.ShortCompanyName));
+        Norm(c.ShortCompanyName),
+        Norm(c.DefaultSqlAccountProject));
 
     /// <summary>
     /// Server <c>updated_at</c> as a concurrency token. Kept exactly as Npgsql returned it (UTC for <c>timestamptz</c>,
@@ -272,6 +275,7 @@ internal static class ServerSyncCommands
                 Status = status,
                 CompanyID = companyId != null ? Convert.ToInt64(companyId) : 0,
                 CompanyName = Str(p.company_name),
+                SqlAccountProjectCode = Str(Col((object)p, "sql_account_project_code")),
                 StaffID = staffId != null ? Convert.ToInt64(staffId) : null,
                 PIC = Str(p.pic),
                 District = district,
@@ -315,6 +319,7 @@ internal static class ServerSyncCommands
         SyncVehicleList();
         SyncCompanyLists();
         SyncProjectList();
+        SyncSqlAccountProjectList();
     }
 
     /// <summary>
@@ -414,6 +419,74 @@ internal static class ServerSyncCommands
         if (clean.Count > 0) DataList.SyncValues("ProjectIDList", clean);
     }
 
+    /// <summary>
+    /// SqlAccountProjectList: SQL Accounting (Firebird) first, mirrored into PostgreSQL; when Firebird is unreachable,
+    /// the PostgreSQL <c>lookup_sql_account_projects</c> cache; when offline, the local snapshot. Never throws.
+    /// </summary>
+    private static void SyncSqlAccountProjectList()
+    {
+        try
+        {
+            List<string> codes;
+            if (ServerEnvironment.IsOnline)
+            {
+                codes = FetchOnlineSqlAccountProjectCodes();
+                if (codes.Count > 0)
+                    OfflineSnapshot.Save(codes.Select(c => new SqlAccountProjectCache(c)).ToList(), writeToDatabase: false);
+            }
+            else
+            {
+                codes = (OfflineSnapshot.Load<List<SqlAccountProjectCache>>() ?? new List<SqlAccountProjectCache>())
+                    .Select(c => c.Code)
+                    .ToList();
+            }
+
+            var clean = codes
+                .Where(c => !string.IsNullOrWhiteSpace(c))
+                .Select(c => c.Trim())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            if (clean.Count > 0) DataList.SyncValues("SqlAccountProjectList", clean);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn($"[{Module}] SqlAccountProjectList sync failed: {ex.Message}");
+        }
+    }
+
+    private static List<string> FetchOnlineSqlAccountProjectCodes()
+    {
+        List<AccountingProjectRow> fbRows;
+        try
+        {
+            fbRows = new FirebirdAccountingService().FetchProjects();
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn($"[{Module}] Firebird SQL Accounting unreachable ({ex.Message}); falling back to cached PostgreSQL lookup_sql_account_projects.");
+            try
+            {
+                return ServerDispatcher.FetchActiveSqlAccountProjectCodes();
+            }
+            catch (Exception dbEx)
+            {
+                AppLogger.Warn($"[{Module}] lookup_sql_account_projects query failed: {dbEx.Message}");
+                return new List<string>();
+            }
+        }
+
+        try
+        {
+            ServerDispatcher.SyncSqlAccountProjects(fbRows);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn($"[{Module}] lookup_sql_account_projects sync failed: {ex.Message}");
+        }
+
+        return fbRows.Where(r => r.IsActive).Select(r => r.Code).ToList();
+    }
+
     private readonly record struct ProjectStaffStub(string? Name, string? Short)
     {
         public StaffDetails ToDetails() => new() { StaffName = Name ?? string.Empty, StaffShortName = Short ?? string.Empty };
@@ -443,6 +516,7 @@ internal static class ServerSyncCommands
             CompanyID = id != null ? Convert.ToInt64(id, CultureInfo.InvariantCulture) : 0,
             LegalCompanyName = ServerSyncHelper.ColumnText(row, "legal_company_name"),
             ShortCompanyName = ServerSyncHelper.ColumnText(row, "short_company_name"),
+            DefaultSqlAccountProject = ServerSyncHelper.ColumnText(row, "default_sql_account_project"),
             ServerUpdatedAt = ToUtcDateTime(ServerSyncHelper.Col(row, "updated_at"))
         };
     }

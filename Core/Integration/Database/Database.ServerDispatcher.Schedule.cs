@@ -9,6 +9,7 @@ using System.Linq;
 using System.Reflection;
 using Dapper;
 using SKSB_App.Core.Diagnostics;
+using SKSB_App.Core.Integration.Erp;
 using SKSB_App.Core.Types;
 
 public static partial class ServerDispatcher
@@ -27,9 +28,35 @@ public static partial class ServerDispatcher
         using var reader = new StreamReader(stream);
         string ddl = reader.ReadToEnd();
 
-        Db.ExecuteInTransaction((conn, trans) => conn.Execute(ddl, transaction: trans));
+        Db.ExecuteInTransaction((conn, trans) =>
+        {
+            conn.Execute(ddl, transaction: trans);
+            conn.Execute(SqlPayrollCalendarSchema, transaction: trans);
+        });
         _scheduleSchemaEnsured = true;
     }
+
+    /// <summary>SQL Payroll calendar mirror: per-date holiday flag, public holidays and date-scoped leave days.</summary>
+    private const string SqlPayrollCalendarSchema = @"
+        ALTER TABLE daily_schedule_settings ADD COLUMN IF NOT EXISTS is_holiday BOOLEAN NOT NULL DEFAULT FALSE;
+
+        CREATE TABLE IF NOT EXISTS public_holidays (
+            holiday_date DATE PRIMARY KEY,
+            description  TEXT DEFAULT '',
+            updated_at   TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+
+        CREATE TABLE IF NOT EXISTS staff_leaves (
+            leave_id       BIGSERIAL PRIMARY KEY,
+            payroll_dockey BIGINT UNIQUE,
+            staff_id       BIGINT NOT NULL,
+            leave_date     DATE NOT NULL,
+            leave_type     VARCHAR(64) NOT NULL,
+            leave_day      NUMERIC(5,2) NOT NULL DEFAULT 1.0,
+            description    TEXT DEFAULT '',
+            updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS ix_staff_leaves_leave_date ON staff_leaves (leave_date);";
 
     private static string[] CleanList(IEnumerable<string>? items) =>
         (items ?? Enumerable.Empty<string>()).Where(s => !string.IsNullOrWhiteSpace(s)).Select(s => s.Trim()).ToArray();
@@ -234,12 +261,13 @@ public static partial class ServerDispatcher
             updated_at            = GREATEST(clock_timestamp(), daily_attendances.updated_at + INTERVAL '1 millisecond');";
 
     private const string SqlScheduleSettingsUpsert = @"
-        INSERT INTO daily_schedule_settings (schedule_date, day_start_time, late_cut_off_time, ot_start_time, updated_at)
-        VALUES (@ScheduleDate, @DayStartTime, @LateCutOffTime, @OtStartTime, clock_timestamp())
+        INSERT INTO daily_schedule_settings (schedule_date, day_start_time, late_cut_off_time, ot_start_time, is_holiday, updated_at)
+        VALUES (@ScheduleDate, @DayStartTime, @LateCutOffTime, @OtStartTime, @IsHoliday, clock_timestamp())
         ON CONFLICT (schedule_date) DO UPDATE SET
             day_start_time    = EXCLUDED.day_start_time,
             late_cut_off_time = EXCLUDED.late_cut_off_time,
             ot_start_time     = EXCLUDED.ot_start_time,
+            is_holiday        = EXCLUDED.is_holiday,
             updated_at        = GREATEST(clock_timestamp(), daily_schedule_settings.updated_at + INTERVAL '1 millisecond');";
 
     /// <summary>
@@ -289,7 +317,8 @@ public static partial class ServerDispatcher
             ScheduleDate = date,
             DayStartTime = schedule.DayStartTime.ToTimeSpan(),
             LateCutOffTime = schedule.LateCutOffTime.ToTimeSpan(),
-            OtStartTime = schedule.OTStartTime.ToTimeSpan()
+            OtStartTime = schedule.OTStartTime.ToTimeSpan(),
+            schedule.IsHoliday
         }, trans);
 
         // Date-scoped reconciliation: removed slots / workers disappear for THIS date only.
@@ -303,6 +332,102 @@ public static partial class ServerDispatcher
         if (slots.Count > 0) conn.Execute(SqlSlotUpsert, slots, trans);
         if (attendances.Count > 0) conn.Execute(SqlDailyAttendanceUpsert, attendances, trans);
         return (slots.Count, attendances.Count);
+    }
+
+    // =========================================================================
+    // 2b. SQL PAYROLL CALENDAR MIRROR (public holidays + date-scoped leaves)
+    // =========================================================================
+    private const string SqlPublicHolidayUpsert = @"
+        INSERT INTO public_holidays (holiday_date, description, updated_at)
+        VALUES (@HolidayDate, @Description, CURRENT_TIMESTAMP)
+        ON CONFLICT (holiday_date) DO UPDATE SET
+            description = EXCLUDED.description,
+            updated_at  = CURRENT_TIMESTAMP
+        WHERE public_holidays.description IS DISTINCT FROM EXCLUDED.description;";
+
+    private const string SqlStaffLeaveUpsert = @"
+        INSERT INTO staff_leaves (payroll_dockey, staff_id, leave_date, leave_type, leave_day, description, updated_at)
+        VALUES (@DocKey, @StaffId, @LeaveDate, @LeaveType, @LeaveDay, @Description, CURRENT_TIMESTAMP)
+        ON CONFLICT (payroll_dockey) DO UPDATE SET
+            staff_id    = EXCLUDED.staff_id,
+            leave_date  = EXCLUDED.leave_date,
+            leave_type  = EXCLUDED.leave_type,
+            leave_day   = EXCLUDED.leave_day,
+            description = EXCLUDED.description,
+            updated_at  = CURRENT_TIMESTAMP
+        WHERE staff_leaves.staff_id    IS DISTINCT FROM EXCLUDED.staff_id
+           OR staff_leaves.leave_date  IS DISTINCT FROM EXCLUDED.leave_date
+           OR staff_leaves.leave_type  IS DISTINCT FROM EXCLUDED.leave_type
+           OR staff_leaves.leave_day   IS DISTINCT FROM EXCLUDED.leave_day
+           OR staff_leaves.description IS DISTINCT FROM EXCLUDED.description;";
+
+    /// <summary>
+    /// Mirrors SQL Payroll public holidays into <c>public_holidays</c> (upsert by date; SQL Payroll is authoritative
+    /// but rows are never hard-deleted, so history survives a calendar clean-up there). Returns rows written.
+    /// </summary>
+    public static int UpsertPublicHolidays(IEnumerable<PayrollHolidayRow> holidays)
+    {
+        EnsureScheduleSchema();
+        var rows = (holidays ?? Enumerable.Empty<PayrollHolidayRow>())
+            .GroupBy(h => h.HolidayDate)
+            .Select(g => new
+            {
+                HolidayDate = g.Key.ToDateTime(TimeOnly.MinValue),
+                Description = (g.OrderByDescending(h => h.AutoKey).First().Description ?? string.Empty).Trim()
+            })
+            .ToList();
+        if (rows.Count == 0) return 0;
+
+        int written = 0;
+        Db.ExecuteInTransaction((conn, trans) => { written = conn.Execute(SqlPublicHolidayUpsert, rows, trans); });
+        AppLogger.Info($"[ServerDispatcher] public_holidays synced: {written}/{rows.Count} row(s) written.");
+        return written;
+    }
+
+    /// <summary>
+    /// Makes <c>staff_leaves</c> for <paramref name="date"/> match SQL Payroll: upserts by <c>payroll_dockey</c> and
+    /// deletes rows of that date no longer present in SQL Payroll (a cache, not user data). Returns rows upserted.
+    /// </summary>
+    public static int ReplaceLeavesForDate(DateOnly date, IEnumerable<StaffLeaveEntry> leaves)
+    {
+        EnsureScheduleSchema();
+        DateTime d = date.ToDateTime(TimeOnly.MinValue);
+        var rows = (leaves ?? Enumerable.Empty<StaffLeaveEntry>())
+            .Where(l => l != null && l.DocKey > 0 && l.StaffID > 0 && l.LeaveDate == date)
+            .GroupBy(l => l.DocKey)
+            .Select(g => g.Last())
+            .Select(l => new
+            {
+                l.DocKey,
+                StaffId = l.StaffID,
+                LeaveDate = d,
+                LeaveType = (l.LeaveType ?? string.Empty).Trim(),
+                l.LeaveDay,
+                Description = (l.Description ?? string.Empty).Trim()
+            })
+            .ToList();
+        long[] activeKeys = rows.Select(r => r.DocKey).ToArray();
+
+        int written = 0;
+        Db.ExecuteInTransaction((conn, trans) =>
+        {
+            conn.Execute("DELETE FROM staff_leaves WHERE leave_date = @D AND payroll_dockey != ALL(@ActiveKeys);",
+                new { D = d, ActiveKeys = activeKeys }, trans);
+            if (rows.Count > 0) written = conn.Execute(SqlStaffLeaveUpsert, rows, trans);
+        });
+        return written;
+    }
+
+    /// <summary>
+    /// Records the SQL Payroll holiday flag on an EXISTING <c>daily_schedule_settings</c> row without touching
+    /// <c>updated_at</c>, so the date's board concurrency token is unaffected. New dates get the flag on save.
+    /// </summary>
+    public static void UpdateScheduleHolidayFlag(DateOnly date, bool isHoliday)
+    {
+        EnsureScheduleSchema();
+        Db.ExecuteInTransaction((conn, trans) => conn.Execute(
+            "UPDATE daily_schedule_settings SET is_holiday = @IsHoliday WHERE schedule_date = @D AND is_holiday IS DISTINCT FROM @IsHoliday;",
+            new { D = date.ToDateTime(TimeOnly.MinValue), IsHoliday = isHoliday }, trans));
     }
 
     // =========================================================================

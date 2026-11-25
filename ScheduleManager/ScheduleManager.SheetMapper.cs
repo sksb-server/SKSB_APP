@@ -278,7 +278,9 @@ internal static partial class SheetMapper
             LoadingOverlay.Report("Rolling up daily worker attendance...");
             var punchesForDate = record.AttendanceEntries
                 .Where(e => DeviceSyncManager.IsInWorkingDay(e.Date, e.Time, date.Value, record.DayStartTime, record.NextDayStartTime)).ToList();
-            record.WorkerAttendance = AttendanceRollupService.Run(date.Value, punchesForDate, record.Projects, record.WorkerAttendance, record.DayStartTime, record.LateCutOffTime, record.OTStartTime, record.NextDayStartTime);
+            ApplyCachedPayrollCalendar(record);
+            record.WorkerAttendance = AttendanceRollupService.Run(date.Value, punchesForDate, record.Projects, record.WorkerAttendance, record.DayStartTime, record.LateCutOffTime, record.OTStartTime, record.NextDayStartTime,
+                LeavesFor(date.Value));
 
             return (record, errors, warnings);
         }
@@ -681,6 +683,54 @@ internal static partial class SheetMapper
     }
 
     // =========================================================================
+    // 3b. SQL PAYROLL CALENDAR CACHE (loaded date's holiday flag + leaves)
+    // =========================================================================
+    // Leaves / holiday are not on any sheet: they are cached for the loaded date so every rollup (load, date switch,
+    // punch edit, Roll Up, save extraction) keeps the exact leave status instead of "Absence".
+    private static DateOnly? _calendarDate;
+    private static bool _calendarIsHoliday;
+    private static string _calendarHolidayDescription = string.Empty;
+    private static List<StaffLeaveEntry> _calendarLeaves = new();
+    private static Dictionary<long, StaffLeaveEntry> _calendarLeavesByStaffId = new();
+
+    private static void CachePayrollCalendar(ScheduleRecord record)
+    {
+        _calendarDate = record.DailyScheduleDate;
+        _calendarIsHoliday = record.IsHoliday;
+        _calendarHolidayDescription = record.HolidayDescription ?? string.Empty;
+        _calendarLeaves = (record.Leaves ?? new List<StaffLeaveEntry>()).Where(l => l != null && l.StaffID > 0).ToList();
+        foreach (var l in _calendarLeaves) l.MappedStatus = PayrollLeaveMapper.MapLeaveType(l.LeaveType);
+
+        // Several applications on one day (e.g. two half days): the largest portion wins, then the latest document.
+        _calendarLeavesByStaffId = _calendarLeaves
+            .Where(l => PayrollLeaveMapper.IsLeave(l.MappedStatus))
+            .GroupBy(l => l.StaffID)
+            .ToDictionary(g => g.Key, g => g.OrderByDescending(l => l.LeaveDay).ThenByDescending(l => l.DocKey).First());
+    }
+
+    /// <summary>Leaves of the cached date by staff, or null when <paramref name="date"/> is not the cached date.</summary>
+    private static IReadOnlyDictionary<long, StaffLeaveEntry>? LeavesFor(DateOnly date) =>
+        _calendarDate == date ? _calendarLeavesByStaffId : null;
+
+    private static bool IsHolidayFor(DateOnly date) => _calendarDate == date && _calendarIsHoliday;
+
+    /// <summary>Copies the cached calendar onto an extracted record so the save persists daily_schedule_settings.is_holiday.</summary>
+    private static void ApplyCachedPayrollCalendar(ScheduleRecord record)
+    {
+        if (_calendarDate != record.DailyScheduleDate) return;
+        record.IsHoliday = _calendarIsHoliday;
+        record.HolidayDescription = _calendarHolidayDescription;
+        record.Leaves = _calendarLeaves.ToList();
+    }
+
+    /// <summary>Writes the holiday flag on 'Daily Schedule' and 'Daily Attendances'. Call inside RunFrozen.</summary>
+    private static void WriteHolidayCells(object? board, object? attendanceSheet)
+    {
+        if (board != null) ScheduleBoardMapper.WriteIsHolidayCell(board, _calendarIsHoliday, _calendarHolidayDescription);
+        if (attendanceSheet != null) ScheduleBoardMapper.WriteIsHolidayCell(attendanceSheet, _calendarIsHoliday, _calendarHolidayDescription);
+    }
+
+    // =========================================================================
     // 4. POPULATE
     // =========================================================================
     internal static void PopulateWorksheet(ScheduleRecord record)
@@ -704,6 +754,8 @@ internal static partial class SheetMapper
                 Roster.Invalidate();
                 DateOnly date = record.DailyScheduleDate;
                 ScheduleBoardMapper.WriteDate((object)board!, date);
+                CachePayrollCalendar(record);
+                WriteHolidayCells((object)board!, (object?)attendanceSheet);
                 if (_loadedDate != date) PastRecordGuard.ResetEditSession(GuardSession);   // edit approvals are per date
                 _loadedDate = date;
                 _hasUnsavedRecordEdits = false;
@@ -763,7 +815,8 @@ internal static partial class SheetMapper
                 // Active Admin staff with no punch that working day get approved auto CheckIn/CheckOut entries.
                 // They are fingerprinted as loaded below, and _hasUnsavedGlobalEdits stays false, so merely browsing
                 // dates never triggers a save; they persist with the next real save of this date.
-                var adminAutoEntries = AttendanceRollupService.BuildAdminAutoEntries(date, record.AttendanceEntries, BoardContext.DayStartTime, BoardContext.OTStartTime, BoardContext.NextDayStartTime);
+                var adminAutoEntries = AttendanceRollupService.BuildAdminAutoEntries(date, record.AttendanceEntries, BoardContext.DayStartTime, BoardContext.OTStartTime, BoardContext.NextDayStartTime,
+                    LeavesFor(date), IsHolidayFor(date));
                 if (adminAutoEntries.Count > 0) record.AttendanceEntries.AddRange(adminAutoEntries);
 
                 var entries = record.AttendanceEntries
@@ -788,7 +841,8 @@ internal static partial class SheetMapper
                     LoadingOverlay.Report("Rolling up daily attendances...");
                     var rows = AttendanceRollupService.Run(date,
                         dayEntries,
-                        record.Projects, record.WorkerAttendance, BoardContext.DayStartTime, BoardContext.LateCutOff, BoardContext.OTStartTime, BoardContext.NextDayStartTime);
+                        record.Projects, record.WorkerAttendance, BoardContext.DayStartTime, BoardContext.LateCutOff, BoardContext.OTStartTime, BoardContext.NextDayStartTime,
+                        LeavesFor(date));
                     WriteAttendanceRows(attendanceSheet, rows);
                 }
             });
@@ -1133,7 +1187,8 @@ internal static partial class SheetMapper
 
                 if (ensureAdminEntries && rollup && entriesSheet != null)
                 {
-                    var adminAutoEntries = AttendanceRollupService.BuildAdminAutoEntries(date.Value, entries, BoardContext.DayStartTime, BoardContext.OTStartTime, BoardContext.NextDayStartTime);
+                    var adminAutoEntries = AttendanceRollupService.BuildAdminAutoEntries(date.Value, entries, BoardContext.DayStartTime, BoardContext.OTStartTime, BoardContext.NextDayStartTime,
+                        LeavesFor(date.Value), IsHolidayFor(date.Value));
                     if (adminAutoEntries.Count > 0)
                     {
                         entries.AddRange(adminAutoEntries);
@@ -1157,7 +1212,8 @@ internal static partial class SheetMapper
                     var existing = TableMapper.ExtractFromTable<DailyWorkerAttendance>((object)attendanceSheet!, MasterTableName);
                     var rows = AttendanceRollupService.Run(date.Value,
                         entries.Where(e => DeviceSyncManager.IsInWorkingDay(e.Date, e.Time, date.Value, BoardContext.DayStartTime, BoardContext.NextDayStartTime)).ToList(),
-                        slots, existing, BoardContext.DayStartTime, BoardContext.LateCutOff, BoardContext.OTStartTime, BoardContext.NextDayStartTime);
+                        slots, existing, BoardContext.DayStartTime, BoardContext.LateCutOff, BoardContext.OTStartTime, BoardContext.NextDayStartTime,
+                        LeavesFor(date.Value));
                     if (Signature(rows) != Signature(existing)) WriteAttendanceRows(attendanceSheet, rows);
                 }
             });

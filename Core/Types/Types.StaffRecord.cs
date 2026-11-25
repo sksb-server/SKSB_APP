@@ -2,6 +2,7 @@
 
 using System;
 using System.Collections.Generic;
+using System.Linq;
 using System.Text.Json.Serialization;
 using SKSB_App.Core.Types.Attributes;
 
@@ -61,6 +62,13 @@ public enum SkillLicenseStatus
     Suspended
 }
 
+public enum SalaryBasis
+{
+    Monthly,
+    Daily,
+    None
+}
+
 // =========================================================================
 // 2. ROOT STAFF RECORD & MASTER TABLE ("AllStaffsTable")
 // =========================================================================
@@ -71,6 +79,7 @@ public record StaffRecord
     [DataList("StaffIDList")]
     [ExcelColumn("Staff ID", isRequired: true)]
     [ColumnDefault(DefaultKind.AutoIncrement)]
+    [ColumnRule(IsRequired = true, IsReadOnly = true)]
     public long StaffID { get; set; } = 0;
 
     [DataDetail]
@@ -79,22 +88,71 @@ public record StaffRecord
     // Child Collections
     public List<VehicleLicense> VehicleLicenses { get; set; } = new();
     public List<SkillLicense> SkillLicenses { get; set; } = new();
+    public List<StaffSalary> Salaries { get; set; } = new();
+    public List<StaffLeave> Leaves { get; set; } = new();
 
     /// <summary>staff_master.updated_at as last read from the server (optimistic concurrency token; never in Excel/JSON).</summary>
     [JsonIgnore]
     public DateTime? ServerUpdatedAt { get; set; }
+
+    /// <summary>
+    /// Salary effective on <paramref name="asOf"/>: the latest positive-rate row on/before that date; when every row
+    /// starts after it, the earliest positive-rate row (so early attendance still resolves a rate).
+    /// </summary>
+    public StaffSalary? GetEffectiveSalary(DateOnly asOf)
+    {
+        if (Salaries == null || Salaries.Count == 0) return null;
+        var positive = Salaries.Where(s => s != null && s.SalaryRate > 0m).ToList();
+        if (positive.Count == 0) return null;
+
+        return positive
+                   .Where(s => s.EffectiveDate <= asOf)
+                   .OrderByDescending(s => s.EffectiveDate)
+                   .ThenByDescending(s => s.SalaryID)
+                   .FirstOrDefault()
+               ?? positive
+                   .OrderBy(s => s.EffectiveDate)
+                   .ThenBy(s => s.SalaryID)
+                   .First();
+    }
+
+    /// <summary>Copies today's effective salary into the read-only "Current Salary" column.</summary>
+    public void RefreshCurrentSalary()
+    {
+        StaffDetails ??= new StaffDetails();
+        var salary = GetEffectiveSalary(DateOnly.FromDateTime(DateTime.Today));
+        StaffDetails.CurrentSalary = salary?.SalaryRate;
+        StaffDetails.CurrentSalaryBasis = salary?.SalaryBasis ?? SalaryBasis.None;
+        ResolveSalaryBeforeBases();
+    }
+
+    /// <summary>
+    /// Re-derives the display-only <see cref="StaffSalary.SalaryBeforeBasis"/> (not an Excel column and not in JSON)
+    /// from the chronologically preceding row, so rows extracted from the sheet / offline snapshot keep it.
+    /// </summary>
+    public void ResolveSalaryBeforeBases()
+    {
+        if (Salaries == null || Salaries.Count == 0) return;
+        StaffSalary? previous = null;
+        foreach (var s in Salaries.Where(s => s != null).OrderBy(s => s.EffectiveDate).ThenBy(s => s.SalaryID))
+        {
+            if (!s.SalaryBefore.HasValue) s.SalaryBeforeBasis = SalaryBasis.None;
+            else if (s.SalaryBeforeBasis == SalaryBasis.None) s.SalaryBeforeBasis = previous?.SalaryBasis ?? s.SalaryBasis;
+            previous = s;
+        }
+    }
 }
 
 public record StaffDetails
 {
     [DataList("StaffNameList")]
     [ExcelColumn("Staff Name", isRequired: true)]
-    [ColumnRule(IsRequired = true, Transform = TransformKind.Trim)]
+    [ColumnRule(IsRequired = true, IsReadOnly = true, Transform = TransformKind.Trim)]
     public string StaffName { get; set; } = string.Empty;
 
     [DataList("StaffShortNameList")]
     [ExcelColumn("Short Name")]
-    [ColumnRule(IsRequired = false, IsWarningOnly = true, Transform = TransformKind.ShortNameFirstLast)]
+    [ColumnRule(IsRequired = false, IsWarningOnly = true, IsReadOnly = true, Transform = TransformKind.ShortNameFirstLast)]
     public string StaffShortName
     {
         get
@@ -113,30 +171,35 @@ public record StaffDetails
     private string _staffShortName = string.Empty;
 
     [ExcelColumn("Department", isRequired: true)]
-    [ColumnRule("DepartmentList", IsRequired = true)]
+    [ColumnRule("DepartmentList", IsRequired = true, IsReadOnly = true)]
     [ColumnDefault(DefaultKind.Literal, literalValue: "Worker")]
     public string Department { get; set; } = "Worker";
 
     // Restored as long for backward compatibility with legacy importer/database mapping
     [ExcelColumn("IC Number")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
     public long NRIC { get; set; } = 0;
 
     [ExcelColumn("Passport Number")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
     public string Passport { get; set; } = string.Empty;
 
     [ExcelColumn("Phone Number")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
     public string Phone { get; set; } = string.Empty;
 
     [ExcelColumn("Join Date", isRequired: true)]
+    [ColumnRule(IsRequired = true, IsReadOnly = true)]
     [ColumnDefault(DefaultKind.Today)]
     public DateOnly JoinDate { get; set; } = DateOnly.FromDateTime(DateTime.Today);
 
     [ExcelColumn("Resign Date")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
     [ColumnDateGreaterThan("Join Date", AllowEqual = true)]
     public DateOnly? ResignDate { get; set; } = null;
 
     [ExcelColumn("Contract Status", isRequired: true)]
-    [ColumnRule("ContractStatusList", IsRequired = true)]
+    [ColumnRule("ContractStatusList", IsRequired = true, IsReadOnly = true)]
     [ColumnDefault(DefaultKind.Literal, literalValue: "Active")]
     [ColumnStateGuard(1, StateConditionKind.ColumnNotEmpty, "Resigned", "Active", "Resign Date")]
     public ContractStatus ContractStatus
@@ -159,6 +222,132 @@ public record StaffDetails
 
         return ContractStatus.Active;
     }
+
+    /// <summary>Today's effective salary (read-only; resolved from <see cref="StaffRecord.Salaries"/>).</summary>
+    [ExcelColumn("Current Salary")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
+    [ColumnFormat(ColumnFormatKind.WageDynamic)]
+    public decimal? CurrentSalary { get; set; } = null;
+
+    /// <summary>Basis of <see cref="CurrentSalary"/>; drives the per-row "/mth" vs "/day" number format.</summary>
+    [JsonIgnore]
+    public SalaryBasis CurrentSalaryBasis { get; set; } = SalaryBasis.None;
+}
+
+// =========================================================================
+// 2b. STAFF SALARY HISTORY ("StaffSalaryTable"; synced from SQL Payroll, read-only)
+// =========================================================================
+
+[ExcelTable("StaffSalaryTable")]
+public record StaffSalary
+{
+    [ExcelColumn("Date", isRequired: true)]
+    [ColumnRule(IsRequired = true, IsReadOnly = true)]
+    public DateOnly EffectiveDate { get; set; } = DateOnly.FromDateTime(DateTime.Today);
+
+    [ExcelColumn("Salary ID", isRequired: true)]
+    [ColumnDefault(DefaultKind.AutoIncrement)]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
+    public long SalaryID { get; set; } = 0;
+
+    [ExcelColumn("Staff ID", isRequired: true)]
+    [ColumnRule("AllStaffsTable[Staff ID]", IsRequired = true, IsReadOnly = true)]
+    public long StaffID { get; set; } = 0;
+
+    [ExcelColumn("Staff Name")]
+    [JsonIgnore]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
+    public string StaffName { get; set; } = string.Empty;
+
+    /// <summary>Salary in force immediately before this revision (null for the initial row).</summary>
+    [ExcelColumn("Salary Before")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
+    [ColumnFormat(ColumnFormatKind.WageDynamic)]
+    public decimal? SalaryBefore { get; set; } = null;
+
+    /// <summary>Basis of <see cref="SalaryBefore"/>; drives its per-row "/mth" vs "/day" number format.</summary>
+    [JsonIgnore]
+    public SalaryBasis SalaryBeforeBasis { get; set; } = SalaryBasis.None;
+
+    [ExcelColumn("New Salary Basis", isRequired: true)]
+    [ColumnRule("SalaryBasisList", IsRequired = true, IsReadOnly = true)]
+    public SalaryBasis SalaryBasis { get; set; } = SalaryBasis.Monthly;
+
+    [ExcelColumn("Salary Rate", isRequired: true)]
+    [ColumnRule(IsRequired = true, IsReadOnly = true)]
+    [ColumnFormat(ColumnFormatKind.WageDynamic)]
+    public decimal SalaryRate { get; set; } = 0m;
+
+    /// <summary>Display-only hourly rate: daily / 8, or monthly / 26 / 8 (rounded to sen).</summary>
+    [ExcelColumn("Hourly Rate")]
+    [JsonIgnore]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
+    [ColumnFormat(ColumnFormatKind.CurrencyPerHour)]
+    public decimal? HourlyRate
+    {
+        get => SalaryRate <= 0m
+            ? null
+            : (SalaryBasis == SalaryBasis.Daily
+                ? decimal.Round(SalaryRate / 8m, 2, MidpointRounding.AwayFromZero)
+                : decimal.Round(SalaryRate / 26m / 8m, 2, MidpointRounding.AwayFromZero));
+        set { /* computed: the setter only lets the sheet mapper bind the column on extraction */ }
+    }
+
+    [ExcelColumn("Remarks")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
+    public string Remarks { get; set; } = string.Empty;
+
+    /// <summary>staff_salaries.updated_at as last read from the server (optimistic concurrency token).</summary>
+    [JsonIgnore]
+    public DateTime? ServerUpdatedAt { get; set; }
+
+    /// <summary>Unrounded hourly rate used for salary calculations.</summary>
+    public decimal GetHourlyRateExact() =>
+        SalaryRate <= 0m ? 0m : (SalaryBasis == SalaryBasis.Daily ? SalaryRate / 8m : SalaryRate / 26m / 8m);
+}
+
+// =========================================================================
+// 2c. STAFF LEAVES ("StaffLeavesTable"; synced from SQL Payroll LV_APP, read-only)
+// =========================================================================
+
+[ExcelTable("StaffLeavesTable")]
+public record StaffLeave
+{
+    [ExcelColumn("Date", isRequired: true)]
+    [ColumnRule(IsRequired = true, IsReadOnly = true)]
+    public DateOnly LeaveDate { get; set; } = DateOnly.FromDateTime(DateTime.Today);
+
+    /// <summary>SQL Payroll <c>LV_APP.DOCKEY</c> (stored as <c>staff_leaves.payroll_dockey</c>).</summary>
+    [ExcelColumn("Leave ID", isRequired: true)]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
+    public long LeaveID { get; set; }
+
+    [ExcelColumn("Staff ID", isRequired: true)]
+    [ColumnRule("AllStaffsTable[Staff ID]", IsRequired = true, IsReadOnly = true)]
+    public long StaffID { get; set; }
+
+    [ExcelColumn("Staff Name")]
+    [JsonIgnore]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
+    public string StaffName { get; set; } = string.Empty;
+
+    /// <summary><see cref="AttendanceStatus"/> name (e.g. <c>Annual_Leave</c>) mapped from the raw LV_APP.LEAVETYPE.</summary>
+    [ExcelColumn("Leave Type", isRequired: true)]
+    [ColumnRule(IsRequired = true, IsReadOnly = true)]
+    public string LeaveType { get; set; } = string.Empty;
+
+    [ExcelColumn("Days", isRequired: true)]
+    [ColumnRule(IsRequired = true, IsReadOnly = true, AllowNonNegativeZero = false)]
+    [ColumnFormat(ColumnFormatKind.Decimal)]
+    public decimal LeaveDay { get; set; } = 1.0m;
+
+    [ExcelColumn("Description")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
+    public string Description { get; set; } = string.Empty;
+
+    /// <summary>staff_leaves.updated_at as last read from the server.</summary>
+    [JsonIgnore]
+    public DateTime? ServerUpdatedAt { get; set; }
 }
 
 /// <summary>Shared staff-license columns: owning Staff ID / Name (two-way lookup), renew / expiry dates and cost.</summary>
@@ -374,7 +563,7 @@ public record StaffSummaryRow
 
     [ExcelColumn("Salary Rate")]
     [ColumnRule(IsRequired = false, IsReadOnly = true)]
-    [ColumnFormat(ColumnFormatKind.Currency)]
+    [ColumnFormat(ColumnFormatKind.CurrencyPerHour)]
     public decimal? SalaryRate { get; set; }
 
     [ExcelColumn("Status")]

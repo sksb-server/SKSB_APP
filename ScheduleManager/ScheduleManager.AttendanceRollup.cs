@@ -183,14 +183,17 @@ internal static class AttendanceRollupService
 
     /// <summary>
     /// Approved CheckIn (day start) and CheckOut (OT start) entries for every active Admin staff member who has no
-    /// punch of any kind in <paramref name="date"/>'s working day. Weekdays only, never for future dates.
+    /// punch of any kind in <paramref name="date"/>'s working day. Weekdays only, never for future dates, never on a
+    /// public holiday, and never for Admin staff on SQL Payroll leave that day.
     /// </summary>
     internal static List<AttendanceEntry> BuildAdminAutoEntries(
-        DateOnly date, IReadOnlyList<AttendanceEntry> existingEntries, TimeOnly dayStartTime, TimeOnly otStartTime, TimeOnly? nextDayStartTime = null)
+        DateOnly date, IReadOnlyList<AttendanceEntry> existingEntries, TimeOnly dayStartTime, TimeOnly otStartTime, TimeOnly? nextDayStartTime = null,
+        IReadOnlyDictionary<long, StaffLeaveEntry>? leavesByStaffId = null, bool isHoliday = false)
     {
         var result = new List<AttendanceEntry>();
         if (date > DateOnly.FromDateTime(DateTime.Today)) return result;
         if (date.DayOfWeek is DayOfWeek.Saturday or DayOfWeek.Sunday) return result;
+        if (isHoliday) return result;
 
         var admins = Roster.ActiveAdminOn(date);
         if (admins.Count == 0) return result;
@@ -204,6 +207,7 @@ internal static class AttendanceRollupService
         foreach (var admin in admins.OrderBy(a => a.Id))
         {
             if (hasEntry.Contains(admin.Id)) continue;
+            if (leavesByStaffId != null && leavesByStaffId.ContainsKey(admin.Id)) continue;
             result.Add(NewAdminEntry(date, dayStartTime, admin, AttendanceEntryType.CheckIn));
             result.Add(NewAdminEntry(checkOutDate, otStartTime, admin, AttendanceEntryType.CheckOut));
         }
@@ -235,6 +239,8 @@ internal static class AttendanceRollupService
     /// "Office" unless absent; Admin staff are covered by their auto check-in / check-out entries.
     /// Punches/slots for staff resigned before <paramref name="date"/> (or not yet joined) are excluded.
     /// Day-band overtime is the time clocked after <paramref name="otStartTime"/> (floored to 0.5 h).
+    /// Un-punched staff with a SQL Payroll leave in <paramref name="leavesByStaffId"/> get that leave status instead of
+    /// <see cref="AttendanceStatus.Absence"/>.
     /// </summary>
     internal static List<DailyWorkerAttendance> Run(
         DateOnly date,
@@ -244,7 +250,8 @@ internal static class AttendanceRollupService
         TimeOnly dayStartTime,
         TimeOnly lateCutOff,
         TimeOnly otStartTime,
-        TimeOnly? nextDayStartTime = null)
+        TimeOnly? nextDayStartTime = null,
+        IReadOnlyDictionary<long, StaffLeaveEntry>? leavesByStaffId = null)
     {
         var approved = ApprovedFor(entries, date, dayStartTime, nextDayStartTime);
         TimeSpan lateCutOffOffset = ShiftOffset(lateCutOff, dayStartTime);
@@ -319,7 +326,7 @@ internal static class AttendanceRollupService
                 : 0m;
 
             AttendanceStatus status =
-                !present ? AttendanceStatus.Absence
+                !present ? AbsentStatusFor(id, leavesByStaffId)
                 : nightBand ? AttendanceStatus.NightShift
                 : isLate ? AttendanceStatus.Late
                 : AttendanceStatus.Presence;
@@ -339,12 +346,20 @@ internal static class AttendanceRollupService
                 OTHours = ot,
                 AdditionalOTHours = additionalOt,
                 TotalFlattenedHours = Flatten(regular, additionalShifts, ot, additionalOt),
-                IsAllocated = isOffice ? status != AttendanceStatus.Absence : mySlots.Count > 0
+                IsAllocated = isOffice
+                    ? status is AttendanceStatus.Presence or AttendanceStatus.Late or AttendanceStatus.NightShift
+                    : mySlots.Count > 0
             });
         }
 
         return result;
     }
+
+    /// <summary>Status of an un-punched staff member: their SQL Payroll leave status, otherwise Absence.</summary>
+    private static AttendanceStatus AbsentStatusFor(long staffId, IReadOnlyDictionary<long, StaffLeaveEntry>? leavesByStaffId) =>
+        leavesByStaffId != null && leavesByStaffId.TryGetValue(staffId, out var leave) && PayrollLeaveMapper.IsLeave(leave.MappedStatus)
+            ? leave.MappedStatus
+            : AttendanceStatus.Absence;
 
     /// <summary>The [ColumnCalculate] expression on TotalFlattenedHours, in C# so persisted values never depend on Excel.</summary>
     internal static decimal Flatten(decimal regular, decimal additionalShifts, decimal ot, decimal additionalOt) =>

@@ -22,9 +22,66 @@ public enum AttendanceStatus
     Presence,
     Late,
     NightShift,
+    Annual_Leave,
+    Medical_Leave,
+    Unpaid_Leave,
+    Hospitalization_Leave,
+    Maternity_Leave,
+    Time_Off,
+    On_Leave,
     Unavailable,
     Absence,
     None
+}
+
+/// <summary>Maps SQL Payroll <c>LV_APP.LEAVETYPE</c> codes onto the leave values of <see cref="AttendanceStatus"/>.</summary>
+public static class PayrollLeaveMapper
+{
+    /// <summary>Alias of <see cref="MapLeaveType"/>.</summary>
+    public static AttendanceStatus MapStatus(string? leaveType) => MapLeaveType(leaveType);
+
+    /// <summary>
+    /// Accepts both raw SQL Payroll codes ("AL", "MC", "UL", ...) and <see cref="AttendanceStatus"/> leave names
+    /// ("Annual_Leave", "Medical_Leave", ...) as stored by Staff Manager in <c>staff_leaves</c>.
+    /// </summary>
+    public static AttendanceStatus MapLeaveType(string? leaveType)
+    {
+        string raw = (leaveType ?? string.Empty).Trim();
+        if (raw.Length > 0 && !char.IsDigit(raw[0]) && raw[0] != '-' &&
+            Enum.TryParse<AttendanceStatus>(raw, ignoreCase: true, out var named) && IsLeave(named))
+            return named;
+
+        string t = raw.ToUpperInvariant();
+        return t switch
+        {
+            "" => AttendanceStatus.None,
+            "AL" => AttendanceStatus.Annual_Leave,
+            "MC" => AttendanceStatus.Medical_Leave,
+            "UL" or "UL (X)" => AttendanceStatus.Unpaid_Leave,
+            "HOSPITALIZATION LEAV" or "HL" => AttendanceStatus.Hospitalization_Leave,
+            "BERSALIN" => AttendanceStatus.Maternity_Leave,
+            "T/O" => AttendanceStatus.Time_Off,
+            _ => AttendanceStatus.On_Leave
+        };
+    }
+
+    /// <summary>True for every leave status (un-punched staff on approved leave, never "Absence").</summary>
+    public static bool IsLeave(AttendanceStatus status) => status is
+        AttendanceStatus.Annual_Leave or AttendanceStatus.Medical_Leave or AttendanceStatus.Unpaid_Leave or
+        AttendanceStatus.Hospitalization_Leave or AttendanceStatus.Maternity_Leave or AttendanceStatus.Time_Off or
+        AttendanceStatus.On_Leave;
+}
+
+/// <summary>One staff leave day mirrored from SQL Payroll <c>LV_APP</c> (cached in PostgreSQL <c>staff_leaves</c>).</summary>
+public record StaffLeaveEntry
+{
+    public long DocKey { get; set; }
+    public long StaffID { get; set; }
+    public DateOnly LeaveDate { get; set; }
+    public string LeaveType { get; set; } = string.Empty;
+    public decimal LeaveDay { get; set; } = 1m;
+    public string Description { get; set; } = string.Empty;
+    public AttendanceStatus MappedStatus { get; set; } = AttendanceStatus.On_Leave;
 }
 
 public enum AttendanceEntryType
@@ -101,6 +158,15 @@ public record ScheduleRecord
     /// </summary>
     [JsonIgnore]
     public DateTime? BoardServerUpdatedAt { get; set; }
+
+    /// <summary>Public holiday flag for <see cref="DailyScheduleDate"/> (SQL Payroll LV_CALENDAR_DAYS; read-only).</summary>
+    public bool IsHoliday { get; set; }
+
+    /// <summary>SQL Payroll description of the public holiday (empty when not a holiday).</summary>
+    public string HolidayDescription { get; set; } = string.Empty;
+
+    /// <summary>Approved leave days on <see cref="DailyScheduleDate"/> (SQL Payroll LV_APP; read-only).</summary>
+    public List<StaffLeaveEntry> Leaves { get; set; } = new();
 
     public List<WorkerPreference> Preferences { get; set; } = new();
     public List<TeamRecord> Teams { get; set; } = new();

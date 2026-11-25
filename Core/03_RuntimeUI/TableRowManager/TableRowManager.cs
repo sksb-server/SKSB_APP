@@ -41,7 +41,7 @@ public static partial class TableRowManager
         new(StringComparer.OrdinalIgnoreCase)
         {
             "AllStaffsTable",
-            "iJobProjectsTable", "MWOProjectsTable", "PVTProjectsTable", "AllProjectsTable",
+            "iJobProjectsTable", "MWOProjectsTable", "PVTProjectsTable", "OtherProjectsTable", "AllProjectsTable",
             "CompaniesTable", "AllCompaniesTable",
             "AllVehiclesTable",
             "WorkshopsTable", "InsuranceCompaniesTable", "FuelCardsTable", "FuelCompanyNamesTable",
@@ -88,6 +88,7 @@ public static partial class TableRowManager
         TableNatures["iJobProjectsTable"] = TableNature.Absolute;
         TableNatures["MWOProjectsTable"] = TableNature.Absolute;
         TableNatures["PVTProjectsTable"] = TableNature.Absolute;
+        TableNatures["OtherProjectsTable"] = TableNature.Absolute;
         TableNatures["AllProjectsTable"] = TableNature.Absolute;
         TableNatures["CompaniesTable"] = TableNature.Absolute;
         TableNatures["AllCompaniesTable"] = TableNature.Absolute;

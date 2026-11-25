@@ -20,6 +20,9 @@ public enum ProjectType
     Civil_Earthworks,
     Machinery_Rental,
     General_Maintenance,
+    Office_Improvement,
+    IT_System,
+    Admin_Internal,
     Other,
     None
 }
@@ -63,22 +66,24 @@ public enum ProjectStatus
     None
 }
 
-/// <summary>Which of the three master sheets a project lives on (Air Selangor iJob / MWO, or Private).</summary>
+/// <summary>Which of the four master sheets a project lives on (Air Selangor iJob / MWO, Private, or Other internal projects).</summary>
 public enum ProjectCategory
 {
     iJob,
     MWO,
     PVT,
+    Other,
     None
 }
 
 // =========================================================================
-// 2. PROJECT RECORD (iJobProjectsTable / MWOProjectsTable / PVTProjectsTable)
+// 2. PROJECT RECORD (iJobProjectsTable / MWOProjectsTable / PVTProjectsTable / OtherProjectsTable)
 // =========================================================================
 
 [ExcelTable("iJobProjectsTable")]
 [ExcelTable("MWOProjectsTable")]
 [ExcelTable("PVTProjectsTable")]
+[ExcelTable("OtherProjectsTable")]
 [ExcelTable("AllProjectsTable")]
 public record ProjectRecord
 {
@@ -106,8 +111,7 @@ public record ProjectDetails
     /// <summary>Multi-select; stored in Excel and PostgreSQL as "Pipe_Repair, Road_Reinstatement".</summary>
     [ExcelColumn("Type", isRequired: true)]
     [ColumnRule("ProjectTypeList", IsRequired = true, IsMultiSelect = true)]
-    [ColumnDefault(DefaultKind.Literal, literalValue: "Pipe_Repair")]
-    public List<ProjectType> ProjectType { get; set; } = new() { SKSB_App.Core.Types.ProjectType.Pipe_Repair };
+    public List<ProjectType> ProjectType { get; set; } = new();
 
     [ExcelColumn("Priority", isRequired: true)]
     [ColumnRule("ProjectPriorityList", IsRequired = true)]
@@ -124,12 +128,21 @@ public record ProjectDetails
     [ExcelColumn("Company ID", isRequired: true)]
     [ColumnRule("CompaniesTable[Company ID]", IsRequired = true)]
     [ColumnSync("Company Name", "CompaniesTable[Company ID]", "CompaniesTable[Short Company Name]")]
+    [ColumnSync("SQL Account Project", "CompaniesTable[Company ID]", "CompaniesTable[iJob SQL Account Project]", TableName = "iJobProjectsTable", OnlyWhenTargetBlank = true)]
     public long CompanyID { get; set; }
 
     [ExcelColumn("Company Name")]
     [ColumnRule("CompaniesTable[Short Company Name]", IsRequired = false)]
     [ColumnSync("Company ID", "CompaniesTable[Short Company Name]", "CompaniesTable[Company ID]")]
+    [ColumnSync("SQL Account Project", "CompaniesTable[Short Company Name]", "CompaniesTable[iJob SQL Account Project]", TableName = "iJobProjectsTable", OnlyWhenTargetBlank = true)]
     public string CompanyName { get; set; } = string.Empty;
+
+    [ExcelColumn("SQL Account Project")]
+    [ColumnRule("SqlAccountProjectList", IsRequired = false)]
+    [ColumnDefault(DefaultKind.Literal, literalValue: "2016 - C6-MWO", TableName = "MWOProjectsTable")]
+    [ColumnDefault(DefaultKind.Literal, literalValue: "2016 - PRIV - SHORT", TableName = "PVTProjectsTable")]
+    [ColumnDefault(DefaultKind.Literal, literalValue: "----", TableName = "OtherProjectsTable")]
+    public string SqlAccountProjectCode { get; set; } = string.Empty;
 
     [ExcelColumn("Staff ID")]
     [ColumnRule("StaffIDList", IsRequired = false, IsWarningOnly = true)]
@@ -232,6 +245,10 @@ public record CompanyRecord
     [DataList("CompanyNameList")]
     [ExcelColumn("Short Company Name", isRequired: true)]
     public string ShortCompanyName { get; set; } = string.Empty;
+
+    [ExcelColumn("iJob SQL Account Project")]
+    [ColumnRule("SqlAccountProjectList", IsRequired = false)]
+    public string DefaultSqlAccountProject { get; set; } = string.Empty;
 
     /// <summary>Server <c>updated_at</c> as last loaded (optimistic-concurrency token); never serialized or shown.</summary>
     [JsonIgnore]

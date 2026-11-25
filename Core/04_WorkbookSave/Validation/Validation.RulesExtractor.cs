@@ -442,7 +442,7 @@ public static class RulesExtractor
                 // O(1) Dictionary Sync Partner Validation
                 if (cRule.SyncRules.Count > 0)
                 {
-                    var syncGroups = cRule.SyncRules.GroupBy(s => RuleRegistry.NormalizeIdentifier(s.TargetHeader));
+                    var syncGroups = cRule.SyncRules.Where(s => !s.OnlyWhenTargetBlank).GroupBy(s => RuleRegistry.NormalizeIdentifier(s.TargetHeader));
                     string normKey = NormalizeLookupToken(strVal);
 
                     foreach (var group in syncGroups)

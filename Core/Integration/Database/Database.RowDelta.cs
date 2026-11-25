@@ -171,6 +171,8 @@ public sealed class StaffDeltaPayload
     public TableDelta<StaffRecord> Staff { get; init; } = new();
     public TableDelta<VehicleLicense> VehicleLicenses { get; init; } = new();
     public TableDelta<SkillLicense> SkillLicenses { get; init; } = new();
+    public TableDelta<StaffSalary> Salaries { get; init; } = new();
+    public TableDelta<StaffLeave> Leaves { get; init; } = new();
     public List<SkillLicenseType> SkillLicenseTypes { get; init; } = new();
 }
 

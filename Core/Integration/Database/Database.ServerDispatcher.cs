@@ -839,6 +839,8 @@ WHERE vehicle_plate = @VehiclePlate
 
         var allVLicenses = staffItems.SelectMany(s => s.VehicleLicenses.Select(l => { if (l.StaffID == 0) l.StaffID = s.StaffID; return l; })).ToList();
         var allSLicenses = staffItems.SelectMany(s => s.SkillLicenses.Select(l => { if (l.StaffID == 0) l.StaffID = s.StaffID; return l; })).ToList();
+        var allSalaries = staffItems.SelectMany(s => (s.Salaries ?? new List<StaffSalary>()).Select(w => { if (w.StaffID == 0) w.StaffID = s.StaffID; return w; })).ToList();
+        var allLeaves = staffItems.SelectMany(s => (s.Leaves ?? new List<StaffLeave>()).Select(l => { if (l.StaffID == 0) l.StaffID = s.StaffID; return l; })).ToList();
 
         bool ensured = false;
         Db.ExecuteInTransaction((conn, trans) =>
@@ -848,10 +850,12 @@ WHERE vehicle_plate = @VehiclePlate
             // a. Lookup types first so license FK references stay valid.
             if (typeItems.Count > 0) UpsertSkillLicenseTypes(conn, trans, typeItems);
 
-            // b. Masters, then child licenses.
+            // b. Masters, then child licenses and salary history.
             UpsertStaffRows(conn, trans, staffItems);
             PersistStaffVehicleLicenses(conn, trans, allVLicenses);
             PersistStaffSkillLicenses(conn, trans, allSLicenses);
+            PersistStaffSalaries(conn, trans, allSalaries);
+            PersistStaffLeaves(conn, trans, allLeaves);
         });
         if (ensured) _staffHistoryConstraintsEnsured = true;
     }
@@ -883,7 +887,59 @@ WHERE vehicle_plate = @VehiclePlate
                          (SELECT last_value FROM staff_skill_licenses_skill_license_id_seq), 1),
                 (SELECT COUNT(*) > 0 FROM staff_skill_licenses) OR (SELECT is_called FROM staff_skill_licenses_skill_license_id_seq));", transaction: trans);
 
+        // Salary history synced from SQL Payroll (one row per effective salary revision).
+        conn.Execute(@"
+            CREATE TABLE IF NOT EXISTS staff_salaries (
+                salary_id           BIGSERIAL PRIMARY KEY,
+                staff_id            BIGINT NOT NULL REFERENCES staff_master(staff_id),
+                effective_date      DATE NOT NULL,
+                salary_before       NUMERIC(12,2) NULL,
+                salary_before_basis VARCHAR(32) NOT NULL DEFAULT 'None',
+                salary_basis        VARCHAR(32) NOT NULL DEFAULT 'Monthly',
+                salary_rate         NUMERIC(12,2) NOT NULL DEFAULT 0,
+                remarks             TEXT DEFAULT '',
+                updated_at          TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                UNIQUE (staff_id, effective_date, salary_basis, salary_rate)
+            );", transaction: trans);
+
+        // One-time carry-over from the legacy staff_wages table (left in place, never dropped).
+        conn.Execute(@"
+            DO $$
+            BEGIN
+                IF to_regclass('public.staff_wages') IS NOT NULL AND NOT EXISTS (SELECT 1 FROM staff_salaries) THEN
+                    INSERT INTO staff_salaries (salary_id, staff_id, effective_date, salary_basis, salary_rate, remarks, updated_at)
+                    SELECT wage_id, staff_id, effective_date, wage_basis, wage_rate, COALESCE(remarks, ''), updated_at
+                    FROM staff_wages
+                    ON CONFLICT DO NOTHING;
+                END IF;
+            END $$;", transaction: trans);
+
+        SyncStaffSalarySequence(conn, trans);
+
+        // Leave applications mirrored from SQL Payroll LV_APP (same schema as the Schedule calendar cache).
+        conn.Execute(@"
+            CREATE TABLE IF NOT EXISTS staff_leaves (
+                leave_id       BIGSERIAL PRIMARY KEY,
+                payroll_dockey BIGINT UNIQUE,
+                staff_id       BIGINT NOT NULL,
+                leave_date     DATE NOT NULL,
+                leave_type     VARCHAR(64) NOT NULL,
+                leave_day      NUMERIC(5,2) NOT NULL DEFAULT 1.0,
+                description    TEXT DEFAULT '',
+                updated_at     TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            );
+            CREATE INDEX IF NOT EXISTS ix_staff_leaves_leave_date ON staff_leaves (leave_date);", transaction: trans);
         return true;
+    }
+
+    /// <summary>Moves <c>staff_salaries_salary_id_seq</c> forward past MAX(salary_id) (never backwards).</summary>
+    private static void SyncStaffSalarySequence(System.Data.IDbConnection conn, System.Data.IDbTransaction trans)
+    {
+        conn.Execute(@"
+            SELECT setval('staff_salaries_salary_id_seq',
+                GREATEST(COALESCE((SELECT MAX(salary_id) FROM staff_salaries), 0),
+                         (SELECT last_value FROM staff_salaries_salary_id_seq), 1),
+                (SELECT COUNT(*) > 0 FROM staff_salaries) OR (SELECT is_called FROM staff_salaries_salary_id_seq));", transaction: trans);
     }
 
     // -------------------------------------------------------------------------
@@ -973,6 +1029,32 @@ WHERE vehicle_plate = @VehiclePlate
         Cost = l.Cost,
         ExpectedUpdatedAt = ToConcurrencyToken(expectedUpdatedAt)
     };
+
+    private sealed class StaffSalaryRow
+    {
+        public long SalaryId { get; init; }
+        public long StaffId { get; init; }
+        public DateTime EffectiveDate { get; init; }
+        public decimal? SalaryBefore { get; init; }
+        public string SalaryBeforeBasis { get; init; } = "None";
+        public string SalaryBasis { get; init; } = "Monthly";
+        public decimal SalaryRate { get; init; }
+        public string Remarks { get; init; } = string.Empty;
+    }
+
+    private static StaffSalaryRow ToStaffSalaryRow(StaffSalary s, bool ignoreLocalId = false) => new()
+    {
+        SalaryId = ignoreLocalId ? 0 : s.SalaryID,
+        StaffId = s.StaffID,
+        EffectiveDate = s.EffectiveDate.ToDateTime(TimeOnly.MinValue),
+        SalaryBefore = s.SalaryBefore.HasValue ? decimal.Round(s.SalaryBefore.Value, 2, MidpointRounding.AwayFromZero) : null,
+        SalaryBeforeBasis = (s.SalaryBefore.HasValue ? s.SalaryBeforeBasis : SalaryBasis.None).ToString(),
+        SalaryBasis = s.SalaryBasis.ToString(),
+        SalaryRate = decimal.Round(s.SalaryRate, 2, MidpointRounding.AwayFromZero),
+        Remarks = (s.Remarks ?? string.Empty).Trim()
+    };
+
+    private static bool IsValidStaffSalary(StaffSalary s) => s.StaffID > 0 && s.SalaryBasis != SalaryBasis.None && s.SalaryRate > 0m;
 
     private static bool IsValidVehicleLicense(VehicleLicense l) => l.StaffID > 0 && l.VehicleLicenseClass != VehicleLicenseClass.None;
     private static bool IsValidSkillLicense(SkillLicense l) => l.StaffID > 0 && !string.IsNullOrWhiteSpace(l.SkillLicenseType);
@@ -1075,9 +1157,87 @@ WHERE vehicle_plate = @VehiclePlate
         WHERE skill_license_id = @SkillLicenseId
           AND ABS(EXTRACT(EPOCH FROM (updated_at - @ExpectedUpdatedAt))) < 0.001;";
 
+    private const string SqlStaffSalaryInsertNewId = @"
+        INSERT INTO staff_salaries (salary_id, staff_id, effective_date, salary_before, salary_before_basis, salary_basis, salary_rate, remarks, updated_at)
+        VALUES (nextval('staff_salaries_salary_id_seq'), @StaffId, @EffectiveDate, @SalaryBefore, @SalaryBeforeBasis, @SalaryBasis, @SalaryRate, @Remarks, clock_timestamp())
+        ON CONFLICT (staff_id, effective_date, salary_basis, salary_rate) DO UPDATE SET
+            salary_before       = EXCLUDED.salary_before,
+            salary_before_basis = EXCLUDED.salary_before_basis,
+            remarks             = EXCLUDED.remarks,
+            updated_at          = GREATEST(clock_timestamp(), staff_salaries.updated_at + INTERVAL '1 millisecond');";
+
+    private const string SqlStaffSalaryUpsertById = @"
+        INSERT INTO staff_salaries (salary_id, staff_id, effective_date, salary_before, salary_before_basis, salary_basis, salary_rate, remarks, updated_at)
+        VALUES (@SalaryId, @StaffId, @EffectiveDate, @SalaryBefore, @SalaryBeforeBasis, @SalaryBasis, @SalaryRate, @Remarks, clock_timestamp())
+        ON CONFLICT (salary_id) DO UPDATE SET
+            staff_id            = EXCLUDED.staff_id,
+            effective_date      = EXCLUDED.effective_date,
+            salary_before       = EXCLUDED.salary_before,
+            salary_before_basis = EXCLUDED.salary_before_basis,
+            salary_basis        = EXCLUDED.salary_basis,
+            salary_rate         = EXCLUDED.salary_rate,
+            remarks             = EXCLUDED.remarks,
+            updated_at          = GREATEST(clock_timestamp(), staff_salaries.updated_at + INTERVAL '1 millisecond');";
+
     // -------------------------------------------------------------------------
     // 3c. UPSERT-ONLY HELPERS (offline pending upload / no-baseline fallback)
     // -------------------------------------------------------------------------
+    /// <summary>
+    /// Upserts salary history. Rows with a server <c>salary_id</c> upsert by ID; new rows take a sequence ID and merge
+    /// on the natural key (staff, effective date, basis, rate), so re-syncing SQL Payroll never duplicates history.
+    /// </summary>
+    private static void PersistStaffSalaries(System.Data.IDbConnection conn, System.Data.IDbTransaction trans, IEnumerable<StaffSalary> salaries, bool ignoreLocalIds = false)
+    {
+        var items = salaries.Where(IsValidStaffSalary)
+            .Select(s => ToStaffSalaryRow(s, ignoreLocalIds))
+            .GroupBy(r => (r.SalaryId > 0 ? r.SalaryId.ToString(CultureInfo.InvariantCulture) : string.Empty, r.StaffId, r.EffectiveDate, r.SalaryBasis, r.SalaryRate))
+            .Select(g => g.Last())
+            .ToList();
+        var withId = items.Where(i => i.SalaryId > 0).ToList();
+        var withoutId = items.Where(i => i.SalaryId <= 0).ToList();
+
+        if (withId.Count > 0)
+        {
+            conn.Execute(SqlStaffSalaryUpsertById, withId, trans);
+            SyncStaffSalarySequence(conn, trans); // explicit IDs must never be handed out again by nextval
+        }
+        if (withoutId.Count > 0) conn.Execute(SqlStaffSalaryInsertNewId, withoutId, trans);
+    }
+
+    private const string SqlStaffLeaveUpsertByDocKey = @"
+        INSERT INTO staff_leaves (payroll_dockey, staff_id, leave_date, leave_type, leave_day, description, updated_at)
+        VALUES (@DocKey, @StaffId, @LeaveDate, @LeaveType, @LeaveDay, @Description, clock_timestamp())
+        ON CONFLICT (payroll_dockey) DO UPDATE SET
+            staff_id    = EXCLUDED.staff_id,
+            leave_date  = EXCLUDED.leave_date,
+            leave_type  = EXCLUDED.leave_type,
+            leave_day   = EXCLUDED.leave_day,
+            description = EXCLUDED.description,
+            updated_at  = GREATEST(clock_timestamp(), staff_leaves.updated_at + INTERVAL '1 millisecond');";
+
+    /// <summary>
+    /// Upserts leave rows mirrored from SQL Payroll <c>LV_APP</c> by <c>payroll_dockey</c> (= <see cref="StaffLeave.LeaveID"/>).
+    /// SQL Payroll is authoritative, so no concurrency checks and no deletes.
+    /// </summary>
+    private static void PersistStaffLeaves(System.Data.IDbConnection conn, System.Data.IDbTransaction trans, IEnumerable<StaffLeave> leaves)
+    {
+        var rows = leaves
+            .Where(l => l != null && l.LeaveID > 0 && l.StaffID > 0)
+            .GroupBy(l => l.LeaveID)
+            .Select(g => g.Last())
+            .Select(l => new
+            {
+                DocKey = l.LeaveID,
+                StaffId = l.StaffID,
+                LeaveDate = l.LeaveDate.ToDateTime(TimeOnly.MinValue),
+                LeaveType = (l.LeaveType ?? string.Empty).Trim(),
+                l.LeaveDay,
+                Description = (l.Description ?? string.Empty).Trim()
+            })
+            .ToList();
+        if (rows.Count > 0) conn.Execute(SqlStaffLeaveUpsertByDocKey, rows, trans);
+    }
+
     private static void UpsertStaffRows(System.Data.IDbConnection conn, System.Data.IDbTransaction trans, IEnumerable<StaffRecord> staff)
     {
         var rows = staff.Where(s => s.StaffID > 0).Select(s => ToStaffRow(s)).ToList();
@@ -1240,7 +1400,18 @@ WHERE vehicle_plate = @VehiclePlate
                 }
             }
 
-            // d. Any conflict rolls back the whole batch (ExecuteInTransaction catches, rolls back, rethrows).
+            // d. staff_salaries: read-only history mirrored from SQL Payroll (the payroll system is authoritative, so
+            //    no concurrency checks). New rows ignore any local Excel ID and merge on the natural key.
+            PersistStaffSalaries(conn, trans, delta.Salaries.FallbackUpsert);
+            PersistStaffSalaries(conn, trans, delta.Salaries.Added, ignoreLocalIds: true);
+            PersistStaffSalaries(conn, trans, delta.Salaries.Modified.Select(m => m.Record));
+
+            // e. staff_leaves: read-only LV_APP mirror (SQL Payroll authoritative; upsert by payroll_dockey).
+            PersistStaffLeaves(conn, trans, delta.Leaves.FallbackUpsert);
+            PersistStaffLeaves(conn, trans, delta.Leaves.Added);
+            PersistStaffLeaves(conn, trans, delta.Leaves.Modified.Select(m => m.Record));
+
+            // f. Any conflict rolls back the whole batch (ExecuteInTransaction catches, rolls back, rethrows).
             if (conflicts.Count > 0) throw new ConcurrencyConflictException(conflicts);
         });
         if (ensured) _staffHistoryConstraintsEnsured = true;
@@ -1248,7 +1419,9 @@ WHERE vehicle_plate = @VehiclePlate
         AppLogger.Info($"[ServerDispatcher] Staff delta saved (force={forceOverwrite}): " +
             $"staff +{delta.Staff.Added.Count}/~{delta.Staff.Modified.Count}/fallback {delta.Staff.FallbackUpsert.Count}/={delta.Staff.UnchangedCount}; " +
             $"vehicle lic +{delta.VehicleLicenses.Added.Count}/~{delta.VehicleLicenses.Modified.Count}/fallback {delta.VehicleLicenses.FallbackUpsert.Count}/={delta.VehicleLicenses.UnchangedCount}; " +
-            $"skill lic +{delta.SkillLicenses.Added.Count}/~{delta.SkillLicenses.Modified.Count}/fallback {delta.SkillLicenses.FallbackUpsert.Count}/={delta.SkillLicenses.UnchangedCount}.");
+            $"skill lic +{delta.SkillLicenses.Added.Count}/~{delta.SkillLicenses.Modified.Count}/fallback {delta.SkillLicenses.FallbackUpsert.Count}/={delta.SkillLicenses.UnchangedCount}; " +
+            $"salaries +{delta.Salaries.Added.Count}/~{delta.Salaries.Modified.Count}/fallback {delta.Salaries.FallbackUpsert.Count}/={delta.Salaries.UnchangedCount}; " +
+            $"leaves +{delta.Leaves.Added.Count}/~{delta.Leaves.Modified.Count}/fallback {delta.Leaves.FallbackUpsert.Count}/={delta.Leaves.UnchangedCount}.");
     }
 
     // -------------------------------------------------------------------------
@@ -1359,6 +1532,7 @@ WHERE vehicle_plate = @VehiclePlate
 
             AddText(diffs, "Legal Company Name", Text(row, "legal_company_name"), local.LegalCompanyName);
             AddText(diffs, "Short Company Name", Text(row, "short_company_name"), local.ShortCompanyName);
+            AddText(diffs, "iJob SQL Account Project", Text(row, "default_sql_account_project"), local.DefaultSqlAccountProject);
             return diffs;
         }
 
@@ -1380,6 +1554,7 @@ WHERE vehicle_plate = @VehiclePlate
                 Status = Enum.TryParse<ProjectStatus>(Text(row, "status"), ignoreCase: true, out var st) ? st : ProjectStatus.None,
                 CompanyID = Long(row, "company_id"),
                 CompanyName = Text(row, "company_name"),
+                SqlAccountProjectCode = Text(row, "sql_account_project_code"),
                 StaffID = Long(row, "staff_id") is long sid && sid > 0 ? sid : null,
                 PIC = Text(row, "pic"),
                 District = Enum.TryParse<ProjectDistrict>(Text(row, "district"), ignoreCase: true, out var di) ? di : ProjectDistrict.None,
@@ -1402,6 +1577,7 @@ WHERE vehicle_plate = @VehiclePlate
             AddEnum(diffs, "Status", server.Status, d.Status);
             Add(diffs, "Company ID", ShowId(server.CompanyID), ShowId(d.CompanyID), server.CompanyID == 0 ? null : (object)server.CompanyID);
             AddText(diffs, "Company Name", server.CompanyName, d.CompanyName);
+            AddText(diffs, "SQL Account Project", server.SqlAccountProjectCode, d.SqlAccountProjectCode);
             Add(diffs, "Staff ID", ShowId(serverStaff), ShowId(d.StaffID ?? 0), serverStaff == 0 ? null : (object)serverStaff);
             AddText(diffs, "PIC", server.PIC, d.PIC);
             AddEnum(diffs, "District", server.District, d.District);
@@ -1803,6 +1979,7 @@ WHERE vehicle_plate = @VehiclePlate
         public string Status { get; init; } = string.Empty;
         public long? CompanyId { get; init; }
         public string CompanyName { get; init; } = string.Empty;
+        public string SqlAccountProjectCode { get; init; } = string.Empty;
         public long? StaffId { get; init; }
         public string Pic { get; init; } = string.Empty;
         public string District { get; init; } = string.Empty;
@@ -1833,6 +2010,7 @@ WHERE vehicle_plate = @VehiclePlate
         public long CompanyId { get; init; }
         public string LegalCompanyName { get; init; } = string.Empty;
         public string ShortCompanyName { get; init; } = string.Empty;
+        public string DefaultSqlAccountProject { get; init; } = string.Empty;
         public DateTime? ExpectedUpdatedAt { get; init; }
     }
 
@@ -1849,6 +2027,7 @@ WHERE vehicle_plate = @VehiclePlate
             Status = d.Status.ToString(),
             CompanyId = d.CompanyID > 0 ? d.CompanyID : null,
             CompanyName = d.CompanyName ?? string.Empty,
+            SqlAccountProjectCode = d.SqlAccountProjectCode?.Trim() ?? string.Empty,
             StaffId = d.StaffID,
             Pic = d.PIC ?? string.Empty,
             District = d.District.ToString(),
@@ -1880,6 +2059,7 @@ WHERE vehicle_plate = @VehiclePlate
         CompanyId = c.CompanyID,
         LegalCompanyName = c.LegalCompanyName ?? string.Empty,
         ShortCompanyName = c.ShortCompanyName ?? string.Empty,
+        DefaultSqlAccountProject = c.DefaultSqlAccountProject?.Trim() ?? string.Empty,
         ExpectedUpdatedAt = ToConcurrencyToken(expectedUpdatedAt)
     };
 
@@ -1891,6 +2071,7 @@ WHERE vehicle_plate = @VehiclePlate
         ProjectCategory.iJob => "iJobProjectsTable",
         ProjectCategory.MWO => "MWOProjectsTable",
         ProjectCategory.PVT => "PVTProjectsTable",
+        ProjectCategory.Other => "OtherProjectsTable",
         _ => "AllProjectsTable"
     };
 
@@ -1902,12 +2083,12 @@ INSERT INTO project_master (
     project_id, category, reference_no, project_type, priority, status, company_id, company_name, staff_id, pic,
     district, address, start_date, target_end_date, actual_end_date, estimated_cost, promised_return, actual_return,
     remarks, days_worked, total_regular_shifts, total_hours, overtime_shifts, total_overtime_hours, total_odometer, fuel_cost, labour_cost, claim_cost,
-    actual_project_cost, profit_margin, updated_at
+    actual_project_cost, profit_margin, sql_account_project_code, updated_at
 ) VALUES (
     @ProjectId, @Category, @ReferenceNo, @ProjectType, @Priority, @Status, @CompanyId, @CompanyName, @StaffId, @Pic,
     @District, @Address, @StartDate, @TargetEndDate, @ActualEndDate, @EstimatedCost, @PromisedReturn, @ActualReturn,
     @Remarks, @DaysWorked, @TotalRegularShifts, @TotalHours, @OvertimeShifts, @TotalOvertimeHours, @TotalOdometer, @FuelCost, @LabourCost, @ClaimCost,
-    @ActualProjectCost, @ProfitMargin, clock_timestamp()
+    @ActualProjectCost, @ProfitMargin, @SqlAccountProjectCode, clock_timestamp()
 )";
 
     private const string SqlProjectUpsert = SqlProjectInsert + @"
@@ -1941,7 +2122,8 @@ ON CONFLICT (project_id) DO UPDATE SET
     claim_cost          = EXCLUDED.claim_cost,
     actual_project_cost = EXCLUDED.actual_project_cost,
     profit_margin       = EXCLUDED.profit_margin,
-    updated_at          = GREATEST(clock_timestamp(), project_master.updated_at + INTERVAL '1 millisecond');";
+    sql_account_project_code = EXCLUDED.sql_account_project_code,
+    updated_at         = GREATEST(clock_timestamp(), project_master.updated_at + INTERVAL '1 millisecond');";
 
     private const string SqlProjectInsertIfAbsent = SqlProjectInsert + @"
 ON CONFLICT (project_id) DO NOTHING;";
@@ -1977,18 +2159,20 @@ UPDATE project_master SET
     claim_cost          = @ClaimCost,
     actual_project_cost = @ActualProjectCost,
     profit_margin       = @ProfitMargin,
-    updated_at          = GREATEST(clock_timestamp(), updated_at + INTERVAL '1 millisecond')
+    sql_account_project_code = @SqlAccountProjectCode,
+    updated_at         = GREATEST(clock_timestamp(), updated_at + INTERVAL '1 millisecond')
 WHERE project_id = @ProjectId
   AND ABS(EXTRACT(EPOCH FROM (updated_at - @ExpectedUpdatedAt))) < 0.001;";
 
     private const string SqlCompanyInsert = @"
-        INSERT INTO company_master (company_id, legal_company_name, short_company_name, updated_at)
-        VALUES (@CompanyId, @LegalCompanyName, @ShortCompanyName, clock_timestamp())";
+        INSERT INTO company_master (company_id, legal_company_name, short_company_name, default_sql_account_project, updated_at)
+        VALUES (@CompanyId, @LegalCompanyName, @ShortCompanyName, @DefaultSqlAccountProject, clock_timestamp())";
 
     private const string SqlCompanyUpsert = SqlCompanyInsert + @"
         ON CONFLICT (company_id) DO UPDATE SET
             legal_company_name = EXCLUDED.legal_company_name,
             short_company_name = EXCLUDED.short_company_name,
+            default_sql_account_project = EXCLUDED.default_sql_account_project,
             updated_at         = GREATEST(clock_timestamp(), company_master.updated_at + INTERVAL '1 millisecond');";
 
     private const string SqlCompanyInsertIfAbsent = SqlCompanyInsert + @"
@@ -1998,7 +2182,8 @@ WHERE project_id = @ProjectId
         UPDATE company_master SET
             legal_company_name = @LegalCompanyName,
             short_company_name = @ShortCompanyName,
-            updated_at         = GREATEST(clock_timestamp(), updated_at + INTERVAL '1 millisecond')
+            default_sql_account_project = @DefaultSqlAccountProject,
+            updated_at        = GREATEST(clock_timestamp(), updated_at + INTERVAL '1 millisecond')
         WHERE company_id = @CompanyId
           AND ABS(EXTRACT(EPOCH FROM (updated_at - @ExpectedUpdatedAt))) < 0.001;";
 
@@ -2187,6 +2372,7 @@ ALTER TABLE project_master ADD COLUMN IF NOT EXISTS labour_cost         NUMERIC(
 ALTER TABLE project_master ADD COLUMN IF NOT EXISTS claim_cost          NUMERIC(14,2) DEFAULT 0;
 ALTER TABLE project_master ADD COLUMN IF NOT EXISTS actual_project_cost NUMERIC(14,2) DEFAULT 0;
 ALTER TABLE project_master ADD COLUMN IF NOT EXISTS profit_margin       NUMERIC(14,2) DEFAULT 0;
+ALTER TABLE project_master ADD COLUMN IF NOT EXISTS sql_account_project_code VARCHAR(80);
 ALTER TABLE project_master ADD COLUMN IF NOT EXISTS updated_at          TIMESTAMPTZ   DEFAULT CURRENT_TIMESTAMP;", transaction: trans);
     }
 
@@ -2200,6 +2386,74 @@ CREATE TABLE IF NOT EXISTS company_master (
     created_at         TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP,
     updated_at         TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP
 );
-ALTER TABLE company_master ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;", transaction: trans);
+ALTER TABLE company_master ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ DEFAULT CURRENT_TIMESTAMP;
+ALTER TABLE company_master ADD COLUMN IF NOT EXISTS default_sql_account_project VARCHAR(80);", transaction: trans);
+    }
+
+    // =========================================================================
+    // 5. SQL ACCOUNTING PROJECT LOOKUP (lookup_sql_account_projects)
+    // =========================================================================
+    private const string SqlEnsureSqlAccountProjects = @"
+CREATE TABLE IF NOT EXISTS lookup_sql_account_projects (
+    code        VARCHAR(80)  PRIMARY KEY,
+    description VARCHAR(320),
+    is_active   BOOLEAN      NOT NULL DEFAULT TRUE,
+    updated_at  TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP
+);";
+
+    private const string SqlSqlAccountProjectUpsert = @"
+INSERT INTO lookup_sql_account_projects (code, description, is_active, updated_at)
+VALUES (@Code, @Description, @IsActive, CURRENT_TIMESTAMP)
+ON CONFLICT (code) DO UPDATE SET
+    description = EXCLUDED.description,
+    is_active   = EXCLUDED.is_active,
+    updated_at  = CURRENT_TIMESTAMP;";
+
+    /// <summary>
+    /// Mirrors the SQL Accounting PROJECT list into PostgreSQL: upserts every row, then marks codes no longer
+    /// returned by SQL Accounting as inactive (never hard-deleted).
+    /// </summary>
+    public static void SyncSqlAccountProjects(IReadOnlyList<SKSB_App.Core.Integration.Erp.AccountingProjectRow> rows)
+    {
+        var clean = (rows ?? Array.Empty<SKSB_App.Core.Integration.Erp.AccountingProjectRow>())
+            .Where(r => !string.IsNullOrWhiteSpace(r.Code))
+            .GroupBy(r => r.Code.Trim(), StringComparer.OrdinalIgnoreCase)
+            .Select(g => g.First())
+            .Select(r => new
+            {
+                Code = r.Code.Trim(),
+                Description = (r.Description ?? string.Empty).Trim(),
+                r.IsActive
+            })
+            .ToList();
+        string[] codes = clean.Select(r => r.Code).ToArray();
+
+        Db.ExecuteInTransaction((conn, trans) =>
+        {
+            conn.Execute(SqlEnsureSqlAccountProjects, transaction: trans);
+            if (clean.Count > 0) conn.Execute(SqlSqlAccountProjectUpsert, clean, trans);
+            if (codes.Length > 0)
+            {
+                conn.Execute(
+                    "UPDATE lookup_sql_account_projects SET is_active = FALSE, updated_at = CURRENT_TIMESTAMP WHERE NOT (code = ANY(@Codes));",
+                    new { Codes = codes }, trans);
+            }
+        });
+
+        AppLogger.Info($"[ServerDispatcher] lookup_sql_account_projects synced ({clean.Count} row(s)).");
+    }
+
+    /// <summary>Active SQL Accounting project codes cached in PostgreSQL (used when SQL Accounting itself is unreachable).</summary>
+    public static List<string> FetchActiveSqlAccountProjectCodes()
+    {
+        var codes = new List<string>();
+        Db.ExecuteInTransaction((conn, trans) =>
+        {
+            conn.Execute(SqlEnsureSqlAccountProjects, transaction: trans);
+            codes = conn.Query<string>(
+                "SELECT code FROM lookup_sql_account_projects WHERE is_active = TRUE ORDER BY code;",
+                transaction: trans).ToList();
+        });
+        return codes;
     }
 }

@@ -180,11 +180,12 @@ internal static class Roster
 
     /// <summary>
     /// Projects that are Active on <paramref name="date"/> (started, and not past the actual / target end date),
-    /// ordered iJob -> MWO -> PVT -> others, then by project ID.
+    /// ordered iJob -> MWO -> PVT -> others, then by project ID. <see cref="ProjectCategory.Other"/> (internal)
+    /// projects are excluded from the schedule board but stay in <see cref="Projects"/> / ProjectIDList.
     /// </summary>
     public static IReadOnlyList<ProjectInfo> ActiveProjectsOn(DateOnly date) =>
         Projects
-            .Where(p => p.Status == ProjectStatus.Active && p.StartDate <= date && date <= (p.ActualEndDate ?? p.TargetEndDate))
+            .Where(p => p.Category != ProjectCategory.Other && p.Status == ProjectStatus.Active && p.StartDate <= date && date <= (p.ActualEndDate ?? p.TargetEndDate))
             .OrderBy(p => p.Category switch { ProjectCategory.iJob => 0, ProjectCategory.MWO => 1, ProjectCategory.PVT => 2, _ => 3 })
             .ThenBy(p => p.Id, StringComparer.OrdinalIgnoreCase)
             .ToList();

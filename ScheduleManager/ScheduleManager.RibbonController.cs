@@ -63,6 +63,11 @@ public class RibbonController : ManagerRibbonBase
                   <button id='btnNextDay' label='Next Day' size='large' imageMso='RightArrow2' onAction='OnNextDayClicked'
                           screentip='Next Day' supertip='Loads the schedule for the day after the one on the board.' />
                 </group>
+                <group id='grpScheduleBoard' label='Schedule Board'>
+                  <button id='btnPrintSchedule' label='Print Schedule' size='large' imageMso='FilePrintPreview' onAction='OnPrintScheduleClicked'
+                          screentip='Print Schedule (A4 Landscape PDF)'
+                          supertip='Exports the Daily Schedule board to a 1-page A4 Landscape PDF (without project/worker times or vehicle odometers) and opens it for printing or sharing.' />
+                </group>
                 <group id='grpScheduleAttendance' label='Attendance'>
                   <button id='btnRollup' label='Roll Up Attendance' size='large' imageMso='Refresh' onAction='OnRollupClicked'
                           screentip='Roll Up Attendance'
@@ -92,6 +97,9 @@ public class RibbonController : ManagerRibbonBase
 
     public void OnTodayClicked(IRibbonControl control) =>
         ExcelAsyncUtil.QueueAsMacro(() => SheetMapper.GoToDate(DateOnly.FromDateTime(DateTime.Today)));
+
+    public void OnPrintScheduleClicked(IRibbonControl control) =>
+        ExcelAsyncUtil.QueueAsMacro(() => BoardPrinter.ExportPrintableSchedulePdf());
 
     private static DateOnly DisplayedDate => SheetMapper.LoadedDate ?? DateOnly.FromDateTime(DateTime.Today);
 

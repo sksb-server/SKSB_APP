@@ -865,6 +865,7 @@ public static class RuleEvaluator
             var allowedByPartnerCol = new Dictionary<int, HashSet<string>>();
             foreach (var sync in rule.SyncRules)
             {
+                if (sync.OnlyWhenTargetBlank) continue;
                 int partnerCol = FindColumnByHeader(colHeaders, sync.TargetHeader);
                 if (partnerCol >= 1 && !string.IsNullOrWhiteSpace(rowValues[partnerCol]))
                 {
@@ -965,6 +966,9 @@ public static class RuleEvaluator
         {
             int targetRelCol = FindColumnByHeader(colHeaders, sync.TargetHeader);
             if (targetRelCol < 1 || filledTargets.Contains(targetRelCol))
+                continue;
+
+            if (sync.OnlyWhenTargetBlank && !string.IsNullOrWhiteSpace(rowValues[targetRelCol]))
                 continue;
 
             string? resolved = RuleDataCache.LookupValue(wb, sourceVal, sync.LookupSource, sync.ResultSource);

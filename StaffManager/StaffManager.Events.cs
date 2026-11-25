@@ -33,6 +33,7 @@ public class Events : ManagerEventsBase<List<StaffRecord>>
             typeof(VehicleLicenseClass),
             typeof(VehicleLicenseStatus),
             typeof(SkillLicenseStatus),
+            typeof(SalaryBasis),
             typeof(DateFilterScope)
         },
         ExtractAndValidate = () => SheetMapper.ExtractStaffRecordsWithDiagnostics(),
@@ -51,10 +52,13 @@ public class Events : ManagerEventsBase<List<StaffRecord>>
         // other users, and refreshes the delta baselines.
         RefreshAfterSave = savedList =>
         {
-            var fresh = ServerSyncCommands.FetchStaffRecords();
+            var fresh = ServerSyncCommands.FetchStaffRecords(syncFromPayroll: false);
             SheetMapper.PopulateWorksheet(fresh ?? savedList);
         },
-        FetchFromServer = () => ServerSyncCommands.FetchStaffRecords(),
+        // Startup + "Load from System": PostgreSQL baseline resynced live from SQL Payroll (read-only Firebird).
+        FetchFromServer = () => ServerSyncCommands.FetchAndSyncFromPayroll(),
+        // After the sheets are populated and Excel state restored: show SQL Payroll / thumbprint advisories.
+        OnAfterLoad = () => ServerSyncCommands.ShowPendingPayrollAdvisory(),
         ValidateOfflinePayload = list => list != null && list.Count > 0 && list.TrueForAll(s => s.StaffID > 0),
         FormatConflictSummary = (local, server) =>
         {

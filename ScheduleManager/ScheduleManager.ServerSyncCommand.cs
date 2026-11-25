@@ -4,8 +4,12 @@ using System;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
+using System.Windows.Forms;
+using ExcelDna.Integration;
 using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.Integration.Database;
+using SKSB_App.Core.Integration.Erp;
+using SKSB_App.Core.RuntimeUI.DropDown;
 using SKSB_App.Core.Types;
 using SKSB_App.Core.WorkbookOpen.Sync;
 using SKSB_App.Core.WorkbookSave.Storage;
@@ -370,7 +374,18 @@ internal static class ServerSyncCommands
     // =========================================================================
     // 2. FETCH ONE WORKING DATE WITH OFFLINE FALLBACK
     // =========================================================================
-    internal static ScheduleRecord FetchSchedule(DateOnly date)
+    /// <param name="refreshPayrollCalendar">
+    /// True on startup / "Load from System": re-reads the SQL Payroll public holiday calendar (otherwise the session
+    /// cache is reused). Leaves are always read for <paramref name="date"/> only.
+    /// </param>
+    internal static ScheduleRecord FetchSchedule(DateOnly date, bool refreshPayrollCalendar = false)
+    {
+        var record = FetchScheduleCore(date);
+        ApplyPayrollCalendar(record, refreshPayrollCalendar);
+        return record;
+    }
+
+    private static ScheduleRecord FetchScheduleCore(DateOnly date)
     {
         var record = ServerSyncHelper.FetchWithOfflineFallback<ScheduleRecord>(
             $"{Module}.Fetch schedule {date:yyyy-MM-dd}",
@@ -399,6 +414,234 @@ internal static class ServerSyncCommands
         BoardContext.SetProjectSkillRequirements(record.ProjectSkillRequirements);
         Hydrate(record);
         return record;
+    }
+
+    // =========================================================================
+    // 2b. SQL PAYROLL CALENDAR (public holidays + date-scoped leaves)
+    // =========================================================================
+    // Public holidays: SQL Payroll LV_CALENDAR_DAYS (DAYTYPE = 2), cached once per session (refreshed on Load from
+    // System) and mirrored into PostgreSQL public_holidays. Leaves: SQL Payroll LV_APP for the loaded date only,
+    // mirrored into staff_leaves. When SQL Payroll is unreachable both fall back to the PostgreSQL mirror.
+    private static readonly object _calendarSync = new();
+    private static Dictionary<DateOnly, string>? _holidaysByDate;
+    /// <summary>Set when the last calendar refresh could not reach SQL Payroll: leaves then go straight to PostgreSQL.</summary>
+    private static bool _payrollUnreachable;
+    private static bool _holidayAdvisoryShown;
+    private static string? _pendingHolidayAdvisory;
+
+    /// <summary>Sets <see cref="ScheduleRecord.IsHoliday"/> / <see cref="ScheduleRecord.HolidayDescription"/> / <see cref="ScheduleRecord.Leaves"/>.</summary>
+    private static void ApplyPayrollCalendar(ScheduleRecord record, bool refreshHolidays)
+    {
+        DateOnly date = record.DailyScheduleDate;
+        try
+        {
+            EnsurePublicHolidays(force: refreshHolidays);
+
+            Dictionary<DateOnly, string>? holidays;
+            lock (_calendarSync) holidays = _holidaysByDate;
+            if (holidays != null)
+            {
+                record.IsHoliday = holidays.TryGetValue(date, out string? description);
+                record.HolidayDescription = record.IsHoliday ? (description ?? string.Empty) : string.Empty;
+
+                if (ServerEnvironment.IsOnline)
+                {
+                    try { ServerDispatcher.UpdateScheduleHolidayFlag(date, record.IsHoliday); }
+                    catch (Exception ex) { AppLogger.Warn($"[{Module}] daily_schedule_settings.is_holiday update failed: {ex.Message}"); }
+                }
+            }
+            // holidays == null: neither SQL Payroll nor PostgreSQL answered -> keep the offline snapshot's values.
+
+            var leaves = FetchLeavesForDate(date);
+            if (leaves != null) record.Leaves = leaves;
+            foreach (var l in record.Leaves) l.MappedStatus = PayrollLeaveMapper.MapLeaveType(l.LeaveType);
+
+            AppLogger.Info($"[{Module}] Payroll calendar {date:yyyy-MM-dd}: holiday={record.IsHoliday}" +
+                $"{(record.IsHoliday ? $" ({record.HolidayDescription})" : string.Empty)}, leaves={record.Leaves.Count}.");
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn($"[{Module}] Applying SQL Payroll calendar for {date:yyyy-MM-dd} failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>Loads the public holiday cache (SQL Payroll first, PostgreSQL mirror second) when empty or forced.</summary>
+    private static void EnsurePublicHolidays(bool force)
+    {
+        lock (_calendarSync)
+        {
+            if (!force && _holidaysByDate != null) return;
+        }
+
+        // Online Mode only, like the Staff Manager payroll sync (respects ServerEnvironment.SimulateOffline).
+        if (!ServerEnvironment.IsOnline) return;
+
+        try
+        {
+            var rows = new FirebirdPayrollService().FetchPublicHolidays();
+            var map = rows
+                .GroupBy(h => h.HolidayDate)
+                .ToDictionary(g => g.Key, g => (g.OrderByDescending(h => h.AutoKey).First().Description ?? string.Empty).Trim());
+            lock (_calendarSync)
+            {
+                _holidaysByDate = map;
+                _payrollUnreachable = false;
+            }
+
+            try { ServerDispatcher.UpsertPublicHolidays(rows); }
+            catch (Exception ex) { AppLogger.Warn($"[{Module}] public_holidays mirror failed: {ex.Message}"); }
+
+            int year = DateTime.Today.Year;
+            if (!map.Keys.Any(d => d.Year == year))
+            {
+                string advisory =
+                    $"SQL Payroll has no public holidays for {year}.\n\n" +
+                    "'Is Holiday' on the Daily Schedule is evaluated from the SQL Payroll calendar, so no day this year will be " +
+                    "marked as a holiday until it is maintained.\n\n" +
+                    $"HR: in SQL Payroll, open Leave -> Maintain Calendar and enter the {year} public holidays, then click 'Load from System'.";
+                AppLogger.Warn($"[{Module}] SQL Payroll LV_CALENDAR_DAYS has 0 public holidays for {year}.");
+                lock (_calendarSync)
+                {
+                    if (!_holidayAdvisoryShown) _pendingHolidayAdvisory = advisory;
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn($"[{Module}] SQL Payroll public holidays unavailable, using PostgreSQL public_holidays: {ex.Message}");
+            var fallback = QueryHolidaysFromDb();
+            lock (_calendarSync)
+            {
+                _payrollUnreachable = true;
+                if (fallback != null) _holidaysByDate = fallback;
+            }
+        }
+    }
+
+    private static Dictionary<DateOnly, string>? QueryHolidaysFromDb()
+    {
+        try
+        {
+            ServerDispatcher.EnsureScheduleSchema();
+            var map = new Dictionary<DateOnly, string>();
+            foreach (var r in new PostgreSqlService().Query<dynamic>("SELECT holiday_date, COALESCE(description, '') AS description FROM public_holidays;"))
+            {
+                DateOnly? d = Date(r.holiday_date);
+                if (d.HasValue) map[d.Value] = Text(r.description).Trim();
+            }
+            return map;
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn($"[{Module}] public_holidays query failed: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// Leave days on <paramref name="date"/>: SQL Payroll LV_APP (mirrored into staff_leaves), else the PostgreSQL
+    /// staff_leaves cache. Null when neither answered (the caller keeps the offline snapshot's leaves).
+    /// </summary>
+    private static List<StaffLeaveEntry>? FetchLeavesForDate(DateOnly date)
+    {
+        if (!ServerEnvironment.IsOnline) return null;
+
+        bool skipPayroll;
+        lock (_calendarSync) skipPayroll = _payrollUnreachable;
+
+        if (!skipPayroll)
+        {
+            try
+            {
+                var leaves = new List<StaffLeaveEntry>();
+                foreach (var row in new FirebirdPayrollService().FetchLeavesForDate(date))
+                {
+                    if (!long.TryParse((row.Code ?? string.Empty).Trim(), NumberStyles.Integer, CultureInfo.InvariantCulture, out long staffId) || staffId <= 0)
+                    {
+                        AppLogger.Warn($"[{Module}] SQL Payroll leave DOCKEY {row.DocKey}: employee code '{row.Code}' is not a Staff ID (skipped).");
+                        continue;
+                    }
+                    leaves.Add(new StaffLeaveEntry
+                    {
+                        DocKey = row.DocKey,
+                        StaffID = staffId,
+                        LeaveDate = row.LeaveDate,
+                        LeaveType = row.LeaveType,
+                        LeaveDay = row.LeaveDay,
+                        Description = row.Description,
+                        MappedStatus = PayrollLeaveMapper.MapLeaveType(row.LeaveType)
+                    });
+                }
+
+                try { ServerDispatcher.ReplaceLeavesForDate(date, leaves); }
+                catch (Exception ex) { AppLogger.Warn($"[{Module}] staff_leaves mirror for {date:yyyy-MM-dd} failed: {ex.Message}"); }
+                return leaves;
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Warn($"[{Module}] SQL Payroll leaves for {date:yyyy-MM-dd} unavailable, using PostgreSQL staff_leaves: {ex.Message}");
+                lock (_calendarSync) _payrollUnreachable = true;
+            }
+        }
+
+        try
+        {
+            ServerDispatcher.EnsureScheduleSchema();
+            var cached = new List<StaffLeaveEntry>();
+            foreach (var r in new PostgreSqlService().Query<dynamic>(
+                "SELECT payroll_dockey, staff_id, leave_date, leave_type, leave_day, COALESCE(description, '') AS description FROM staff_leaves WHERE leave_date = @D ORDER BY staff_id, payroll_dockey;",
+                new { D = date.ToDateTime(TimeOnly.MinValue) }))
+            {
+                string type = Text(r.leave_type).Trim();
+                cached.Add(new StaffLeaveEntry
+                {
+                    DocKey = r.payroll_dockey != null ? Convert.ToInt64(r.payroll_dockey) : 0,
+                    StaffID = Convert.ToInt64(r.staff_id),
+                    LeaveDate = date,
+                    LeaveType = type,
+                    LeaveDay = ServerSyncHelper.Dec(r.leave_day),
+                    Description = Text(r.description).Trim(),
+                    MappedStatus = PayrollLeaveMapper.MapLeaveType(type)
+                });
+            }
+            return cached;
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn($"[{Module}] staff_leaves query for {date:yyyy-MM-dd} failed: {ex.Message}");
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// After-load hook (macro thread, Excel state already restored): shows the "no public holidays this year"
+    /// advisory once per session. Informational only; the loaded schedule is unaffected.
+    /// </summary>
+    internal static void ShowPendingHolidayAdvisory()
+    {
+        string? advisory;
+        lock (_calendarSync)
+        {
+            advisory = _pendingHolidayAdvisory;
+            _pendingHolidayAdvisory = null;
+            if (advisory != null) _holidayAdvisoryShown = true;
+        }
+        if (advisory == null) return;
+
+        try
+        {
+            // Modal dialog exception (CLAUDE.md Rule 5.2): Excel must repaint & respond while the dialog is open.
+            dynamic xlApp = ExcelDnaUtil.Application;
+            try { xlApp.ScreenUpdating = true; } catch { }
+            try { xlApp.EnableEvents = true; } catch { }
+            try { Arrow.HideAll(); } catch { }
+
+            MessageBox.Show(advisory, "Schedule Manager - SQL Payroll Calendar", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn($"[{Module}] Holiday advisory failed: {ex.Message}");
+        }
     }
 
     /// <summary>

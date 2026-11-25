@@ -162,6 +162,61 @@ internal static class ScheduleBoardMapper
         ws.Range[DayCell].Value2 = DayName(date);
     }
 
+    private const string IsHolidayHeader = "Is Holiday";
+    private const int IsHolidayScanColumns = 26; // A1:Z1
+
+    /// <summary>
+    /// Writes the SQL Payroll public-holiday flag under the Row 1 "Is Holiday" header (A1:Z1, case-insensitive) of
+    /// <paramref name="ws"/> ('Daily Schedule' / 'Daily Attendances'): TRUE / FALSE in Row 2, the holiday description
+    /// as a cell comment, and a read-only <c>=FALSE</c> validation (auto-evaluated, never typed). No-op when the sheet
+    /// has no such header. Call inside the caller's Excel freeze (macro thread); never selects or activates.
+    /// </summary>
+    internal static void WriteIsHolidayCell(dynamic ws, bool isHoliday, string holidayDescription)
+    {
+        try
+        {
+            object[,] header = TableMapper.GetRange2DValues(ws.Range["A1"].Resize[1, IsHolidayScanColumns], 1, IsHolidayScanColumns);
+            int r0 = header.GetLowerBound(0), c0 = header.GetLowerBound(1);
+            int column = 0;
+            for (int c = 0; c < IsHolidayScanColumns; c++)
+            {
+                string text = (Convert.ToString(header[r0, c0 + c], CultureInfo.InvariantCulture) ?? string.Empty).Trim();
+                if (text.Equals(IsHolidayHeader, StringComparison.OrdinalIgnoreCase)) { column = c + 1; break; }
+            }
+            if (column == 0)
+            {
+                string sheetName = string.Empty;
+                try { sheetName = Convert.ToString(ws.Name) ?? string.Empty; } catch { }
+                AppLogger.Info($"[ScheduleManager] '{sheetName}' has no '{IsHolidayHeader}' header in A1:Z1; holiday flag not written.");
+                return;
+            }
+
+            dynamic cell = ws.Cells[2, column];
+            cell.Value2 = isHoliday;
+
+            try { cell.ClearComments(); } catch { }
+            if (isHoliday)
+            {
+                string note = string.IsNullOrWhiteSpace(holidayDescription) ? "Public holiday" : holidayDescription.Trim();
+                try { cell.AddComment($"{note}\n(SQL Payroll calendar)"); } catch { }
+            }
+
+            // Read-only: auto-evaluated from SQL Payroll (template locking convention: custom validation "=FALSE").
+            try
+            {
+                cell.Validation.Delete();
+                cell.Validation.Add(7 /* xlValidateCustom */, 1 /* xlValidAlertStop */, 1 /* xlBetween */, "=FALSE");
+                cell.Validation.ErrorTitle = IsHolidayHeader;
+                cell.Validation.ErrorMessage = "Is Holiday is set automatically from the SQL Payroll calendar (Leave -> Maintain Calendar).";
+            }
+            catch { }
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn($"[ScheduleManager] Writing '{IsHolidayHeader}' failed: {ex.Message}");
+        }
+    }
+
     /// <summary>English day name (Monday..Sunday) - exactly the values of the <see cref="Days"/> enum list that backs the B2 dropdown.</summary>
     internal static string DayName(DateOnly date) => date.DayOfWeek.ToString();
 
@@ -887,7 +942,7 @@ internal static class ScheduleBoardMapper
         }
     }
 
-    private static string ColumnLetter(int column)
+    internal static string ColumnLetter(int column)
     {
         var sb = new StringBuilder();
         for (int c = column; c > 0; c = (c - 1) / 26) sb.Insert(0, (char)('A' + ((c - 1) % 26)));

@@ -61,7 +61,10 @@ public class Events : ManagerEventsBase<ScheduleRecord>
         PopulateWorksheet = schedule => SheetMapper.PopulateWorksheet(schedule),
         // Post-save: board + daily attendance only; never rewrites the 10k+ row AttendanceEntriesTable.
         RefreshAfterSave = schedule => SheetMapper.RefreshAfterSave(schedule),
-        FetchFromServer = () => ServerSyncCommands.FetchSchedule(CurrentDate()),
+        // Startup / "Load from System": also refreshes the SQL Payroll public holiday calendar for the session.
+        FetchFromServer = () => ServerSyncCommands.FetchSchedule(CurrentDate(), refreshPayrollCalendar: true),
+        // One-time advisory when SQL Payroll has no public holidays for the current year.
+        OnAfterLoad = ServerSyncCommands.ShowPendingHolidayAdvisory,
         ValidateOfflinePayload = schedule => schedule != null && schedule.DailyScheduleDate.Year > 2000,
         ConfirmBeforeSave = ConfirmPastSave,
         FormatConflictSummary = (local, server) =>

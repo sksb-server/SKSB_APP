@@ -5,8 +5,12 @@ using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
 using System.Text;
+using ExcelDna.Integration;
 using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.Integration.Database;
+using SKSB_App.Core.Integration.Erp;
+using SKSB_App.Core.RuntimeUI.DropDown;
+using SKSB_App.Core.RuntimeUI.Progress;
 using SKSB_App.Core.RuntimeUI.RuleEngine;
 using SKSB_App.Core.Types;
 using SKSB_App.Core.Types.Attributes;
@@ -36,6 +40,8 @@ public static class ServerSyncCommands
     private static readonly TableBaseline<long> StaffBaseline = new();
     private static readonly TableBaseline<long> VehicleLicenseBaseline = new();
     private static readonly TableBaseline<long> SkillLicenseBaseline = new();
+    private static readonly TableBaseline<long> StaffSalaryBaseline = new();
+    private static readonly TableBaseline<long> StaffLeaveBaseline = new();
 
     private static string Norm(string? s) => (s ?? string.Empty).Trim();
     private static string Norm(DateOnly d) => d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
@@ -76,11 +82,30 @@ public static class ServerSyncCommands
         l.SkillLicenseStatus.ToString(),
         Norm(l.Cost));
 
+    private static string StaffSalaryFingerprint(StaffSalary s) => string.Join("\u001F",
+        s.SalaryID.ToString(CultureInfo.InvariantCulture),
+        s.StaffID.ToString(CultureInfo.InvariantCulture),
+        Norm(s.EffectiveDate),
+        s.SalaryBefore.HasValue ? Norm(s.SalaryBefore.Value) : string.Empty,
+        s.SalaryBasis.ToString(),
+        Norm(s.SalaryRate),
+        Norm(s.Remarks));
+
+    private static string StaffLeaveFingerprint(StaffLeave l) => string.Join("\u001F",
+        l.LeaveID.ToString(CultureInfo.InvariantCulture),
+        l.StaffID.ToString(CultureInfo.InvariantCulture),
+        Norm(l.LeaveDate),
+        Norm(l.LeaveType),
+        Norm(l.LeaveDay),
+        Norm(l.Description));
+
     private static void CaptureBaselines(List<StaffRecord> serverList)
     {
         StaffBaseline.Capture(serverList, s => s.StaffID, StaffFingerprint, s => s.ServerUpdatedAt);
         VehicleLicenseBaseline.Capture(serverList.SelectMany(s => s.VehicleLicenses), l => l.VehicleLicenseID, VehicleLicenseFingerprint, l => l.ServerUpdatedAt);
         SkillLicenseBaseline.Capture(serverList.SelectMany(s => s.SkillLicenses), l => l.SkillLicenseID, SkillLicenseFingerprint, l => l.ServerUpdatedAt);
+        StaffSalaryBaseline.Capture(serverList.SelectMany(s => s.Salaries), w => w.SalaryID, StaffSalaryFingerprint, w => w.ServerUpdatedAt);
+        StaffLeaveBaseline.Capture(serverList.SelectMany(s => s.Leaves), l => l.LeaveID, StaffLeaveFingerprint, l => l.ServerUpdatedAt);
     }
 
     /// <summary>
@@ -139,6 +164,9 @@ public static class ServerSyncCommands
             {
                 foreach (var l in s.VehicleLicenses) if (l.StaffID == 0) l.StaffID = s.StaffID;
                 foreach (var l in s.SkillLicenses) if (l.StaffID == 0) l.StaffID = s.StaffID;
+                foreach (var w in s.Salaries) if (w.StaffID == 0) w.StaffID = s.StaffID;
+                foreach (var l in s.Leaves) if (l.StaffID == 0) l.StaffID = s.StaffID;
+                s.ResolveSalaryBeforeBases(); // display-only basis is not round-tripped through the sheet
             }
 
             var payload = new StaffDeltaPayload
@@ -150,6 +178,12 @@ public static class ServerSyncCommands
                 SkillLicenses = SkillLicenseBaseline.Diff(
                     staffList.SelectMany(s => s.SkillLicenses).Where(l => l.StaffID > 0 && !string.IsNullOrWhiteSpace(l.SkillLicenseType)),
                     l => l.SkillLicenseID, SkillLicenseFingerprint),
+                Salaries = StaffSalaryBaseline.Diff(
+                    staffList.SelectMany(s => s.Salaries).Where(w => w.StaffID > 0 && w.SalaryRate > 0m && w.SalaryBasis != SalaryBasis.None),
+                    w => w.SalaryID, StaffSalaryFingerprint),
+                Leaves = StaffLeaveBaseline.Diff(
+                    staffList.SelectMany(s => s.Leaves).Where(l => l.LeaveID > 0 && l.StaffID > 0),
+                    l => l.LeaveID, StaffLeaveFingerprint),
                 SkillLicenseTypes = skillTypes
             };
 
@@ -218,8 +252,136 @@ public static class ServerSyncCommands
             return db.Query<SkillLicenseType>(querySql)?.ToList() ?? new List<SkillLicenseType>();
         });
 
-    public static List<StaffRecord>? FetchStaffRecords() =>
-        ServerSyncHelper.FetchAuthoritativeList("StaffManager", "StaffRecord (all staff tables)", QueryStaffRecords);
+    // =========================================================================
+    // 2b. LOAD (PostgreSQL baseline + optional SQL Payroll resync)
+    // =========================================================================
+    /// <summary>Advisory report of the last SQL Payroll sync, shown once after the sheets were populated.</summary>
+    private static ImportSummaryReport? _pendingPayrollReport;
+    private static readonly object _reportSync = new();
+
+    /// <summary>Startup / "Load from System" entry point: PostgreSQL baseline merged with a live SQL Payroll resync.</summary>
+    public static List<StaffRecord>? FetchAndSyncFromPayroll() => FetchStaffRecords(syncFromPayroll: true);
+
+    /// <summary>
+    /// Loads staff from PostgreSQL (or the offline snapshot). With <paramref name="syncFromPayroll"/> and Online Mode,
+    /// profiles and salary history are then rebuilt from SQL Payroll (licenses / IDs / concurrency tokens kept from
+    /// PostgreSQL); if SQL Payroll is unreachable the PostgreSQL copy is returned with an advisory queued.
+    /// </summary>
+    public static List<StaffRecord>? FetchStaffRecords(bool syncFromPayroll = false)
+    {
+        var pgRecords = ServerSyncHelper.FetchAuthoritativeList("StaffManager", "StaffRecord (all staff tables)", QueryStaffRecords);
+        if (pgRecords != null)
+        {
+            foreach (var s in pgRecords) s.RefreshCurrentSalary();
+        }
+
+        if (!syncFromPayroll || !ServerEnvironment.IsOnline)
+        {
+            if (pgRecords != null) RegisterSalarySchedules(pgRecords);
+            return pgRecords;
+        }
+
+        List<StaffRecord> merged;
+        try
+        {
+            LoadingOverlay.Report("Reading SQL Payroll (HR_EMP & salary history)...");
+            var sync = Importer.SyncFromSqlPayroll(pgRecords);
+            merged = sync.ImportedStaffs;
+            SetPendingReport(sync.ToGenericReport());
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error("[StaffManager] SQL Payroll sync failed; falling back to PostgreSQL records", ex);
+            merged = pgRecords ?? new List<StaffRecord>();
+            SetPendingReport(new ImportSummaryReport
+            {
+                SourceSystemName = "SQL Payroll",
+                EntityLabel = "staff profile(s) (from PostgreSQL)",
+                SuccessfullyImportedCount = merged.Count,
+                FilterRuleDescription = "SQL Payroll was unreachable; showing the last records saved in PostgreSQL.",
+                AdvisoryBanner = StaffImportResult.AdvisoryBannerText,
+                SkippedSectionTitle = "Advisories (Warnings)",
+                Title = "SQL Payroll Unreachable",
+                FooterHint = "Check that the SQL Payroll PC is on and reachable, then click 'Load from System' to resync.",
+                SkippedErrors = new List<ImportSkippedRecord>
+                {
+                    new()
+                    {
+                        Category = "SQL Payroll",
+                        Identifier = FirebirdPayrollService.PrimaryHost,
+                        NameOrTitle = "SQL Payroll Database",
+                        Reason = $"SQL Payroll could not be reached, so staff profiles and salaries were NOT resynced and may be out of date. ({ex.Message})"
+                    }
+                }
+            });
+        }
+
+        RegisterSalarySchedules(merged);
+        return merged;
+    }
+
+    private static void SetPendingReport(ImportSummaryReport? report)
+    {
+        lock (_reportSync) _pendingPayrollReport = report;
+    }
+
+    /// <summary>
+    /// After-load hook (macro thread, Excel state already restored): consumes the pending SQL Payroll report and shows
+    /// it when it carries any warnings / errors.
+    /// </summary>
+    public static void ShowPendingPayrollAdvisory()
+    {
+        ImportSummaryReport? report;
+        lock (_reportSync)
+        {
+            report = _pendingPayrollReport;
+            _pendingPayrollReport = null;
+        }
+        if (report == null || report.SkippedErrors.Count == 0) return;
+
+        try
+        {
+            // Modal dialog exception (CLAUDE.md Rule 5.2): Excel must repaint & respond while the dialog is open.
+            dynamic xlApp = ExcelDnaUtil.Application;
+            try { xlApp.ScreenUpdating = true; } catch { }
+            try { xlApp.EnableEvents = true; } catch { }
+            try { Arrow.HideAll(); } catch { }
+
+            using var dialog = new ImportResultDialog(report, "SQL Payroll (PAY-0003.FDB) + Thumbprint Controller");
+            dialog.ShowDialog();
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn($"[StaffManager] Payroll advisory dialog failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>
+    /// Registers every staff salary schedule (hourly rate by effective date) into the staged <see cref="WageProvider"/>
+    /// for WAGE_RATE(...) lookups.
+    /// </summary>
+    private static void RegisterSalarySchedules(List<StaffRecord> staffList)
+    {
+        try
+        {
+            WageProvider.ClearSchedules();
+            foreach (var s in staffList)
+            {
+                var schedule = new Dictionary<DateTime, double>();
+                foreach (var w in s.Salaries.Where(w => w.SalaryRate > 0m).OrderBy(w => w.EffectiveDate).ThenBy(w => w.SalaryID))
+                    schedule[w.EffectiveDate.ToDateTime(TimeOnly.MinValue)] = (double)decimal.Round(w.GetHourlyRateExact(), 4);
+                if (schedule.Count == 0) continue;
+
+                foreach (string key in new[] { s.StaffDetails.StaffName, s.StaffDetails.StaffShortName, s.StaffID.ToString(CultureInfo.InvariantCulture) }
+                             .Where(k => !string.IsNullOrWhiteSpace(k)).Distinct(StringComparer.OrdinalIgnoreCase))
+                    WageProvider.RegisterWorkerWages(key, schedule);
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn($"[StaffManager] Registering salary schedules failed: {ex.Message}");
+        }
+    }
 
     /// <summary>Assembles every staff profile (master + licenses) from PostgreSQL. An empty server returns an empty list.</summary>
     private static List<StaffRecord> QueryStaffRecords(PostgreSqlService db)
@@ -227,6 +389,8 @@ public static class ServerSyncCommands
         const string sqlStaffs = "SELECT * FROM staff_master ORDER BY staff_id;";
         const string sqlVehicleLicenses = "SELECT * FROM staff_vehicle_licenses ORDER BY vehicle_license_id;";
         const string sqlSkillLicenses = "SELECT * FROM staff_skill_licenses ORDER BY skill_license_id;";
+        const string sqlSalaries = "SELECT * FROM staff_salaries ORDER BY staff_id, effective_date, salary_id;";
+        const string sqlLeaves = "SELECT * FROM staff_leaves WHERE payroll_dockey IS NOT NULL ORDER BY staff_id, leave_date DESC, payroll_dockey DESC;";
 
         var rawStaffs = db.Query<dynamic>(sqlStaffs)?.ToList();
         if (rawStaffs != null && rawStaffs.Count > 0)
@@ -258,7 +422,50 @@ public static class ServerSyncCommands
                 }
             }
 
+            // staff_salaries is created lazily on the first staff save: tolerate its absence on first load.
+            int salaryCount = 0;
+            try
+            {
+                var salaries = db.Query<dynamic>(sqlSalaries)?.ToList() ?? new List<dynamic>();
+                foreach (var sr in salaries)
+                {
+                    long sid = (long)sr.staff_id;
+                    if (staffs.TryGetValue(sid, out var staff))
+                    {
+                        staff.Salaries.Add(MapStaffSalaryRow((object)sr, staff.StaffDetails.StaffName));
+                        salaryCount++;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Warn($"[StaffManager] staff_salaries not loaded (table may not exist yet): {ex.Message}");
+            }
+
+            // staff_leaves is created lazily (Schedule or Staff save): tolerate its absence on first load.
+            int leaveCount = 0;
+            try
+            {
+                var leaves = db.Query<dynamic>(sqlLeaves)?.ToList() ?? new List<dynamic>();
+                foreach (var lr in leaves)
+                {
+                    long sid = Convert.ToInt64(lr.staff_id);
+                    if (staffs.TryGetValue(sid, out var staff))
+                    {
+                        var leave = MapStaffLeaveRow((object)lr, staff.StaffDetails.StaffName);
+                        if (leave.LeaveID <= 0) continue;
+                        staff.Leaves.Add(leave);
+                        leaveCount++;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Warn($"[StaffManager] staff_leaves not loaded (table may not exist yet): {ex.Message}");
+            }
+
             var assembledList = staffs.Values.ToList();
+            foreach (var s in assembledList) s.RefreshCurrentSalary();
 
 #if DEBUG
             var sb = new StringBuilder();
@@ -266,6 +473,8 @@ public static class ServerSyncCommands
             sb.AppendLine($"Total Staff Profiles   : {assembledList.Count}");
             sb.AppendLine($"Total Vehicle Licenses : {vehicleLicenses.Count}");
             sb.AppendLine($"Total Skill Licenses   : {skillLicenses.Count}");
+            sb.AppendLine($"Total Salary Rows      : {salaryCount}");
+            sb.AppendLine($"Total Staff Leaves     : {leaveCount}");
             sb.AppendLine();
             foreach (var s in assembledList)
             {
@@ -357,6 +566,33 @@ public static class ServerSyncCommands
         ServerUpdatedAt = ToUtcDateTime(ServerSyncHelper.Col((object)sl, "updated_at"))
     };
 
+    private static StaffSalary MapStaffSalaryRow(dynamic sr, string staffName) => new StaffSalary
+    {
+        SalaryID = sr.salary_id != null ? Convert.ToInt64(sr.salary_id) : 0,
+        StaffID = Convert.ToInt64(sr.staff_id),
+        StaffName = staffName,
+        EffectiveDate = sr.effective_date != null ? DateOnly.FromDateTime((DateTime)sr.effective_date) : DateOnly.FromDateTime(DateTime.Today),
+        SalaryBefore = sr.salary_before != null ? Convert.ToDecimal(sr.salary_before) : (decimal?)null,
+        SalaryBeforeBasis = Enum.TryParse<SalaryBasis>((string)(sr.salary_before_basis ?? "None"), true, out SalaryBasis bb) ? bb : SalaryBasis.None,
+        SalaryBasis = Enum.TryParse<SalaryBasis>((string)(sr.salary_basis ?? "Monthly"), true, out SalaryBasis sb) ? sb : SalaryBasis.Monthly,
+        SalaryRate = sr.salary_rate != null ? Convert.ToDecimal(sr.salary_rate) : 0m,
+        Remarks = (string)(sr.remarks ?? string.Empty),
+        ServerUpdatedAt = ToUtcDateTime(ServerSyncHelper.Col((object)sr, "updated_at"))
+    };
+
+    /// <summary>Maps a <c>staff_leaves</c> row; <see cref="StaffLeave.LeaveID"/> is the SQL Payroll <c>payroll_dockey</c>.</summary>
+    private static StaffLeave MapStaffLeaveRow(dynamic lr, string staffName) => new StaffLeave
+    {
+        LeaveID = lr.payroll_dockey != null ? Convert.ToInt64(lr.payroll_dockey) : 0,
+        StaffID = Convert.ToInt64(lr.staff_id),
+        StaffName = staffName,
+        LeaveDate = lr.leave_date != null ? DateOnly.FromDateTime((DateTime)lr.leave_date) : DateOnly.FromDateTime(DateTime.Today),
+        LeaveType = PayrollLeaveMapper.MapStatus((string)(lr.leave_type ?? string.Empty)).ToString(),
+        LeaveDay = lr.leave_day != null ? Convert.ToDecimal(lr.leave_day) : 1m,
+        Description = (string)(lr.description ?? string.Empty),
+        ServerUpdatedAt = ToUtcDateTime(ServerSyncHelper.Col((object)lr, "updated_at"))
+    };
+
     // =========================================================================
     // 3. CONCURRENCY CONFLICT RESOLUTION ("Keep Server Values")
     // =========================================================================
@@ -384,6 +620,8 @@ public static class ServerSyncCommands
         long[] staffIds = IdsFor(conflicts, "staff_master");
         long[] vehicleIds = IdsFor(conflicts, "staff_vehicle_licenses");
         long[] skillIds = IdsFor(conflicts, "staff_skill_licenses");
+        long[] salaryIds = IdsFor(conflicts, "staff_salaries");
+        long[] leaveIds = IdsFor(conflicts, "staff_leaves");
         int refreshed = 0;
 
         try
@@ -420,8 +658,28 @@ public static class ServerSyncCommands
                 }
             }
 
+            if (salaryIds.Length > 0)
+            {
+                foreach (var sr in db.Query<dynamic>("SELECT * FROM staff_salaries WHERE salary_id = ANY(@Ids);", new { Ids = salaryIds }))
+                {
+                    StaffSalary s = MapStaffSalaryRow((object)sr, string.Empty);
+                    StaffSalaryBaseline.UpsertEntry(s.SalaryID, StaffSalaryFingerprint(s), s.ServerUpdatedAt);
+                    refreshed++;
+                }
+            }
+
+            if (leaveIds.Length > 0)
+            {
+                foreach (var lr in db.Query<dynamic>("SELECT * FROM staff_leaves WHERE payroll_dockey = ANY(@Ids);", new { Ids = leaveIds }))
+                {
+                    StaffLeave l = MapStaffLeaveRow((object)lr, string.Empty);
+                    StaffLeaveBaseline.UpsertEntry(l.LeaveID, StaffLeaveFingerprint(l), l.ServerUpdatedAt);
+                    refreshed++;
+                }
+            }
+
             AppLogger.Info($"[StaffManager] Keep Server Values: refreshed {refreshed} conflict baseline(s) " +
-                $"(staff {staffIds.Length}, vehicle lic {vehicleIds.Length}, skill lic {skillIds.Length}).");
+                $"(staff {staffIds.Length}, vehicle lic {vehicleIds.Length}, skill lic {skillIds.Length}, salaries {salaryIds.Length}, leaves {leaveIds.Length}).");
         }
         catch (Exception ex)
         {
@@ -432,33 +690,6 @@ public static class ServerSyncCommands
     // =========================================================================
     // STAFF SUMMARY (READ-ONLY FETCHES)
     // =========================================================================
-    public static Dictionary<long, string> FetchWorkerPrimarySkills()
-    {
-        var result = new Dictionary<long, string>();
-        if (ServerEnvironment.IsOnline)
-        {
-            try
-            {
-                var rows = new PostgreSqlService().Query<dynamic>(
-                    "SELECT staff_id, COALESCE(primary_skill, '') AS primary_skill FROM worker_preferences WHERE COALESCE(trim(primary_skill), '') <> '';");
-                foreach (var r in rows)
-                    result[Convert.ToInt64(r.staff_id)] = ((string)(r.primary_skill ?? string.Empty)).Trim();
-                return result;
-            }
-            catch (Exception ex)
-            {
-                AppLogger.Warn($"[StaffManager] worker_preferences query failed: {ex.Message}");
-                if (!ServerEnvironment.IsOffline) return result;
-            }
-        }
-
-        var prefs = OfflineSnapshot.Load<ScheduleRecord>()?.Preferences;
-        if (prefs != null)
-            foreach (var p in prefs)
-                if (!string.IsNullOrWhiteSpace(p.PrimarySkill)) result[p.StaffID] = p.PrimarySkill.Trim();
-        return result;
-    }
-
     private static string FormatClock(TimeOnly? t) => t.HasValue ? t.Value.ToString("HH:mm") : "—";
 
     private static string FormatTimeRange(TimeOnly? inT, TimeOnly? outT) =>
@@ -530,7 +761,7 @@ public static class ServerSyncCommands
                         FlattenHours = a.total_flattened_hours != null ? Convert.ToDecimal(a.total_flattened_hours) : 0m
                     });
                 }
-                return rows;
+                return ApplySalaryRates(staff, rows);
             }
             catch (Exception ex)
             {
@@ -561,6 +792,19 @@ public static class ServerSyncCommands
                 FlattenHours = w.TotalFlattenedHours
             });
         }
-        return rows.OrderByDescending(r => r.Date).ToList();
+        return ApplySalaryRates(staff, rows.OrderByDescending(r => r.Date).ToList());
+    }
+
+    /// <summary>Resolves the salary effective on each row's date: hourly Salary Rate and Flatten Hours x rate.</summary>
+    private static List<StaffSummaryRow> ApplySalaryRates(StaffRecord staff, List<StaffSummaryRow> rows)
+    {
+        foreach (var row in rows)
+        {
+            var salary = staff.GetEffectiveSalary(row.Date);
+            decimal hourly = salary?.GetHourlyRateExact() ?? 0m;
+            row.SalaryRate = salary != null ? decimal.Round(hourly, 2) : null;
+            row.TotalSalary = salary != null ? decimal.Round(row.FlattenHours * hourly, 2) : null;
+        }
+        return rows;
     }
 }

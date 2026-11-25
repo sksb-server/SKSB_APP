@@ -10,7 +10,6 @@ using SKSB_App.Core.RuntimeUI.RuleEngine;
 using SKSB_App.Core.Types;
 using SKSB_App.Core.WorkbookOpen.Sheet;
 using SKSB_App.Core.WorkbookSave.SheetMapper;
-using SKSB_App.Core.WorkbookSave.Storage;
 
 public static partial class SheetMapper
 {
@@ -22,71 +21,20 @@ public static partial class SheetMapper
     private static readonly string[] SummaryTableFallbackNames = { "StaffSummaryTable", "SkillLicensesTable58" };
     private const string SummaryStaffIdCell = "A2";
     private const string SummaryStaffNameCell = "B2";
-    private const string SummaryPrimarySkillCell = "C2";
+    private const string SummaryDepartmentCell = "C2";
 
     private static List<StaffRecord> _summaryStaffCache = new();
-    private static Dictionary<long, string> _primarySkillsByStaffId = new();
-    private static Dictionary<string, string> _skillIcons = new(StringComparer.OrdinalIgnoreCase);
 
     private static readonly Action<dynamic, dynamic> _summaryObserver = OnSummarySheetChanged;
     private static bool _summaryHooked;
     private static bool _isRefreshingSummary;
     private static bool _summaryChangeQueued;
-    private static string _pendingSummarySource = SummaryPrimarySkillCell;
+    private static string _pendingSummarySource = SummaryDepartmentCell;
 
     // =========================================================================
-    // 2. SKILL ICON HELPERS
+    // 2. DEPARTMENT HELPERS
     // =========================================================================
-    private static string FormatSkillWithIcon(string? skill)
-    {
-        string s = (skill ?? string.Empty).Trim();
-        if (s.Length == 0) return string.Empty;
-        return _skillIcons.TryGetValue(s, out var icon) && !string.IsNullOrWhiteSpace(icon) ? $"{icon} {s}" : s;
-    }
-
-    private static string StripSkillIcon(string? text)
-    {
-        string t = (text ?? string.Empty).Trim();
-        if (t.Length == 0) return string.Empty;
-
-        foreach (var kv in _skillIcons)
-        {
-            if (string.IsNullOrWhiteSpace(kv.Value)) continue;
-            if (t.Equals($"{kv.Value} {kv.Key}", StringComparison.OrdinalIgnoreCase)) return kv.Key;
-        }
-
-        int space = t.IndexOf(' ');
-        if (space > 0 && t.Take(space).Any(c => c > 127)) return t[(space + 1)..].Trim();
-        return t;
-    }
-
-    private static void RebuildSkillIcons()
-    {
-        var map = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        foreach (var kv in SkillCatalog.VehicleLicenseRoleIcons) map[kv.Key] = kv.Value;
-        map[SkillCatalog.GeneralWorker] = SkillCatalog.GeneralWorkerIcon;
-
-        try
-        {
-            foreach (var t in ServerSyncCommands.FetchSkillLicenseTypesFromDb() ?? new List<SkillLicenseType>())
-                if (!string.IsNullOrWhiteSpace(t.SkillLicenseName) && !string.IsNullOrWhiteSpace(t.DisplayIcon))
-                    map[t.SkillLicenseName.Trim()] = t.DisplayIcon.Trim();
-        }
-        catch { }
-
-        try
-        {
-            foreach (var s in OfflineSnapshot.Load<ScheduleRecord>()?.Skills ?? new List<ScheduleSkillRecord>())
-                if (!string.IsNullOrWhiteSpace(s.SkillName) && !string.IsNullOrWhiteSpace(s.DisplayIcon))
-                    map[s.SkillName.Trim()] = s.DisplayIcon.Trim();
-        }
-        catch { }
-
-        _skillIcons = map;
-    }
-
-    private static string PrimarySkillOf(StaffRecord staff) =>
-        _primarySkillsByStaffId.TryGetValue(staff.StaffID, out var s) ? s : string.Empty;
+    private static string DepartmentOf(StaffRecord staff) => (staff.StaffDetails?.Department ?? string.Empty).Trim();
 
     // =========================================================================
     // 3. CONTEXT INITIALISATION (populate-time)
@@ -96,8 +44,6 @@ public static partial class SheetMapper
         try
         {
             _summaryStaffCache = (masters ?? new List<StaffRecord>()).Where(s => s.StaffID > 0).OrderBy(s => s.StaffID).ToList();
-            _primarySkillsByStaffId = ServerSyncCommands.FetchWorkerPrimarySkills();
-            RebuildSkillIcons();
 
             dynamic? ws = SheetMapperHelper.ResolveSheetSafely(wbObj, SummarySheetAliases, "Staff Summary");
             if (ws == null) return;
@@ -123,8 +69,6 @@ public static partial class SheetMapper
             if (list == null || list.Count == 0) list = ServerSyncCommands.FetchStaffRecords();
             if (list != null)
                 _summaryStaffCache = list.Where(s => s.StaffID > 0).OrderBy(s => s.StaffID).ToList();
-            if (_primarySkillsByStaffId.Count == 0) _primarySkillsByStaffId = ServerSyncCommands.FetchWorkerPrimarySkills();
-            if (_skillIcons.Count == 0) RebuildSkillIcons();
         }
         catch (Exception ex)
         {
@@ -144,11 +88,11 @@ public static partial class SheetMapper
         CustomDropdowns.Register(c => IsSummaryCell(c, SummaryStaffIdCell), _ =>
         {
             EnsureSummaryCache();
-            // Every staff is listed; those outside the selected Primary Skill (C2) are greyed out below the matching ones.
-            string selectedSkill = SelectedPrimarySkill();
+            // Every staff is listed; those outside the selected Department (C2) are greyed out below the matching ones.
+            string selectedDepartment = SelectedDepartment();
             var options = _summaryStaffCache.Select(s =>
             {
-                bool matches = StaffMatchesSkill(s, selectedSkill);
+                bool matches = StaffMatchesDepartment(s, selectedDepartment);
                 return new DropdownOption
                 {
                     Raw = s.StaffID.ToString("D4"),
@@ -166,12 +110,12 @@ public static partial class SheetMapper
         CustomDropdowns.Register(c => IsSummaryCell(c, SummaryStaffNameCell), _ =>
         {
             EnsureSummaryCache();
-            string selectedSkill = SelectedPrimarySkill();
+            string selectedDepartment = SelectedDepartment();
             var options = _summaryStaffCache
                 .Where(s => !string.IsNullOrWhiteSpace(s.StaffDetails.StaffName))
                 .Select(s =>
                 {
-                    bool matches = StaffMatchesSkill(s, selectedSkill);
+                    bool matches = StaffMatchesDepartment(s, selectedDepartment);
                     return new DropdownOption
                     {
                         Raw = s.StaffDetails.StaffName,
@@ -184,13 +128,13 @@ public static partial class SheetMapper
             return new CustomDropdownResult(options, (cell, opt) => { cell.Value2 = opt.Raw; });
         });
 
-        CustomDropdowns.Register(c => IsSummaryCell(c, SummaryPrimarySkillCell), _ =>
+        CustomDropdowns.Register(c => IsSummaryCell(c, SummaryDepartmentCell), _ =>
         {
             EnsureSummaryCache();
-            var options = _primarySkillsByStaffId.Values
-                .Where(v => !string.IsNullOrWhiteSpace(v)).Select(v => v.Trim())
+            var options = _summaryStaffCache.Select(DepartmentOf)
+                .Where(v => v.Length > 0)
                 .Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(v => v, StringComparer.OrdinalIgnoreCase)
-                .Select(v => new DropdownOption { Raw = FormatSkillWithIcon(v), Display = FormatSkillWithIcon(v), Section = 0 })
+                .Select(v => new DropdownOption { Raw = v, Display = v, Section = 0 })
                 .ToList();
             return new CustomDropdownResult(options, (cell, opt) => { cell.Value2 = opt.Raw; });
         });
@@ -202,20 +146,20 @@ public static partial class SheetMapper
         _summaryHooked = false;
     }
 
-    private static string SelectedPrimarySkill()
+    private static string SelectedDepartment()
     {
         try
         {
             dynamic xlApp = ExcelDnaUtil.Application;
             dynamic? ws = FindSummarySheet(xlApp.ActiveWorkbook);
-            if (ws != null) return StripSkillIcon(ToText(ws.Range[SummaryPrimarySkillCell].Value2));
+            if (ws != null) return ToText(ws.Range[SummaryDepartmentCell].Value2);
         }
         catch { }
         return string.Empty;
     }
 
-    private static bool StaffMatchesSkill(StaffRecord s, string skill) =>
-        skill.Length == 0 || PrimarySkillOf(s).Equals(skill, StringComparison.OrdinalIgnoreCase);
+    private static bool StaffMatchesDepartment(StaffRecord s, string department) =>
+        department.Length == 0 || DepartmentOf(s).Equals(department, StringComparison.OrdinalIgnoreCase);
 
     private static bool IsSummaryContext() =>
         !SheetOperations.IsMasterTemplateFile() && !SheetOperations.IsTemplateEditMode
@@ -267,12 +211,12 @@ public static partial class SheetMapper
             string? source = null;
             if (Hits(xlApp, target, sh.Range[SummaryStaffIdCell])) source = SummaryStaffIdCell;
             else if (Hits(xlApp, target, sh.Range[SummaryStaffNameCell])) source = SummaryStaffNameCell;
-            else if (Hits(xlApp, target, sh.Range[SummaryPrimarySkillCell])) source = SummaryPrimarySkillCell;
+            else if (Hits(xlApp, target, sh.Range[SummaryDepartmentCell])) source = SummaryDepartmentCell;
             if (source == null) return;
 
             // Coalesce a burst of edits: A2 beats B2 beats C2.
             if (!_summaryChangeQueued || source == SummaryStaffIdCell
-                || (source == SummaryStaffNameCell && _pendingSummarySource == SummaryPrimarySkillCell))
+                || (source == SummaryStaffNameCell && _pendingSummarySource == SummaryDepartmentCell))
                 _pendingSummarySource = source;
             if (_summaryChangeQueued) return;
             _summaryChangeQueued = true;
@@ -344,26 +288,25 @@ public static partial class SheetMapper
             if (source == SummaryStaffIdCell)
             {
                 staff = FindStaffById(ws.Range[SummaryStaffIdCell].Value2);
-                if (staff == null) { ClearSummary(ws, clearId: false, clearName: true, clearSkill: true); return; }
+                if (staff == null) { ClearSummary(ws, clearId: false, clearName: true, clearDepartment: true); return; }
             }
             else if (source == SummaryStaffNameCell)
             {
                 staff = FindStaffByName(ws.Range[SummaryStaffNameCell].Value2);
-                if (staff == null) { ClearSummary(ws, clearId: true, clearName: false, clearSkill: true); return; }
+                if (staff == null) { ClearSummary(ws, clearId: true, clearName: false, clearDepartment: true); return; }
             }
             else
             {
-                string skill = StripSkillIcon(ToText(ws.Range[SummaryPrimarySkillCell].Value2));
-                if (skill.Length == 0) return; // all staff selectable again; keep the current selection
+                string department = ToText(ws.Range[SummaryDepartmentCell].Value2);
+                if (department.Length == 0) return; // all staff selectable again; keep the current selection
 
-                try { ws.Range[SummaryPrimarySkillCell].Value2 = FormatSkillWithIcon(skill); } catch { }
                 var matching = _summaryStaffCache
-                    .Where(s => PrimarySkillOf(s).Equals(skill, StringComparison.OrdinalIgnoreCase)).ToList();
+                    .Where(s => DepartmentOf(s).Equals(department, StringComparison.OrdinalIgnoreCase)).ToList();
 
                 var current = FindStaffById(ws.Range[SummaryStaffIdCell].Value2);
                 if (current != null && matching.Any(m => m.StaffID == current.StaffID)) return;
                 if (matching.Count == 1) staff = matching[0];
-                else { ClearSummary(ws, clearId: true, clearName: true, clearSkill: false); return; }
+                else { ClearSummary(ws, clearId: true, clearName: true, clearDepartment: false); return; }
             }
 
             WriteTopBar(ws, staff);
@@ -380,14 +323,14 @@ public static partial class SheetMapper
         try { ws.Range[SummaryStaffIdCell].NumberFormat = "0000"; } catch { }
         try { ws.Range[SummaryStaffIdCell].Value2 = (double)staff.StaffID; } catch { }
         try { ws.Range[SummaryStaffNameCell].Value2 = staff.StaffDetails.StaffName; } catch { }
-        try { ws.Range[SummaryPrimarySkillCell].Value2 = FormatSkillWithIcon(PrimarySkillOf(staff)); } catch { }
+        try { ws.Range[SummaryDepartmentCell].Value2 = DepartmentOf(staff); } catch { }
     }
 
-    private static void ClearSummary(dynamic ws, bool clearId, bool clearName, bool clearSkill)
+    private static void ClearSummary(dynamic ws, bool clearId, bool clearName, bool clearDepartment)
     {
         if (clearId) { try { ws.Range[SummaryStaffIdCell].ClearContents(); } catch { } }
         if (clearName) { try { ws.Range[SummaryStaffNameCell].ClearContents(); } catch { } }
-        if (clearSkill) { try { ws.Range[SummaryPrimarySkillCell].ClearContents(); } catch { } }
+        if (clearDepartment) { try { ws.Range[SummaryDepartmentCell].ClearContents(); } catch { } }
         TableMapper.PopulateTableSafe<StaffSummaryRow>((object)ws, new List<StaffSummaryRow>(), SummaryTableFallbackNames);
     }
 

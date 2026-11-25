@@ -13,16 +13,40 @@ public record ImportSkippedRecord
     public string Identifier { get; init; } = string.Empty;
     public string NameOrTitle { get; init; } = string.Empty;
     public string Reason { get; init; } = string.Empty;
+
+    /// <summary>Optional grouping label (e.g. "Department", "Wages", "Thumbprint") shown when there is no Excel row.</summary>
+    public string Category { get; init; } = string.Empty;
 }
 
 public class ImportSummaryReport
 {
+    public const string DefaultSkippedSectionTitle = "Skipped Entries (Errors)";
+
     public string SourceSystemName { get; init; } = "ERP";
     public string EntityLabel { get; init; } = "Record";
     public int SuccessfullyImportedCount { get; init; } = 0;
     public int FilteredExclusionCount { get; init; } = 0;
     public string FilterRuleDescription { get; init; } = string.Empty;
     public List<ImportSkippedRecord> SkippedErrors { get; init; } = new();
+
+    /// <summary>
+    /// Optional prominent banner (e.g. "fix these in SQL Payroll, otherwise the data shown is incomplete"). When set,
+    /// the dialog switches to advisory wording ("View Advisories...").
+    /// </summary>
+    public string? AdvisoryBanner { get; init; }
+
+    /// <summary>Label of the issue count line / detail report; defaults to "Skipped Entries (Errors)".</summary>
+    public string? SkippedSectionTitle { get; init; }
+
+    /// <summary>Optional dialog title override (defaults to "Import Completed ...").</summary>
+    public string? Title { get; init; }
+
+    /// <summary>Optional closing line (defaults to the "Review ... click 'Save to System'" hint).</summary>
+    public string? FooterHint { get; init; }
+
+    internal bool IsAdvisoryMode => !string.IsNullOrWhiteSpace(AdvisoryBanner);
+    internal string EffectiveSkippedSectionTitle =>
+        !string.IsNullOrWhiteSpace(SkippedSectionTitle) ? SkippedSectionTitle! : (IsAdvisoryMode ? "Advisories" : DefaultSkippedSectionTitle);
 }
 
 public class ImportResultDialog : Form
@@ -91,7 +115,9 @@ public class ImportResultDialog : Form
 
         var lblTitle = new Label
         {
-            Text = hasErrors ? "Import Completed with Advisories" : "Import Completed Successfully",
+            Text = !string.IsNullOrWhiteSpace(_report.Title)
+                ? _report.Title!
+                : (hasErrors ? "Import Completed with Advisories" : "Import Completed Successfully"),
             Font = new Font("Segoe UI", 11.5f, FontStyle.Bold),
             ForeColor = Color.FromArgb(30, 41, 59),
             AutoSize = true,
@@ -116,9 +142,28 @@ public class ImportResultDialog : Form
         }
 
         sbMessage.AppendLine($"  Successfully Imported to Table: {_report.SuccessfullyImportedCount} {_report.EntityLabel}.");
-        sbMessage.AppendLine($"  Skipped Entries (Errors): {_report.SkippedErrors.Count} record(s).");
+        sbMessage.AppendLine($"  {_report.EffectiveSkippedSectionTitle}: {_report.SkippedErrors.Count} {(_report.IsAdvisoryMode ? "item(s)" : "record(s)")}.");
         sbMessage.AppendLine();
-        sbMessage.AppendLine("Review the entries in Excel and click 'Save to System' when ready.");
+        sbMessage.AppendLine(!string.IsNullOrWhiteSpace(_report.FooterHint)
+            ? _report.FooterHint
+            : "Review the entries in Excel and click 'Save to System' when ready.");
+
+        Label? lblBanner = null;
+        if (_report.IsAdvisoryMode)
+        {
+            lblBanner = new Label
+            {
+                Text = _report.AdvisoryBanner,
+                Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
+                ForeColor = Color.FromArgb(146, 64, 14),
+                BackColor = Color.FromArgb(254, 243, 199),
+                BorderStyle = BorderStyle.FixedSingle,
+                AutoSize = true,
+                MaximumSize = new Size(460, 0),
+                Padding = new Padding(10, 8, 10, 8),
+                Margin = new Padding(0, 0, 0, 12)
+            };
+        }
 
         var lblMessage = new Label
         {
@@ -157,7 +202,9 @@ public class ImportResultDialog : Form
         {
             var btnViewErrors = new Button
             {
-                Text = $"View Skipped Errors ({_report.SkippedErrors.Count})...",
+                Text = _report.IsAdvisoryMode
+                    ? $"View Advisories ({_report.SkippedErrors.Count})..."
+                    : $"View Skipped Errors ({_report.SkippedErrors.Count})...",
                 Font = new Font("Segoe UI", 9f, FontStyle.Bold),
                 AutoSize = true,
                 Padding = new Padding(14, 6, 14, 6),
@@ -171,6 +218,7 @@ public class ImportResultDialog : Form
         }
 
         pnlContent.Controls.Add(lblTitle);
+        if (lblBanner != null) pnlContent.Controls.Add(lblBanner);
         pnlContent.Controls.Add(lblMessage);
         pnlContent.Controls.Add(flowButtons);
 
@@ -188,7 +236,7 @@ public class ImportResultDialog : Form
     {
         using var errForm = new Form
         {
-            Text = $"{_report.SourceSystemName} - Skipped Entries Report",
+            Text = $"{_report.SourceSystemName} - {(_report.IsAdvisoryMode ? "Advisories Report" : "Skipped Entries Report")}",
             Size = new Size(680, 440),
             StartPosition = FormStartPosition.CenterParent,
             FormBorderStyle = FormBorderStyle.Sizable,
@@ -209,13 +257,25 @@ public class ImportResultDialog : Form
 
         var sb = new StringBuilder();
         sb.AppendLine("==========================================================================");
-        sb.AppendLine($" SKIPPED ENTRIES REPORT ({_report.SkippedErrors.Count} total)");
+        sb.AppendLine($" {_report.EffectiveSkippedSectionTitle.ToUpperInvariant()} REPORT ({_report.SkippedErrors.Count} total)");
         sb.AppendLine("==========================================================================");
         sb.AppendLine();
 
+        if (_report.IsAdvisoryMode)
+        {
+            sb.AppendLine(_report.AdvisoryBanner);
+            sb.AppendLine();
+            sb.AppendLine("--------------------------------------------------------------------------");
+        }
+
         foreach (var err in _report.SkippedErrors)
         {
-            sb.AppendLine($"[Excel Row {err.ExcelRowNumber}]");
+            if (err.ExcelRowNumber > 0)
+                sb.AppendLine($"[Excel Row {err.ExcelRowNumber}]");
+            else if (!string.IsNullOrWhiteSpace(err.Category))
+                sb.AppendLine($"[{err.Category}]");
+            else if (!string.IsNullOrWhiteSpace(err.Identifier))
+                sb.AppendLine($"[{err.Identifier}]");
             sb.AppendLine($"    Identifier : {err.Identifier}");
             if (!string.IsNullOrWhiteSpace(err.NameOrTitle))
                 sb.AppendLine($"    Name/Title : {err.NameOrTitle}");

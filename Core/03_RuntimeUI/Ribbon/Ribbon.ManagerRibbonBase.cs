@@ -408,6 +408,10 @@ public abstract class ManagerRibbonBase : ExcelRibbon
                         ? $"[OFFLINE MODE] {Contract.ModuleName} records loaded from local offline snapshot."
                         : $"{Contract.ModuleName} records loaded from server (Online Mode).");
                     RibbonUi?.Invalidate();
+
+                    // Overlay scope has ended and Excel state is restored: safe to show advisory dialogs.
+                    try { Contract.NotifyAfterLoad(); }
+                    catch (Exception hookEx) { AppLogger.Warn($"[{Contract.ModuleName}] OnAfterLoad hook failed: {hookEx.Message}"); }
                 }
                 catch (Exception ex)
                 {

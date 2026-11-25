@@ -35,6 +35,15 @@ public static partial class RuleRegistry
     /// <summary>Machinery Odometer Difference: values >= 50 display as "50+ hrs".</summary>
     public const string OdometerDiffHoursFormat = "[>=50]\"50+ hrs\";[<=0]0.0 \"hrs\";#,##0.0 \"hrs\";@";
 
+    /// <summary>Monthly wage: "RM 2,500.00/mth".</summary>
+    public const string WageMonthlyFormat = "\"RM \"#,##0.00\"/mth\";-\"RM \"#,##0.00\"/mth\";\"RM \"0.00\"/mth\";@";
+
+    /// <summary>Daily wage: "RM 120.00/day".</summary>
+    public const string WageDailyFormat = "\"RM \"#,##0.00\"/day\";-\"RM \"#,##0.00\"/day\";\"RM \"0.00\"/day\";@";
+
+    /// <summary>Hourly wage: "RM 15.00/hr".</summary>
+    public const string WageHourlyFormat = "\"RM \"#,##0.00\"/hr\";-\"RM \"#,##0.00\"/hr\";\"RM \"0.00\"/hr\";@";
+
     // =========================================================================
     // 1. FORMAT RESOLUTION
     // =========================================================================
@@ -134,6 +143,10 @@ public static partial class RuleRegistry
                 return Four("\"RM \"" + Digits(decimalPlaces, 2), "\"RM \"" + ZeroDigits(decimalPlaces, 2));
             case ColumnFormatKind.PricePerLiter:
                 return Four("\"RM \"" + Digits(decimalPlaces, 2) + "\"/L\"", "\"RM \"" + ZeroDigits(decimalPlaces, 2) + "\"/L\"");
+            case ColumnFormatKind.CurrencyPerHour:
+                return Four("\"RM \"" + Digits(decimalPlaces, 2) + "\"/hr\"", "\"RM \"" + ZeroDigits(decimalPlaces, 2) + "\"/hr\"");
+            case ColumnFormatKind.WageDynamic:
+                return WageMonthlyFormat;
             case ColumnFormatKind.Liters:
                 return Four(Digits(decimalPlaces, 2) + Unit("L"), ZeroDigits(decimalPlaces, 2) + Unit("L"));
             case ColumnFormatKind.Kilometers:
@@ -182,7 +195,7 @@ public static partial class RuleRegistry
     /// </summary>
     internal static void ApplyColumnNumberFormat(dynamic table, int columnIndex, dynamic archCell, PropertyRuleDescriptor? rule)
     {
-        if (!ShouldApplyFormat(rule) || rule!.EffectiveFormatKind == ColumnFormatKind.OdometerDynamic) return;
+        if (!ShouldApplyFormat(rule) || rule!.EffectiveFormatKind is ColumnFormatKind.OdometerDynamic or ColumnFormatKind.WageDynamic) return;
         try
         {
             string archFmt = archCell.NumberFormat?.ToString() ?? string.Empty;

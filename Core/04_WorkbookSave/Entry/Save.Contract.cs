@@ -40,6 +40,12 @@ public interface ISaveContract
 
     /// <summary>Applies the module window caption, with an <c>[OFFLINE MODE]</c> suffix while offline.</summary>
     void UpdateWindowCaption();
+
+    /// <summary>
+    /// Runs the module's post-load hook (e.g. an advisory dialog) on the macro thread after the worksheets were
+    /// populated and Excel's ScreenUpdating / EnableEvents / Calculation state was restored.
+    /// </summary>
+    void NotifyAfterLoad();
 }
 
 public class SaveContract<T> : ISaveContract
@@ -115,6 +121,14 @@ public class SaveContract<T> : ISaveContract
     /// <c>PastRecordGuard</c>. Not used for the silent offline-upload on startup.
     /// </summary>
     public Func<T, bool>? ConfirmBeforeSave { get; set; }
+
+    /// <summary>
+    /// Optional hook that runs after a startup load or a Ribbon "Load from System" finished populating the
+    /// workbook (Excel state already restored). Typically shows an advisory / warnings dialog.
+    /// </summary>
+    public Action? OnAfterLoad { get; set; }
+
+    public void NotifyAfterLoad() => OnAfterLoad?.Invoke();
 
     // =========================================================================
     // 3. NON-GENERIC COMMAND SURFACE (ISaveContract)

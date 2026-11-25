@@ -24,14 +24,15 @@ internal static partial class SheetMapper
     {
         new(ProjectCategory.iJob, new[] { "iJob Projects", "iJobProjects", "iJob" }, "iJob Projects", "iJobProjectsTable"),
         new(ProjectCategory.MWO,  new[] { "MWO Projects", "MWOProjects", "MWO" },     "MWO Projects",  "MWOProjectsTable"),
-        new(ProjectCategory.PVT,  new[] { "PVT Projects", "PVTProjects", "PVT" },     "PVT Projects",  "PVTProjectsTable")
+        new(ProjectCategory.PVT,  new[] { "PVT Projects", "PVTProjects", "PVT" },     "PVT Projects",  "PVTProjectsTable"),
+        new(ProjectCategory.Other, new[] { "Other Projects", "OtherProjects", "Other" }, "Other Projects", "OtherProjectsTable")
     };
 
     internal static readonly string[] MasterSheetAliases = CategorySheets[0].Aliases;
     internal static readonly string[] CompaniesAliases = { "Companies", "Company" };
 
     // =========================================================================
-    // 2. DECLARATIVE WORKBOOK MAPPING (3 MASTER TABLES, NO CHILD TABLES)
+    // 2. DECLARATIVE WORKBOOK MAPPING (4 MASTER TABLES, NO CHILD TABLES)
     // =========================================================================
     private static readonly WorkbookMapping<ProjectRecord, string> Mapping = new()
     {
@@ -62,14 +63,15 @@ internal static partial class SheetMapper
             "CompaniesTable",
             "iJobProjectsTable",
             "MWOProjectsTable",
-            "PVTProjectsTable"
+            "PVTProjectsTable",
+            "OtherProjectsTable"
         },
 
         AuditTitle = "Project Manager Populate Audit",
         MasterLabel = "Projects",
         InspectTables = new[]
         {
-            "iJobProjectsTable", "MWOProjectsTable", "PVTProjectsTable", "CompaniesTable"
+            "iJobProjectsTable", "MWOProjectsTable", "PVTProjectsTable", "OtherProjectsTable", "CompaniesTable"
         }
     };
 

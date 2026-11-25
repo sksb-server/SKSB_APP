@@ -169,12 +169,19 @@ public static partial class RuleRegistry
 
             var excelColAttr = prop.GetCustomAttribute<ExcelColumnAttribute>();
             var ruleAttr = prop.GetCustomAttribute<ColumnRuleAttribute>();
-            var defaultAttr = prop.GetCustomAttribute<ColumnDefaultAttribute>();
+            var defaultCandidates = prop.GetCustomAttributes<ColumnDefaultAttribute>().ToList();
+            var defaultAttr =
+                defaultCandidates.FirstOrDefault(d => !string.IsNullOrWhiteSpace(d.TableName) &&
+                                                      string.Equals(d.TableName, tableName, StringComparison.OrdinalIgnoreCase))
+                ?? defaultCandidates.FirstOrDefault(d => string.IsNullOrWhiteSpace(d.TableName));
             var dateGreaterAttr = prop.GetCustomAttribute<ColumnDateGreaterThanAttribute>();
             var formatAttr = prop.GetCustomAttribute<ColumnFormatAttribute>();
             var calcAttr = prop.GetCustomAttribute<ColumnCalculateAttribute>();
             var rollupAttrs = prop.GetCustomAttributes<ColumnRollupAttribute>().ToList();
-            var syncAttrs = prop.GetCustomAttributes<ColumnSyncAttribute>().ToList();
+            var syncAttrs = prop.GetCustomAttributes<ColumnSyncAttribute>()
+                                .Where(s => string.IsNullOrWhiteSpace(s.TableName) ||
+                                            string.Equals(s.TableName, tableName, StringComparison.OrdinalIgnoreCase))
+                                .ToList();
             var guardAttrs = prop.GetCustomAttributes<ColumnStateGuardAttribute>()
                                  .OrderBy(g => g.Priority)
                                  .ToList();

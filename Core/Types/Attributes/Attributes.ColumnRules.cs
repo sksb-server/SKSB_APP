@@ -98,6 +98,12 @@ public sealed class ColumnSyncAttribute : Attribute
     public string LookupSource { get; }
     public string ResultSource { get; }
 
+    /// <summary>When set, the sync only applies to this Excel table (case-insensitive); null/blank applies to every table.</summary>
+    public string? TableName { get; set; }
+
+    /// <summary>When true, the target cell is only filled while it is still blank (never overwrites a user value).</summary>
+    public bool OnlyWhenTargetBlank { get; set; } = false;
+
     public ColumnSyncAttribute(string targetHeader, string lookupSource, string resultSource)
     {
         TargetHeader = targetHeader;
@@ -108,12 +114,16 @@ public sealed class ColumnSyncAttribute : Attribute
 
 /// <summary>
 /// Defines how an empty cell in an active row is automatically defaulted.
+/// AllowMultiple = true supports per-table defaults via <see cref="TableName"/> (a null/blank TableName is the fallback).
 /// </summary>
-[AttributeUsage(AttributeTargets.Property, AllowMultiple = false, Inherited = true)]
+[AttributeUsage(AttributeTargets.Property, AllowMultiple = true, Inherited = true)]
 public sealed class ColumnDefaultAttribute : Attribute
 {
     public DefaultKind Kind { get; }
     public string? LiteralValue { get; set; }
+
+    /// <summary>When set, this default only applies to this Excel table (case-insensitive).</summary>
+    public string? TableName { get; set; }
     public string? ReferenceHeader { get; set; }
     public int Offset { get; set; }
 
@@ -298,7 +308,9 @@ public enum ColumnFormatKind
     Years,              // #,##0 "yrs"
     Days,               // #,##0 "days"
     OdometerDynamic,    // Per row: hours (machinery) or km (road vehicles)
-    Date,               // dd/mm/yyyy
+    CurrencyPerHour,    // "RM "#,##0.00"/hr"
+    WageDynamic,        // Per row: "RM "#,##0.00"/mth" (monthly) or "/day" (daily)
+    Date,              // dd/mm/yyyy
     Time                // hh:mm
 }
 

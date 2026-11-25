@@ -154,6 +154,7 @@ public static class OfflineSave
                                 contract.ModuleName,
                                 "Offline changes uploaded successfully!\n\n  Committed records to PostgreSQL server.\n  Local pending upload stash has been cleared."
                             );
+                            RunAfterLoadHook(contract);
                             return;
                         }
                         else
@@ -214,6 +215,7 @@ public static class OfflineSave
                         ? $"[OFFLINE MODE] {contract.ModuleName} loaded from local offline snapshot (server became unreachable)."
                         : $"{contract.ModuleName} records loaded from server.");
                     contract.UpdateWindowCaption();
+                    RunAfterLoadHook(contract);
                 }
             }
         }
@@ -259,5 +261,26 @@ public static class OfflineSave
         SheetOperations.ShowStatusConfirmation(hasPending
             ? $"[OFFLINE MODE] {contract.ModuleName} loaded from local offline snapshot (pending upload queued)."
             : $"[OFFLINE MODE] {contract.ModuleName} loaded from local offline snapshot.");
+        RunAfterLoadHook(contract);
+    }
+
+    /// <summary>
+    /// Runs <see cref="SaveContract{T}.OnAfterLoad"/> once population finished and Excel state was restored. The
+    /// loading overlay is suspended so any modal dialog the hook shows sits cleanly above Excel.
+    /// </summary>
+    private static void RunAfterLoadHook<T>(SaveContract<T> contract)
+    {
+        if (contract.OnAfterLoad == null) return;
+        try
+        {
+            using (LoadingOverlay.Suspend())
+            {
+                contract.OnAfterLoad.Invoke();
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn($"[{contract.ModuleName}] OnAfterLoad hook failed: {ex.Message}");
+        }
     }
 }
