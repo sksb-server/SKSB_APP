@@ -1,6 +1,7 @@
 namespace SKSB_App.Core.RuntimeUI.Ribbon;
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Runtime.InteropServices;
 using System.Security;
@@ -9,13 +10,18 @@ using ExcelDna.Integration;
 using ExcelDna.Integration.CustomUI;
 using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.Integration.Database;
+using SKSB_App.Core.Localization;
 using SKSB_App.Core.RuntimeUI.BugReport;
+using SKSB_App.Core.RuntimeUI.Dictionary;
 using SKSB_App.Core.RuntimeUI.DropDown;
+using SKSB_App.Core.RuntimeUI.Guide;
 using SKSB_App.Core.RuntimeUI.Progress;
+using SKSB_App.Core.RuntimeUI.RuleEngine;
 using SKSB_App.Core.RuntimeUI.TableRowManager;
 using SKSB_App.Core.WorkbookOpen.Sheet;
 using SKSB_App.Core.WorkbookOpen.Sync;
 using SKSB_App.Core.WorkbookSave.Entry;
+using SKSB_App.Core.WorkbookSave.Validation;
 
 /// <summary>
 /// Shared Ribbon tab for every Manager module: tab/group XML assembly plus the Load / Save,
@@ -32,10 +38,14 @@ using SKSB_App.Core.WorkbookSave.Entry;
 public abstract class ManagerRibbonBase : ExcelRibbon
 {
     protected static IRibbonUI? RibbonUi { get; private set; }
+    private static string? _activeTabId;
 
     private static bool _statusHooked;
     private static Action? _statusChangedHandler; // pinned static delegate (CLAUDE.md Rule 4)
     private static ISaveContract? _statusContract;
+
+    private static bool _languageHooked;
+    private static Action? _languageChangedHandler; // pinned static delegate (CLAUDE.md Rule 4)
 
     // =========================================================================
     // 1. MODULE DESCRIPTOR & CUSTOMIZATION HOOKS
@@ -55,7 +65,7 @@ public abstract class ManagerRibbonBase : ExcelRibbon
     /// <summary>When false, an empty fetch result shows <see cref="EmptyLoadMessage"/> instead of populating.</summary>
     protected virtual bool PopulateWhenEmpty => false;
     protected virtual bool ShowEmptyLoadDialog => true;
-    protected virtual string EmptyLoadMessage => $"No {Contract.ModuleName} records found in database or local snapshot.";
+    protected virtual string EmptyLoadMessage => Loc.T("ribbon.load.emptyBody", Loc.ModuleDisplayName(Contract.ModuleName));
 
     /// <summary>Decides which columns get a SUM when the Total Row is switched on.</summary>
     protected virtual bool ShouldSumColumnInTotalRow(string header) =>
@@ -95,28 +105,35 @@ public abstract class ManagerRibbonBase : ExcelRibbon
         string saveSupertip,
         string extraControlsXml = "")
     {
+        // The module-supplied English text is the fallback when no "ribbon.<controlId>.<kind>" key exists.
+        _persistenceFallbackText[$"{groupId}.label"] = groupLabel;
+        _persistenceFallbackText[$"{loadId}.screentip"] = loadScreentip;
+        _persistenceFallbackText[$"{loadId}.supertip"] = loadSupertip;
+        _persistenceFallbackText[$"{saveId}.screentip"] = saveScreentip;
+        _persistenceFallbackText[$"{saveId}.supertip"] = saveSupertip;
+
         return $@"
-                <group id='{groupId}' label='{Esc(groupLabel)}'>
+                <group id='{groupId}' getLabel='GetPersistenceGroupLabel'>
                   <button id='{loadId}'
-                          label='Load from System'
+                          getLabel='GetLoadButtonLabel'
                           size='large'
                           imageMso='Refresh'
-                          screentip='{Esc(loadScreentip)}'
-                          supertip='{Esc(loadSupertip)}'
+                          getScreentip='GetLoadButtonScreentip'
+                          getSupertip='GetLoadButtonSupertip'
                           onAction='OnLoadClicked' />
                   <button id='{saveId}'
-                          label='Save to System'
+                          getLabel='GetSaveButtonLabel'
                           size='large'
                           imageMso='FileSave'
-                          screentip='{Esc(saveScreentip)}'
-                          supertip='{Esc(saveSupertip)}'
+                          getScreentip='GetSaveButtonScreentip'
+                          getSupertip='GetSaveButtonSupertip'
                           onAction='OnSaveClicked' />
                   <button id='btnValidateWorkbook'
-                          label='Check Issues'
+                          getLabel='GetValidateButtonLabel'
                           size='large'
                           imageMso='Spelling'
-                          screentip='Check Issues'
-                          supertip='Validates every table in this workbook without saving and lists errors and warnings in a docked pane. Click an issue to jump to its cell.'
+                          getScreentip='GetValidateButtonScreentip'
+                          getSupertip='GetValidateButtonSupertip'
                           onAction='OnValidateClicked' />
                   {extraControlsXml}
                 </group>";
@@ -136,8 +153,8 @@ public abstract class ManagerRibbonBase : ExcelRibbon
                           size='large'
                           getLabel='GetPingServerButtonLabel'
                           getImage='GetPingServerImage'
-                          screentip='Ping PostgreSQL Server'
-                          supertip='Tests the connection to the PostgreSQL server (192.168.0.20:5432) and brings the app back online when it is reachable.'
+                          getScreentip='GetLocalizedScreentip'
+                          getSupertip='GetLocalizedSupertip'
                           onAction='OnPingServerClicked' />
                 </group>";
     }
@@ -145,49 +162,49 @@ public abstract class ManagerRibbonBase : ExcelRibbon
     protected static string BuildRowManagementGroupXml()
     {
         return @"
-                <group id='grpRowDirection' label='Row Management'>
+                <group id='grpRowDirection' getLabel='GetLocalizedLabel'>
                   <button id='btnInsertTableRow'
-                          label='Insert Row'
+                          getLabel='GetLocalizedLabel'
                           size='large'
                           imageMso='TableInsertRowsBelow'
-                          screentip='Insert Row (Ctrl+Shift+I)'
-                          supertip='Inserts a new formatted row at the top or bottom of the active table (following the Insert at Top toggle) and selects it.'
+                          getScreentip='GetLocalizedScreentip'
+                          getSupertip='GetLocalizedSupertip'
                           onAction='OnInsertTableRowClicked' />
                   <toggleButton id='btnToggleInsertTop'
-                                label='Insert at Top'
+                                getLabel='GetLocalizedLabel'
                                 size='large'
                                 imageMso='TableInsertRowsAbove'
-                                screentip='Toggle Top/Bottom Auto-Insert'
-                                supertip='When enabled, typing in the first data row creates a new row at the top. When disabled, rows are appended at the bottom.'
+                                getScreentip='GetLocalizedScreentip'
+                                getSupertip='GetLocalizedSupertip'
                                 getPressed='GetInsertAtTopPressed'
                                 onAction='OnToggleInsertAtTopClicked' />
                   <button id='btnCleanEmptyRows'
-                          label='Trim Empty Rows'
+                          getLabel='GetLocalizedLabel'
                           size='large'
                           imageMso='TableDeleteRows'
-                          screentip='Trim Redundant Empty Rows'
-                          supertip='Scans all tables on the active sheet and trims extra blank rows, leaving exactly one empty entry row.'
+                          getScreentip='GetLocalizedScreentip'
+                          getSupertip='GetLocalizedSupertip'
                           onAction='OnCleanEmptyRowsClicked' />
                   <button id='btnCleanDuplicateRows'
-                          label='Remove Duplicates'
+                          getLabel='GetLocalizedLabel'
                           size='large'
                           imageMso='RemoveDuplicates'
-                          screentip='Remove Duplicate Rows'
-                          supertip='Scans all tables on the active sheet and removes identical duplicate rows, keeping the first occurrence.'
+                          getScreentip='GetLocalizedScreentip'
+                          getSupertip='GetLocalizedSupertip'
                           onAction='OnCleanDuplicateRowsClicked' />
                   <button id='btnDeleteTableRow'
-                          label='Delete Row'
+                          getLabel='GetLocalizedLabel'
                           size='large'
                           imageMso='TableRowsDelete'
-                          screentip='Delete Row'
-                          supertip='Deletes selected row(s) in absolute master tables. Deletion is blocked on additive transaction tables.'
+                          getScreentip='GetLocalizedScreentip'
+                          getSupertip='GetLocalizedSupertip'
                           onAction='OnDeleteTableRowClicked' />
                   <toggleButton id='btnToggleTotalRow'
-                                label='Total Row'
+                                getLabel='GetLocalizedLabel'
                                 size='large'
                                 imageMso='AutoSum'
-                                screentip='Toggle Total Row'
-                                supertip='Shows or hides the summary total row at the bottom of the active table.'
+                                getScreentip='GetLocalizedScreentip'
+                                getSupertip='GetLocalizedSupertip'
                                 getPressed='GetTotalRowPressed'
                                 onAction='OnToggleTotalRowClicked' />
                 </group>";
@@ -196,16 +213,60 @@ public abstract class ManagerRibbonBase : ExcelRibbon
     protected static string BuildSupportGroupXml()
     {
         return @"
-                <group id='grpSupport' label='Support'>
+                <group id='grpSupport' getLabel='GetLocalizedLabel'>
                   <button id='btnReportBug'
-                          label='Report Bug'
+                          getLabel='GetLocalizedLabel'
                           size='large'
                           imageMso='ReviewNewComment'
-                          screentip='Report a Bug'
-                          supertip='Captures a screenshot of the current screen and opens a form to describe the problem. Attach screenshots, pasted images or screen recordings and send them to the developer.'
+                          getScreentip='GetLocalizedScreentip'
+                          getSupertip='GetLocalizedSupertip'
                           onAction='OnReportBugClicked' />
+                  <toggleButton id='btnToggleGuidePanel'
+                                getLabel='GetLocalizedLabel'
+                                size='large'
+                                imageMso='Help'
+                                getScreentip='GetLocalizedScreentip'
+                                getSupertip='GetLocalizedSupertip'
+                                getPressed='GetGuidePanelPressed'
+                                onAction='OnToggleGuidePanelClicked' />
+                  <button id='btnCollectiveDictionary'
+                          getLabel='GetLocalizedLabel'
+                          size='large'
+                          imageMso='TranslateDocument'
+                          getScreentip='GetLocalizedScreentip'
+                          getSupertip='GetLocalizedSupertip'
+                          onAction='OnCollectiveDictionaryClicked' />
+                  <dropDown id='ddLanguage'
+                            getLabel='GetLanguageDropdownLabel'
+                            getItemCount='GetLanguageItemCount'
+                            getItemID='GetLanguageItemId'
+                            getItemLabel='GetLanguageItemLabel'
+                            getSelectedItemIndex='GetLanguageSelectedIndex'
+                            getScreentip='GetLanguageScreentip'
+                            getSupertip='GetLanguageSupertip'
+                            onAction='OnLanguageSelected' />
                 </group>";
     }
+
+    /// <summary>Ribbon control id -> localization key prefix for the shared (non-module) controls.</summary>
+    private static readonly Dictionary<string, string> _sharedControlKeys = new(StringComparer.Ordinal)
+    {
+        ["btnPingServer"] = "ribbon.ping",
+        ["grpRowDirection"] = "ribbon.rows.group",
+        ["btnInsertTableRow"] = "ribbon.rows.insert",
+        ["btnToggleInsertTop"] = "ribbon.rows.insertTop",
+        ["btnCleanEmptyRows"] = "ribbon.rows.trim",
+        ["btnCleanDuplicateRows"] = "ribbon.rows.dedupe",
+        ["btnDeleteTableRow"] = "ribbon.rows.delete",
+        ["btnToggleTotalRow"] = "ribbon.rows.total",
+        ["grpSupport"] = "ribbon.support.group",
+        ["btnReportBug"] = "ribbon.support.bug",
+        ["btnToggleGuidePanel"] = "ribbon.support.guide",
+        ["btnCollectiveDictionary"] = "ribbon.support.dictionary",
+    };
+
+    /// <summary>English text supplied by derived controllers through <see cref="BuildPersistenceGroupXml"/>.</summary>
+    private static readonly ConcurrentDictionary<string, string> _persistenceFallbackText = new(StringComparer.Ordinal);
 
     protected static string BuildDebugTabXml()
     {
@@ -251,7 +312,9 @@ public abstract class ManagerRibbonBase : ExcelRibbon
     public void OnRibbonLoad(IRibbonUI ribbon)
     {
         RibbonUi = ribbon;
+        _activeTabId = TabId;
         _statusContract = Contract;
+        HookLanguageChanged();
         if (_statusHooked) return;
         _statusHooked = true;
         _statusChangedHandler = () =>
@@ -265,30 +328,189 @@ public abstract class ManagerRibbonBase : ExcelRibbon
         ServerEnvironment.StatusChanged += _statusChangedHandler;
     }
 
+    /// <summary>Activates this module's custom Manager tab on the Excel Ribbon.</summary>
+    public static void ActivateManagerTab()
+    {
+        try
+        {
+            if (RibbonUi != null && !string.IsNullOrWhiteSpace(_activeTabId))
+            {
+                RibbonUi.ActivateTab(_activeTabId);
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn($"[ManagerRibbonBase] Could not activate tab '{_activeTabId}': {ex.Message}");
+        }
+    }
+
     // =========================================================================
-    // 3a. SERVER STATUS CALLBACKS
+    // 3a. LOCALIZATION CALLBACKS
+    // =========================================================================
+    private static void HookLanguageChanged()
+    {
+        Loc.ReloadFromPreferences();
+        Loc.WatchPreferences();
+        if (_languageHooked) return;
+        _languageHooked = true;
+        CollectiveDictionaryRepository.SyncFromServerInBackground();
+        // May fire on a thread-pool thread (prefs file watcher): marshal the Ribbon refresh to Excel's macro thread.
+        _languageChangedHandler = () =>
+        {
+            try
+            {
+                ExcelAsyncUtil.QueueAsMacro(() =>
+                {
+                    try { RibbonUi?.Invalidate(); } catch { }
+                    try
+                    {
+                        dynamic xlApp = ExcelDnaUtil.Application;
+                        RuleRegistry.RefreshWorkbookHeaderNotes(xlApp.ActiveWorkbook);
+                    }
+                    catch { }
+                });
+            }
+            catch { }
+        };
+        Loc.LanguageChanged += _languageChangedHandler;
+    }
+
+    /// <summary>Module display name in the active language ("Staff Manager" -> "Pengurus Kakitangan").</summary>
+    protected string ModuleDisplayName => Loc.ModuleDisplayName(Contract.ModuleName);
+
+    private static string ResolveSharedControlText(IRibbonControl control, string kind)
+    {
+        string id = control?.Id ?? string.Empty;
+        if (!_sharedControlKeys.TryGetValue(id, out string? prefix)) return string.Empty;
+        // Group entries already map to their full label key.
+        string key = id.StartsWith("grp", StringComparison.Ordinal) ? prefix : $"{prefix}.{kind}";
+        return Loc.T(key);
+    }
+
+    private static string ResolvePersistenceText(IRibbonControl control, string kind)
+    {
+        string id = control?.Id ?? string.Empty;
+        if (Loc.TryT($"ribbon.{id}.{kind}", out string text)) return text;
+        return _persistenceFallbackText.TryGetValue($"{id}.{kind}", out string? fallback) ? fallback : string.Empty;
+    }
+
+    public string GetLocalizedLabel(IRibbonControl control) => ResolveSharedControlText(control, "label");
+    public string GetLocalizedScreentip(IRibbonControl control) => ResolveSharedControlText(control, "screentip");
+    public string GetLocalizedSupertip(IRibbonControl control) => ResolveSharedControlText(control, "supertip");
+
+    protected string ResolveCustomControlText(IRibbonControl control, string kind)
+    {
+        string id = control?.Id ?? string.Empty;
+        if (string.IsNullOrEmpty(id)) return string.Empty;
+        return Loc.T($"ribbon.custom.{id}.{kind}");
+    }
+
+    public string GetCustomLabel(IRibbonControl control) => ResolveCustomControlText(control, "label");
+    public string GetCustomScreentip(IRibbonControl control) => ResolveCustomControlText(control, "screentip");
+    public string GetCustomSupertip(IRibbonControl control) => ResolveCustomControlText(control, "supertip");
+
+    public string GetPersistenceGroupLabel(IRibbonControl control) => ResolvePersistenceText(control, "label");
+    public string GetLoadButtonLabel(IRibbonControl control) => Loc.T("ribbon.load.label");
+    public string GetLoadButtonScreentip(IRibbonControl control) => ResolvePersistenceText(control, "screentip");
+    public string GetLoadButtonSupertip(IRibbonControl control) => ResolvePersistenceText(control, "supertip");
+    public string GetSaveButtonLabel(IRibbonControl control) => Loc.T("ribbon.save.label");
+    public string GetSaveButtonScreentip(IRibbonControl control) => ResolvePersistenceText(control, "screentip");
+    public string GetSaveButtonSupertip(IRibbonControl control) => ResolvePersistenceText(control, "supertip");
+    public string GetValidateButtonLabel(IRibbonControl control) => Loc.T("ribbon.validate.label");
+    public string GetValidateButtonScreentip(IRibbonControl control) => Loc.T("ribbon.validate.screentip");
+    public string GetValidateButtonSupertip(IRibbonControl control) => Loc.T("ribbon.validate.supertip");
+
+    public string GetLanguageDropdownLabel(IRibbonControl control) => Loc.T("language.label");
+    public string GetLanguageScreentip(IRibbonControl control) => Loc.T("language.screentip");
+    public string GetLanguageSupertip(IRibbonControl control) => Loc.T("language.supertip");
+
+    public int GetLanguageItemCount(IRibbonControl control) => AppLanguageInfo.All.Count;
+
+    public string GetLanguageItemId(IRibbonControl control, int index)
+        => index >= 0 && index < AppLanguageInfo.All.Count
+            ? "lang_" + AppLanguageInfo.ToCode(AppLanguageInfo.All[index]).Replace('-', '_')
+            : $"lang_{index}";
+
+    public string GetLanguageItemLabel(IRibbonControl control, int index)
+        => index >= 0 && index < AppLanguageInfo.All.Count
+            ? AppLanguageInfo.GetDisplayName(AppLanguageInfo.All[index])
+            : string.Empty;
+
+    public int GetLanguageSelectedIndex(IRibbonControl control)
+        => AppLanguageInfo.IndexOf(Loc.CurrentLanguage);
+
+    public void OnLanguageSelected(IRibbonControl control, string selectedId, int selectedIndex)
+    {
+        try
+        {
+            if (selectedIndex < 0 || selectedIndex >= AppLanguageInfo.All.Count) return;
+            var language = AppLanguageInfo.All[selectedIndex];
+            if (language == Loc.CurrentLanguage) return;
+            Loc.SetLanguage(language); // raises LanguageChanged -> queued RibbonUi.Invalidate()
+            try { RibbonUi?.Invalidate(); } catch { }
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn($"[ManagerRibbonBase] Language switch failed: {ex.Message}");
+        }
+    }
+
+    // =========================================================================
+    // 3b. CELL GUIDE PANEL CALLBACKS
+    // =========================================================================
+    public bool GetGuidePanelPressed(IRibbonControl control)
+    {
+        try { return GuideTaskPaneManager.IsVisibleForActiveWorkbook(); }
+        catch { return false; }
+    }
+
+    public void OnToggleGuidePanelClicked(IRibbonControl control, bool isPressed)
+    {
+        string moduleName = Contract.ModuleName;
+        // Ribbon callback: create / show the Custom Task Pane on Excel's macro thread.
+        ExcelAsyncUtil.QueueAsMacro(() => GuideTaskPaneManager.SetVisible(moduleName, isPressed));
+    }
+
+    /// <summary>Refreshes the Help Guide toggle (pane shown / closed with its X button / window switch).</summary>
+    public static void InvalidateGuideToggleControl()
+    {
+        try { RibbonUi?.InvalidateControl("btnToggleGuidePanel"); } catch { }
+    }
+
+    // =========================================================================
+    // 3c. SERVER STATUS CALLBACKS
     // =========================================================================
     public string GetTabLabel(IRibbonControl control)
-        => ServerEnvironment.IsOffline ? $"{TabLabel} [OFFLINE MODE]" : TabLabel;
+    {
+        string name = Loc.ModuleDisplayName(TabLabel);
+        return ServerEnvironment.IsOffline ? Loc.T("ribbon.tab.offline", name) : name;
+    }
 
     public string GetServerStatusGroupLabel(IRibbonControl control)
-        => ServerEnvironment.IsOffline ? "⚠ OFFLINE MODE" : "Server Status";
+        => ServerEnvironment.IsOffline ? Loc.T("ribbon.status.groupOffline") : Loc.T("ribbon.status.group");
 
     public string GetServerModeLabel(IRibbonControl control)
-        => ServerEnvironment.IsOffline ? "STATUS: OFFLINE MODE" : "STATUS: ONLINE";
+        => ServerEnvironment.IsOffline ? Loc.T("ribbon.status.modeOffline") : Loc.T("ribbon.status.modeOnline");
 
     public string GetServerSourceLabel(IRibbonControl control)
 #if DEBUG
-        => ServerEnvironment.IsOffline ? "Source: Local Offline Snapshot" : "Source: Debug Server (debug)";
+        => ServerEnvironment.IsOffline ? Loc.T("ribbon.status.sourceOffline") : Loc.T("ribbon.status.sourceDebug");
 #else
-        => ServerEnvironment.IsOffline ? "Source: Local Offline Snapshot" : "Source: PostgreSQL Server";
+        => ServerEnvironment.IsOffline ? Loc.T("ribbon.status.sourceOffline") : Loc.T("ribbon.status.sourceServer");
 #endif
 
     public string GetServerPendingLabel(IRibbonControl control)
-        => Contract.HasPendingUpload ? "Pending Upload: YES (Uncommitted)" : "Pending Upload: None";
+        => Contract.HasLocalDraft ? Loc.T("ribbon.status.localDraft")
+         : Contract.HasPendingUpload ? Loc.T("ribbon.status.pendingYes") : Loc.T("ribbon.status.pendingNone");
+
+    /// <summary>Re-queries every Ribbon callback (status labels, draft / pending indicators).</summary>
+    public static void InvalidateRibbon()
+    {
+        try { RibbonUi?.Invalidate(); } catch { }
+    }
 
     public string GetPingServerButtonLabel(IRibbonControl control)
-        => ServerEnvironment.IsOffline ? "Ping Server\n(Go Online)" : "Ping Server\n(Online)";
+        => ServerEnvironment.IsOffline ? Loc.T("ribbon.ping.labelOffline") : Loc.T("ribbon.ping.labelOnline");
 
     public object? GetPingServerImage(IRibbonControl control)
     {
@@ -312,8 +534,8 @@ public abstract class ManagerRibbonBase : ExcelRibbon
             if (ServerEnvironment.SimulateOffline)
             {
                 var answer = MessageBox.Show(
-                    "Offline simulation is ON.\n\nDisable the simulation and reconnect to the server?",
-                    "Simulated Offline", MessageBoxButtons.YesNo, MessageBoxIcon.Question);
+                    Loc.T("ribbon.ping.simulatedBody"),
+                    Loc.T("ribbon.ping.simulatedTitle"), MessageBoxButtons.YesNo, MessageBoxIcon.Question);
                 if (answer == DialogResult.Yes) ServerEnvironment.SimulateOffline = false;
             }
 #endif
@@ -323,8 +545,8 @@ public abstract class ManagerRibbonBase : ExcelRibbon
             if (!online)
             {
                 MessageBox.Show(
-                    $"The PostgreSQL server is still unreachable.\n\n{err}\n\nThe app remains in OFFLINE MODE.",
-                    "Server Unreachable", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                    Loc.T("ribbon.ping.unreachableBody", err),
+                    Loc.T("ribbon.ping.unreachableTitle"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
                 return;
             }
 
@@ -334,14 +556,11 @@ public abstract class ManagerRibbonBase : ExcelRibbon
                 try
                 {
                     Contract.UpdateWindowCaption();
-                    SheetOperations.ShowStatusConfirmation($"Server reachable: {Contract.ModuleName} is back in Online Mode.");
+                    SheetOperations.ShowStatusConfirmation(Loc.T("ribbon.ping.backOnlineStatus", ModuleDisplayName));
 
                     var choice = MessageBox.Show(
-                        "Server is reachable. The app is back in ONLINE MODE.\n\n" +
-                        "  Yes:     Save the current worksheet records to the server now.\n" +
-                        "  No:      Discard any pending offline upload and reload the latest records from the server.\n" +
-                        "  Cancel:  Stay on the current sheet without syncing yet.",
-                        $"{Contract.ModuleName} - Back Online",
+                        Loc.T("ribbon.ping.backOnlineBody"),
+                        Loc.T("ribbon.ping.backOnlineTitle", ModuleDisplayName),
                         MessageBoxButtons.YesNoCancel, MessageBoxIcon.Question);
 
                     if (choice == DialogResult.Yes)
@@ -351,6 +570,7 @@ public abstract class ManagerRibbonBase : ExcelRibbon
                     else if (choice == DialogResult.No)
                     {
                         Contract.ClearPendingUpload();
+                        Contract.ClearLocalDraft();
                         OnLoadClicked(control);
                     }
                     RibbonUi?.Invalidate();
@@ -371,9 +591,25 @@ public abstract class ManagerRibbonBase : ExcelRibbon
     {
         try
         {
+            if (Contract.HasLocalDraft)
+            {
+                var discard = MessageBox.Show(
+                    Loc.T("ribbon.load.discardDraftBody"),
+                    Loc.T("ribbon.load.discardDraftTitle", ModuleDisplayName),
+                    MessageBoxButtons.YesNo,
+                    MessageBoxIcon.Warning);
+                if (discard != DialogResult.Yes) return;
+
+                Contract.ClearLocalDraft();
+                ValidationTaskPaneManager.HideForActiveWorkbook();
+                RibbonUi?.Invalidate();
+            }
+
             bool isEmpty;
             Action? populate;
-            using (LoadingOverlay.BeginScope($"{Contract.ModuleName} — Loading from System", "Fetching records from system..."))
+            // Stable English operation key keeps LoadingTimeEstimator history independent of the UI language.
+            string loadOperationKey = $"{Contract.ModuleName} — Loading from System";
+            using (LoadingOverlay.BeginScope(Loc.T("ribbon.load.overlayTitle", ModuleDisplayName), Loc.T("ribbon.load.fetching"), operationKey: loadOperationKey))
             {
                 (isEmpty, populate) = Contract.FetchForPopulate();
             }
@@ -384,7 +620,7 @@ public abstract class ManagerRibbonBase : ExcelRibbon
                 Contract.SyncLookups?.Invoke(false);
                 if (ShowEmptyLoadDialog)
                 {
-                    MessageBox.Show(EmptyLoadMessage, $"Load {Contract.ModuleName}", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    MessageBox.Show(EmptyLoadMessage, Loc.T("ribbon.load.emptyTitle", ModuleDisplayName), MessageBoxButtons.OK, MessageBoxIcon.Information);
                 }
                 return;
             }
@@ -394,19 +630,19 @@ public abstract class ManagerRibbonBase : ExcelRibbon
             {
                 try
                 {
-                    using (LoadingOverlay.BeginScope($"{Contract.ModuleName} — Loading from System", "Synchronizing lookup lists & dropdowns..."))
+                    using (LoadingOverlay.BeginScope(Loc.T("ribbon.load.overlayTitle", ModuleDisplayName), Loc.T("ribbon.load.syncLookups"), operationKey: loadOperationKey))
                     using (SyncHelper.BeginSynchronousScope())
                     {
-                        LoadingOverlay.Report("Synchronizing lookup lists & dropdowns...");
+                        LoadingOverlay.Report(Loc.T("ribbon.load.syncLookups"));
                         Contract.SyncLookups?.Invoke(false);
 
-                        LoadingOverlay.Report("Populating workbook tables...");
+                        LoadingOverlay.Report(Loc.T("ribbon.load.populating"));
                         populate();
                     }
                     Contract.UpdateWindowCaption();
                     SheetOperations.ShowStatusConfirmation(ServerEnvironment.IsOffline
-                        ? $"[OFFLINE MODE] {Contract.ModuleName} records loaded from local offline snapshot."
-                        : $"{Contract.ModuleName} records loaded from server (Online Mode).");
+                        ? Loc.T("ribbon.load.doneOffline", ModuleDisplayName)
+                        : Loc.T("ribbon.load.doneOnline", ModuleDisplayName));
                     RibbonUi?.Invalidate();
 
                     // Overlay scope has ended and Excel state is restored: safe to show advisory dialogs.
@@ -421,7 +657,7 @@ public abstract class ManagerRibbonBase : ExcelRibbon
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Failed loading {Contract.ModuleName} records:\n{ex.Message}", "Load Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show(Loc.T("ribbon.load.errorBody", ModuleDisplayName, ex.Message), Loc.T("ribbon.load.errorTitle"), MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 
@@ -446,6 +682,7 @@ public abstract class ManagerRibbonBase : ExcelRibbon
     {
         try { RibbonUi?.InvalidateControl("btnToggleInsertTop"); } catch { }
         try { RibbonUi?.InvalidateControl("btnToggleTotalRow"); } catch { }
+        try { RibbonUi?.InvalidateControl("btnToggleGuidePanel"); } catch { }
     }
 
     public void OnToggleInsertAtTopClicked(IRibbonControl control, bool isPressed)
@@ -479,12 +716,11 @@ public abstract class ManagerRibbonBase : ExcelRibbon
             }
             catch { }
 
-            string label = string.IsNullOrWhiteSpace(activeTableName) ? string.Empty : $" for '{activeTableName}'";
-            SheetOperations.ShowStatusConfirmation(
-                isPressed
-                    ? $"Insert at TOP active{label}: Spawns at top, redundant bottom rows trimmed."
-                    : $"Insert at BOTTOM active{label}: Spawns at bottom, redundant top rows trimmed."
-            );
+            bool hasTable = !string.IsNullOrWhiteSpace(activeTableName);
+            string message = isPressed
+                ? (hasTable ? Loc.T("ribbon.rows.insertTopOnTable", activeTableName!) : Loc.T("ribbon.rows.insertTopOn"))
+                : (hasTable ? Loc.T("ribbon.rows.insertBottomOnTable", activeTableName!) : Loc.T("ribbon.rows.insertBottomOn"));
+            SheetOperations.ShowStatusConfirmation(message);
         });
     }
 
@@ -499,17 +735,16 @@ public abstract class ManagerRibbonBase : ExcelRibbon
                 if (ws == null) return;
 
                 int tablesCleaned;
-                using (LoadingOverlay.BeginScope($"{Contract.ModuleName} — Trimming Empty Rows", "Scanning and trimming empty table rows..."))
+                using (LoadingOverlay.BeginScope(Loc.T("ribbon.rows.trimOverlay", ModuleDisplayName), Loc.T("ribbon.rows.trimStep"),
+                           operationKey: $"{Contract.ModuleName} — Trimming Empty Rows"))
                 {
                     tablesCleaned = TableRowManager.CleanActiveSheetTables(ws);
                 }
-                SheetOperations.ShowStatusConfirmation(
-                    $"Cleaned empty rows across {tablesCleaned} table(s). Exactly 1 empty row retained."
-                );
+                SheetOperations.ShowStatusConfirmation(Loc.T("ribbon.rows.trimDone", tablesCleaned));
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Failed cleaning empty rows:\n{ex.Message}", "Row Cleanup Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show(Loc.T("ribbon.rows.trimErrorBody", ex.Message), Loc.T("ribbon.rows.trimErrorTitle"), MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         });
     }
@@ -539,7 +774,8 @@ public abstract class ManagerRibbonBase : ExcelRibbon
 
                 try
                 {
-                    using (LoadingOverlay.BeginScope($"{Contract.ModuleName} — Removing Duplicates", "Scanning tables for duplicate rows..."))
+                    using (LoadingOverlay.BeginScope(Loc.T("ribbon.rows.dedupeOverlay", ModuleDisplayName), Loc.T("ribbon.rows.dedupeStep"),
+                               operationKey: $"{Contract.ModuleName} — Removing Duplicates"))
                     {
                         foreach (dynamic table in ws.ListObjects)
                         {
@@ -559,21 +795,21 @@ public abstract class ManagerRibbonBase : ExcelRibbon
                 {
                     try { OnAfterDuplicateRowsCleaned(totalDuplicatesRemoved); }
                     catch (Exception hookEx) { AppLogger.Warn($"[ManagerRibbonBase] OnAfterDuplicateRowsCleaned failed: {hookEx.Message}"); }
-                    SheetOperations.ShowStatusConfirmation($"Removed {totalDuplicatesRemoved} duplicate row(s).");
+                    SheetOperations.ShowStatusConfirmation(Loc.T("ribbon.rows.dedupeStatus", totalDuplicatesRemoved));
                     MessageBox.Show(
-                        $"Successfully removed {totalDuplicatesRemoved} duplicate row(s) from the active sheet.\n\n" +
+                        Loc.T("ribbon.rows.dedupeBody", totalDuplicatesRemoved) + "\n\n" +
                         string.Join("\n", warnings),
-                        "Duplicates Removed",
+                        Loc.T("ribbon.rows.dedupeTitle"),
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Information
                     );
                 }
                 else
                 {
-                    SheetOperations.ShowStatusConfirmation("No duplicate rows found on the active sheet.");
+                    SheetOperations.ShowStatusConfirmation(Loc.T("ribbon.rows.dedupeNoneStatus"));
                     MessageBox.Show(
-                        "No duplicate rows found in any tables on the active sheet.",
-                        "Clean Duplicates",
+                        Loc.T("ribbon.rows.dedupeNoneBody"),
+                        Loc.T("ribbon.rows.dedupeNoneTitle"),
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Information
                     );
@@ -581,7 +817,7 @@ public abstract class ManagerRibbonBase : ExcelRibbon
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Failed to remove duplicate rows:\n{ex.Message}", "Cleanup Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show(Loc.T("ribbon.rows.dedupeErrorBody", ex.Message), Loc.T("ribbon.rows.dedupeErrorTitle"), MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         });
     }
@@ -648,7 +884,7 @@ public abstract class ManagerRibbonBase : ExcelRibbon
                 }
 
                 RibbonUi?.InvalidateControl(control.Id);
-                SheetOperations.ShowStatusConfirmation(isPressed ? "Total row enabled." : "Total row hidden.");
+                SheetOperations.ShowStatusConfirmation(isPressed ? Loc.T("ribbon.rows.totalOn") : Loc.T("ribbon.rows.totalOff"));
             }
             catch (Exception ex)
             {
@@ -694,7 +930,31 @@ public abstract class ManagerRibbonBase : ExcelRibbon
             catch (Exception ex)
             {
                 AppLogger.Error($"[{Contract.ModuleName}] Report Bug dialog failed", ex);
-                MessageBox.Show($"Could not open the bug report form:\n{ex.Message}", "Report Bug", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show(Loc.T("common.bugReport.openFailed", ex.Message), Loc.T("ribbon.support.bug.label"), MessageBoxButtons.OK, MessageBoxIcon.Error);
+            }
+        });
+    }
+
+    public void OnCollectiveDictionaryClicked(IRibbonControl control)
+    {
+        ExcelAsyncUtil.QueueAsMacro(() =>
+        {
+            try
+            {
+                dynamic xlApp = ExcelDnaUtil.Application;
+
+                // Modal dialog exception (CLAUDE.md Rule 5.2): Excel must repaint & respond while the dialog is open.
+                try { xlApp.ScreenUpdating = true; } catch { }
+                try { xlApp.EnableEvents = true; } catch { }
+                try { Arrow.HideAll(); } catch { }
+
+                using var dialog = new CollectiveDictionaryDialog();
+                dialog.ShowDialog(new BugReportOwnerWindow(ExcelDnaUtil.WindowHandle));
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Error($"[{Contract.ModuleName}] Collective Dictionary dialog failed", ex);
+                MessageBox.Show(Loc.T("dict.openFailed", ex.Message), Loc.T("ribbon.support.dictionary.label"), MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         });
     }

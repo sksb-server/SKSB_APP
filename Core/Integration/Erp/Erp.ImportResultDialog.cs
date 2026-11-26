@@ -6,6 +6,7 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Text;
 using System.Windows.Forms;
+using SKSB_App.Core.Localization;
 
 public record ImportSkippedRecord
 {
@@ -46,7 +47,9 @@ public class ImportSummaryReport
 
     internal bool IsAdvisoryMode => !string.IsNullOrWhiteSpace(AdvisoryBanner);
     internal string EffectiveSkippedSectionTitle =>
-        !string.IsNullOrWhiteSpace(SkippedSectionTitle) ? SkippedSectionTitle! : (IsAdvisoryMode ? "Advisories" : DefaultSkippedSectionTitle);
+        !string.IsNullOrWhiteSpace(SkippedSectionTitle)
+            ? SkippedSectionTitle!
+            : (IsAdvisoryMode ? Loc.T("import.advisoriesTitle") : Loc.T("import.skippedTitle"));
 }
 
 public class ImportResultDialog : Form
@@ -57,7 +60,7 @@ public class ImportResultDialog : Form
     {
         SuspendLayout();
         _report = report;
-        Text = $"{report.SourceSystemName} Import Summary";
+        Text = Loc.T("import.windowTitle", report.SourceSystemName);
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
@@ -117,7 +120,7 @@ public class ImportResultDialog : Form
         {
             Text = !string.IsNullOrWhiteSpace(_report.Title)
                 ? _report.Title!
-                : (hasErrors ? "Import Completed with Advisories" : "Import Completed Successfully"),
+                : (hasErrors ? Loc.T("import.completedAdvisories") : Loc.T("import.completedSuccess")),
             Font = new Font("Segoe UI", 11.5f, FontStyle.Bold),
             ForeColor = Color.FromArgb(30, 41, 59),
             AutoSize = true,
@@ -127,26 +130,29 @@ public class ImportResultDialog : Form
         var sbMessage = new StringBuilder();
         if (!string.IsNullOrWhiteSpace(fileName))
         {
-            sbMessage.AppendLine($"Source: {fileName}");
+            sbMessage.AppendLine(Loc.T("import.source", fileName));
             sbMessage.AppendLine();
         }
 
         if (!string.IsNullOrWhiteSpace(_report.FilterRuleDescription))
         {
-            sbMessage.AppendLine($"  Filter Rule: {_report.FilterRuleDescription}");
+            sbMessage.AppendLine(Loc.T("import.filterRule", _report.FilterRuleDescription));
         }
 
         if (_report.FilteredExclusionCount > 0)
         {
-            sbMessage.AppendLine($"  Excluded by Filter: {_report.FilteredExclusionCount} record(s).");
+            sbMessage.AppendLine(Loc.T("import.excludedCount", _report.FilteredExclusionCount));
         }
 
-        sbMessage.AppendLine($"  Successfully Imported to Table: {_report.SuccessfullyImportedCount} {_report.EntityLabel}.");
-        sbMessage.AppendLine($"  {_report.EffectiveSkippedSectionTitle}: {_report.SkippedErrors.Count} {(_report.IsAdvisoryMode ? "item(s)" : "record(s)")}.");
+        sbMessage.AppendLine(Loc.T("import.importedCount", _report.SuccessfullyImportedCount, _report.EntityLabel));
+        sbMessage.AppendLine(Loc.T(
+            _report.IsAdvisoryMode ? "import.advisoryCount" : "import.skippedCount",
+            _report.EffectiveSkippedSectionTitle,
+            _report.SkippedErrors.Count));
         sbMessage.AppendLine();
         sbMessage.AppendLine(!string.IsNullOrWhiteSpace(_report.FooterHint)
             ? _report.FooterHint
-            : "Review the entries in Excel and click 'Save to System' when ready.");
+            : Loc.T("import.defaultFooterHint"));
 
         Label? lblBanner = null;
         if (_report.IsAdvisoryMode)
@@ -185,7 +191,7 @@ public class ImportResultDialog : Form
 
         var btnOk = new Button
         {
-            Text = "OK",
+            Text = Loc.T("common.ok"),
             Font = new Font("Segoe UI", 9f),
             AutoSize = true,
             Padding = new Padding(16, 6, 16, 6),
@@ -203,8 +209,8 @@ public class ImportResultDialog : Form
             var btnViewErrors = new Button
             {
                 Text = _report.IsAdvisoryMode
-                    ? $"View Advisories ({_report.SkippedErrors.Count})..."
-                    : $"View Skipped Errors ({_report.SkippedErrors.Count})...",
+                    ? Loc.T("import.viewAdvisories", _report.SkippedErrors.Count)
+                    : Loc.T("import.viewSkipped", _report.SkippedErrors.Count),
                 Font = new Font("Segoe UI", 9f, FontStyle.Bold),
                 AutoSize = true,
                 Padding = new Padding(14, 6, 14, 6),
@@ -236,7 +242,9 @@ public class ImportResultDialog : Form
     {
         using var errForm = new Form
         {
-            Text = $"{_report.SourceSystemName} - {(_report.IsAdvisoryMode ? "Advisories Report" : "Skipped Entries Report")}",
+            Text = Loc.T(
+                _report.IsAdvisoryMode ? "import.details.advisoriesWindowTitle" : "import.details.skippedWindowTitle",
+                _report.SourceSystemName),
             Size = new Size(680, 440),
             StartPosition = FormStartPosition.CenterParent,
             FormBorderStyle = FormBorderStyle.Sizable,
@@ -257,7 +265,7 @@ public class ImportResultDialog : Form
 
         var sb = new StringBuilder();
         sb.AppendLine("==========================================================================");
-        sb.AppendLine($" {_report.EffectiveSkippedSectionTitle.ToUpperInvariant()} REPORT ({_report.SkippedErrors.Count} total)");
+        sb.AppendLine(Loc.T("import.details.header", _report.EffectiveSkippedSectionTitle.ToUpperInvariant(), _report.SkippedErrors.Count));
         sb.AppendLine("==========================================================================");
         sb.AppendLine();
 
@@ -271,15 +279,15 @@ public class ImportResultDialog : Form
         foreach (var err in _report.SkippedErrors)
         {
             if (err.ExcelRowNumber > 0)
-                sb.AppendLine($"[Excel Row {err.ExcelRowNumber}]");
+                sb.AppendLine(Loc.T("import.details.excelRow", err.ExcelRowNumber));
             else if (!string.IsNullOrWhiteSpace(err.Category))
                 sb.AppendLine($"[{err.Category}]");
             else if (!string.IsNullOrWhiteSpace(err.Identifier))
                 sb.AppendLine($"[{err.Identifier}]");
-            sb.AppendLine($"    Identifier : {err.Identifier}");
+            sb.AppendLine(Loc.T("import.details.identifier", err.Identifier));
             if (!string.IsNullOrWhiteSpace(err.NameOrTitle))
-                sb.AppendLine($"    Name/Title : {err.NameOrTitle}");
-            sb.AppendLine($"    Reason     : {err.Reason}");
+                sb.AppendLine(Loc.T("import.details.nameOrTitle", err.NameOrTitle));
+            sb.AppendLine(Loc.T("import.details.reason", err.Reason));
             sb.AppendLine("--------------------------------------------------------------------------");
         }
 

@@ -142,19 +142,31 @@ internal static class AttendanceRollupService
     /// Per (staff, project): every in -> out span. A span ends at the worker's next punch of any kind
     /// (a CheckOut, or a CheckIn to another project), and stays open when nothing follows.
     /// Manual overrides (Manual source with an Override Reason) take precedence via <see cref="EffectiveTimeline"/>.
+    /// With <paramref name="slots"/> and <paramref name="otStartTime"/>, a CheckIn with a blank Project ID (thumbprint-only
+    /// punch) is attributed in memory to the worker's on-board planned project (<see cref="ScheduledProjectFor"/>); the
+    /// <see cref="AttendanceEntry"/> itself is never modified.
     /// </summary>
     internal static Dictionary<(long StaffId, string ProjectId), List<WorkerProjectSpan>> BuildSpans(
-        IEnumerable<AttendanceEntry> entries, DateOnly date, TimeOnly dayStartTime, TimeOnly? nextDayStartTime = null)
+        IEnumerable<AttendanceEntry> entries, DateOnly date, TimeOnly dayStartTime, TimeOnly? nextDayStartTime = null,
+        IReadOnlyList<DailyProjectSchedule>? slots = null, TimeOnly? otStartTime = null)
     {
         var result = new Dictionary<(long, string), List<WorkerProjectSpan>>();
         foreach (var worker in ApprovedFor(entries, date, dayStartTime, nextDayStartTime).GroupBy(e => e.StaffID))
         {
+            string ProjectOf(AttendanceEntry e)
+            {
+                string p = EntryProject(e);
+                if (p.Length == 0 && slots != null && otStartTime.HasValue)
+                    p = ScheduledProjectFor(worker.Key, e.Date, e.Time, date, slots, dayStartTime, otStartTime.Value);
+                return p;
+            }
+
             var timeline = EffectiveTimeline(worker.ToList());
             for (int i = 0; i < timeline.Count; i++)
             {
                 if (timeline[i].EntryType != AttendanceEntryType.CheckIn) continue;
 
-                string project = EntryProject(timeline[i]);
+                string project = ProjectOf(timeline[i]);
                 if (project.Length == 0) continue;
 
                 bool hasNext = i + 1 < timeline.Count;
@@ -164,7 +176,7 @@ internal static class AttendanceRollupService
                 var key = (worker.Key, project);
                 if (!result.TryGetValue(key, out var spans)) result[key] = spans = new List<WorkerProjectSpan>();
                 AttendanceEntryType? outType = hasNext ? timeline[i + 1].EntryType : null;
-                string? outProject = hasNext && timeline[i + 1].EntryType == AttendanceEntryType.CheckIn ? EntryProject(timeline[i + 1]) : null;
+                string? outProject = hasNext && timeline[i + 1].EntryType == AttendanceEntryType.CheckIn ? ProjectOf(timeline[i + 1]) : null;
                 spans.Add(new WorkerProjectSpan(timeline[i].Time, end, inOffset, outOffset, outType, outProject));
             }
         }
@@ -306,6 +318,11 @@ internal static class AttendanceRollupService
             }
         }
 
+        // Projects currently drawn on the board: a planned project missing from here had its slot removed.
+        var boardProjects = new HashSet<string>(
+            slots.Select(s => NormalizeProjectId(s.ProjectID)).Where(id => id.Length > 0),
+            StringComparer.OrdinalIgnoreCase);
+
         // Active Worker, Office and Admin staff are rolled up.
         // Everyone employed on this date gets a row, even without a punch, slot, or override.
         var ids = new SortedSet<long>(Roster.ActiveAttendanceOn(date).Select(s => s.Id));
@@ -346,6 +363,18 @@ internal static class AttendanceRollupService
                     projectsDone.Add(project);
             }
 
+            // Planned Projects: on-board slots listing the worker, then previously planned projects whose slot was
+            // removed from the board (unassigning the worker from an on-board slot drops that project instead).
+            var activePlanned = mySlots
+                .Select(s => NormalizeProjectId(s.ProjectID))
+                .Where(p => p.Length > 0)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+            var preservedOffBoard = SplitProjects(prior?.PlannedProjects)
+                .Where(p => !boardProjects.Contains(p) && !activePlanned.Contains(p, StringComparer.OrdinalIgnoreCase))
+                .ToList();
+            string plannedProjects = string.Join(", ", activePlanned.Concat(preservedOffBoard));
+
             bool present = clockIn.HasValue;
             if (isOffice && present && projectsDone.Count == 0) projectsDone.Add(OfficeProjectName);
             bool nightBand = mySlots.Any(s => s.Shift == Shifts.Night);
@@ -381,6 +410,7 @@ internal static class AttendanceRollupService
                 ClockInTime = clockIn,
                 ClockOutTime = clockOut,
                 ProjectCheckIns = string.Join(", ", projectsDone),
+                PlannedProjects = plannedProjects,
                 ProjectsDone = projectsDone,
                 RegularShift = regular,
                 AdditionalShifts = additionalShifts,
@@ -395,6 +425,15 @@ internal static class AttendanceRollupService
 
         return result;
     }
+
+    /// <summary>Splits a comma-separated project list into distinct normalized project IDs (blanks dropped, order kept).</summary>
+    internal static List<string> SplitProjects(string? csv) =>
+        (csv ?? string.Empty)
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(NormalizeProjectId)
+            .Where(p => p.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
 
     /// <summary>Status of an un-punched staff member: their SQL Payroll leave status, otherwise Absence.</summary>
     private static AttendanceStatus AbsentStatusFor(long staffId, IReadOnlyDictionary<long, StaffLeaveEntry>? leavesByStaffId) =>

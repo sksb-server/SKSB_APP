@@ -713,6 +713,19 @@ public static class ServerSyncCommands
     private static string JoinDistinct(IEnumerable<string> items) =>
         string.Join(", ", items.Where(i => !string.IsNullOrWhiteSpace(i)).Select(i => i.Trim()).Distinct(StringComparer.OrdinalIgnoreCase));
 
+    /// <summary>
+    /// Project fallback for present workers with no check-ins: planned projects that are still on the board
+    /// (greyed-out removed-slot projects never leak), else the worker's on-board projects for that date.
+    /// </summary>
+    private static string OnBoardFallback(AttendanceStatus status, string plannedProjects, List<string>? onBoard)
+    {
+        if (status is not (AttendanceStatus.Presence or AttendanceStatus.Late or AttendanceStatus.NightShift)) return string.Empty;
+        if (onBoard == null || onBoard.Count == 0) return string.Empty;
+        var board = new HashSet<string>(onBoard.Select(p => p.Trim()), StringComparer.OrdinalIgnoreCase);
+        var planned = plannedProjects.Split(',').Select(t => t.Trim()).Where(t => t.Length > 0 && board.Contains(t)).ToList();
+        return JoinDistinct(planned.Count > 0 ? planned : onBoard);
+    }
+
     public static List<StaffSummaryRow> FetchStaffSummaryRows(StaffRecord staff)
     {
         var rows = new List<StaffSummaryRow>();
@@ -723,14 +736,29 @@ public static class ServerSyncCommands
         {
             try
             {
+                try { ServerDispatcher.EnsureScheduleSchema(); }
+                catch (Exception ex) { AppLogger.Warn($"[StaffManager] Schedule schema bootstrap skipped: {ex.Message}"); }
                 var db = new PostgreSqlService();
                 var att = db.Query<dynamic>(
-                    "SELECT schedule_date, attendance_status, clock_in_time, clock_out_time, COALESCE(project_check_ins, '') AS project_check_ins, projects_done, regular_shift, additional_shifts, ot_hours, additional_ot_hours, total_flattened_hours FROM daily_attendances WHERE staff_id = @StaffId ORDER BY schedule_date DESC;",
+                    "SELECT schedule_date, attendance_status, clock_in_time, clock_out_time, COALESCE(project_check_ins, '') AS project_check_ins, COALESCE(planned_projects, '') AS planned_projects, projects_done, regular_shift, additional_shifts, ot_hours, additional_ot_hours, total_flattened_hours FROM daily_attendances WHERE staff_id = @StaffId ORDER BY schedule_date DESC;",
                     new { StaffId = staff.StaffID }).ToList();
 
                 var vehicles = new Dictionary<DateOnly, List<string>>();
+                var scheduledProjects = new Dictionary<DateOnly, List<string>>();
                 if (names.Length > 0)
                 {
+                    var onBoardRows = db.Query<dynamic>(
+                        "SELECT schedule_date, project_id FROM daily_project_schedules WHERE EXISTS (SELECT 1 FROM unnest(workers) w WHERE lower(trim(w)) = ANY(@NamesLower)) ORDER BY schedule_date ASC, shift, slot_index;",
+                        new { NamesLower = names });
+                    foreach (var v in onBoardRows)
+                    {
+                        DateOnly d = ToDateOnly((object?)v.schedule_date);
+                        string pid = ((string?)(v.project_id ?? string.Empty)).Trim();
+                        if (pid.Length == 0) continue;
+                        if (!scheduledProjects.TryGetValue(d, out var plist)) scheduledProjects[d] = plist = new List<string>();
+                        plist.Add(pid);
+                    }
+
                     var veh = db.Query<dynamic>(
                         "SELECT schedule_date, vehicles FROM daily_project_schedules WHERE COALESCE(array_length(vehicles, 1), 0) > 0 AND EXISTS (SELECT 1 FROM unnest(workers) w WHERE lower(trim(w)) = ANY(@NamesLower)) ORDER BY schedule_date ASC;",
                         new { NamesLower = names });
@@ -747,11 +775,14 @@ public static class ServerSyncCommands
                     DateOnly date = ToDateOnly((object?)a.schedule_date);
                     string projects = ((string)(a.project_check_ins ?? string.Empty)).Trim();
                     if (projects.Length == 0 && (object?)a.projects_done is IEnumerable<string> done) projects = string.Join(", ", done);
+                    var st = Enum.TryParse<AttendanceStatus>((string)(a.attendance_status ?? "Absence"), true, out AttendanceStatus parsedSt) ? parsedSt : AttendanceStatus.Absence;
+                    if (projects.Length == 0)
+                        projects = OnBoardFallback(st, (string)(a.planned_projects ?? string.Empty), scheduledProjects.TryGetValue(date, out var sp) ? sp : null);
                     rows.Add(new StaffSummaryRow
                     {
                         Date = date,
                         Time = FormatTimeRange(ToTimeOnly((object?)a.clock_in_time), ToTimeOnly((object?)a.clock_out_time)),
-                        Status = Enum.TryParse<AttendanceStatus>((string)(a.attendance_status ?? "Absence"), true, out AttendanceStatus st) ? st : AttendanceStatus.Absence,
+                        Status = st,
                         Projects = projects,
                         VehicleDriven = vehicles.TryGetValue(date, out var vl) ? JoinDistinct(vl) : string.Empty,
                         RegularShift = a.regular_shift != null ? Convert.ToDecimal(a.regular_shift) : 0m,
@@ -778,12 +809,20 @@ public static class ServerSyncCommands
             var plates = snap.Projects
                 .Where(p => p.Workers.Any(x => names.Contains((x ?? string.Empty).Trim().ToLowerInvariant())))
                 .SelectMany(p => p.Vehicles);
+            string snapProjects = !string.IsNullOrWhiteSpace(w.ProjectCheckIns) ? w.ProjectCheckIns.Trim() : string.Join(", ", w.ProjectsDone);
+            if (snapProjects.Length == 0)
+            {
+                var onBoardIds = snap.Projects
+                    .Where(p => p.Workers.Any(x => names.Contains((x ?? string.Empty).Trim().ToLowerInvariant())))
+                    .Select(p => p.ProjectID).ToList();
+                snapProjects = OnBoardFallback(w.AttendanceStatus, w.PlannedProjects ?? string.Empty, onBoardIds);
+            }
             rows.Add(new StaffSummaryRow
             {
                 Date = w.DailyScheduleDate == default ? snap.DailyScheduleDate : w.DailyScheduleDate,
                 Time = FormatTimeRange(w.ClockInTime, w.ClockOutTime),
                 Status = w.AttendanceStatus,
-                Projects = !string.IsNullOrWhiteSpace(w.ProjectCheckIns) ? w.ProjectCheckIns.Trim() : string.Join(", ", w.ProjectsDone),
+                Projects = snapProjects,
                 VehicleDriven = JoinDistinct(plates),
                 RegularShift = w.RegularShift,
                 AdditionalShifts = w.AdditionalShifts,

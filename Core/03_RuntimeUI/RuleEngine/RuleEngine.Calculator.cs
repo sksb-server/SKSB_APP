@@ -167,13 +167,79 @@ public static class RuleCalculator
         }
     }
 
+    // =========================================================================
+    // 2.3b VIEW-ONLY EXPRESSION OVERRIDES (AppDomain-backed across .xll ALCs)
+    // =========================================================================
+
+    private const string ExpressionOverrideKey = "SKSB_CALC_EXPR_OVERRIDES";
+
+    private static Dictionary<string, string> SharedExpressionOverrides()
+    {
+        lock (AppDomain.CurrentDomain)
+        {
+            if (AppDomain.CurrentDomain.GetData(ExpressionOverrideKey) is Dictionary<string, string> existing)
+                return existing;
+
+            var created = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            AppDomain.CurrentDomain.SetData(ExpressionOverrideKey, created);
+            return created;
+        }
+    }
+
+    private static string BuildOverrideKey(string tableName, string headerName) =>
+        $"{RuleRegistry.NormalizeIdentifier(tableName)}|{RuleRegistry.NormalizeIdentifier(headerName)}";
+
+    /// <summary>Sets a view-only calculation expression override for a table column, or removes it when null/whitespace.</summary>
+    public static void SetColumnExpressionOverride(string tableName, string headerName, string? expression)
+    {
+        if (string.IsNullOrWhiteSpace(tableName) || string.IsNullOrWhiteSpace(headerName)) return;
+        string key = BuildOverrideKey(tableName, headerName);
+        var map = SharedExpressionOverrides();
+        lock (map)
+        {
+            if (string.IsNullOrWhiteSpace(expression)) map.Remove(key);
+            else map[key] = expression.Trim();
+        }
+    }
+
+    /// <summary>Returns the active view-only calculation expression override for a table column, if any.</summary>
+    public static string? GetColumnExpressionOverride(string tableName, string headerName)
+    {
+        if (string.IsNullOrWhiteSpace(tableName) || string.IsNullOrWhiteSpace(headerName)) return null;
+        string key = BuildOverrideKey(tableName, headerName);
+        var map = SharedExpressionOverrides();
+        lock (map)
+        {
+            return map.TryGetValue(key, out string? expr) ? expr : null;
+        }
+    }
+
+    /// <summary>Clears view-only expression overrides for one table, or all tables when <paramref name="tableName"/> is null/blank.</summary>
+    public static void ClearColumnExpressionOverrides(string? tableName = null)
+    {
+        var map = SharedExpressionOverrides();
+        lock (map)
+        {
+            if (string.IsNullOrWhiteSpace(tableName))
+            {
+                map.Clear();
+                return;
+            }
+
+            string prefix = $"{RuleRegistry.NormalizeIdentifier(tableName)}|";
+            var toRemove = map.Keys.Where(k => k.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)).ToList();
+            foreach (string key in toRemove) map.Remove(key);
+        }
+    }
+
     /// <summary>Evaluates a rule's expression, then applies DecimalPlaces and RoundDownStep. null => no value.</summary>
     public static decimal? EvaluateColumnRule(
         PropertyRuleDescriptor rule, string[] colHeaders, object?[] rawObjects, Func<string, decimal> parameterResolver)
     {
         var calc = rule.CalculateRule;
         if (calc == null) return null;
-        decimal? v = EvaluateRowExpressionNullable(calc.Expression, colHeaders, rawObjects, parameterResolver);
+        string expr = GetColumnExpressionOverride(rule.TableName, rule.HeaderName) ?? calc.Expression;
+        decimal? v = EvaluateRowExpressionNullable(expr, colHeaders, rawObjects, parameterResolver);
         return v.HasValue ? FinalizeValue(v.Value, calc.DecimalPlaces, rule.RoundDownStep) : null;
     }
 

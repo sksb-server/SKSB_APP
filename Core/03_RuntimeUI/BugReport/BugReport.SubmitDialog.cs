@@ -10,6 +10,7 @@ using System.Linq;
 using System.Threading.Tasks;
 using System.Windows.Forms;
 using SKSB_App.Core.Diagnostics;
+using SKSB_App.Core.Localization;
 
 /// <summary>Wraps a raw HWND (e.g. <c>ExcelDnaUtil.WindowHandle</c>) so it can parent a WinForms dialog.</summary>
 public sealed class BugReportOwnerWindow : IWin32Window
@@ -65,7 +66,7 @@ public sealed class BugReportSubmitDialog : Form
         if (string.IsNullOrWhiteSpace(_context.AppVersion)) _context.AppVersion = BugReportRepository.ResolveAppVersion();
 
         SuspendLayout();
-        Text = "Report a Bug";
+        Text = Loc.T("bugReport.windowTitle");
         StartPosition = FormStartPosition.CenterParent;
         FormBorderStyle = FormBorderStyle.Sizable;
         MinimizeBox = false;
@@ -131,7 +132,7 @@ public sealed class BugReportSubmitDialog : Form
 
         var lblHeader = new Label
         {
-            Text = "Report a Bug",
+            Text = Loc.T("bugReport.header"),
             Font = new Font("Segoe UI", 14f, FontStyle.Bold),
             ForeColor = Slate900,
             AutoSize = true,
@@ -139,7 +140,7 @@ public sealed class BugReportSubmitDialog : Form
         };
         var lblSub = new Label
         {
-            Text = "Describe what went wrong. Screenshots and screen recordings help us fix it faster.",
+            Text = Loc.T("bugReport.subtitle"),
             ForeColor = Slate500,
             AutoSize = true,
             Margin = new Padding(0, 0, 0, 10)
@@ -152,7 +153,7 @@ public sealed class BugReportSubmitDialog : Form
         {
             Dock = DockStyle.Fill,
             MaxLength = 200,
-            PlaceholderText = "Short summary, e.g. \"Save fails on Attendance sheet after date switch\"",
+            PlaceholderText = Loc.T("bugReport.titlePlaceholder"),
             Margin = new Padding(0, 0, 0, 10)
         };
 
@@ -162,7 +163,7 @@ public sealed class BugReportSubmitDialog : Form
             Multiline = true,
             AcceptsReturn = true,
             ScrollBars = ScrollBars.Vertical,
-            PlaceholderText = "Steps to reproduce:\r\n1. \r\n2. \r\n\r\nExpected result:\r\n\r\nActual result:",
+            PlaceholderText = Loc.T("bugReport.descPlaceholder"),
             Margin = new Padding(0, 0, 0, 10)
         };
 
@@ -177,26 +178,23 @@ public sealed class BugReportSubmitDialog : Form
         };
         var lblAttachments = new Label
         {
-            Text = "Attachments",
+            Text = Loc.T("bugReport.attachments"),
             Font = new Font("Segoe UI", 9f, FontStyle.Bold),
             ForeColor = Slate800,
             AutoSize = true,
             Margin = new Padding(0, 7, 10, 0)
         };
         var tips = new ToolTip { AutoPopDelay = 15000 };
-        var btnShot = CreateToolButton("Take Screenshot");
-        var btnPaste = CreateToolButton("Paste Image");
-        var btnAdd = CreateToolButton("Add File...");
-        var btnSnip = CreateToolButton("Snip / Record");
-        var btnRemove = CreateToolButton("Remove");
-        tips.SetToolTip(btnShot, "Hides this dialog briefly and captures the primary screen.");
-        tips.SetToolTip(btnPaste, "Attaches the image currently on the clipboard (Ctrl+V also works anywhere in this dialog).");
-        tips.SetToolTip(btnAdd, "Attach image or video files (max 25 MB per file, 50 MB total).");
-        tips.SetToolTip(btnSnip,
-            "Opens the Windows Snipping Tool.\n" +
-            "• Image snip: the snip is copied to the clipboard — then click 'Paste Image' (or Ctrl+V).\n" +
-            "• Video record: save the recording, then attach it with 'Add File...'.");
-        tips.SetToolTip(btnRemove, "Removes the selected attachment.");
+        var btnShot = CreateToolButton(Loc.T("bugReport.takeScreenshot"));
+        var btnPaste = CreateToolButton(Loc.T("bugReport.pasteImage"));
+        var btnAdd = CreateToolButton(Loc.T("bugReport.addFile"));
+        var btnSnip = CreateToolButton(Loc.T("bugReport.snip"));
+        var btnRemove = CreateToolButton(Loc.T("bugReport.remove"));
+        tips.SetToolTip(btnShot, Loc.T("bugReport.tip.screenshot"));
+        tips.SetToolTip(btnPaste, Loc.T("bugReport.tip.paste"));
+        tips.SetToolTip(btnAdd, Loc.T("bugReport.tip.addFile"));
+        tips.SetToolTip(btnSnip, Loc.T("bugReport.tip.snip"));
+        tips.SetToolTip(btnRemove, Loc.T("bugReport.tip.remove"));
         btnShot.Click += async (s, e) => await TakeScreenshotAsync();
         btnPaste.Click += (s, e) => PasteClipboardImage(showWarnings: true);
         btnAdd.Click += (s, e) => AddFiles();
@@ -235,7 +233,7 @@ public sealed class BugReportSubmitDialog : Form
             Dock = DockStyle.Fill,
             TextAlign = ContentAlignment.MiddleCenter,
             ForeColor = Slate400,
-            Text = "No attachment selected",
+            Text = Loc.T("bugReport.previewNone"),
             Visible = true
         };
         previewHost.Controls.Add(_picPreview);
@@ -247,18 +245,18 @@ public sealed class BugReportSubmitDialog : Form
 
         _chkLog = new CheckBox
         {
-            Text = "Attach recent runtime trace log (SKSB_Runtime_Trace.log)",
+            Text = Loc.T("bugReport.attachLog"),
             Checked = true,
             AutoSize = true,
             ForeColor = Slate800,
             Margin = new Padding(0, 0, 0, 6)
         };
 
-        var meta = new List<string> { string.IsNullOrWhiteSpace(_context.SourceModule) ? "Unknown module" : _context.SourceModule };
+        var meta = new List<string> { string.IsNullOrWhiteSpace(_context.SourceModule) ? Loc.T("bugReport.unknownModule") : Loc.ModuleDisplayName(_context.SourceModule) };
         if (!string.IsNullOrWhiteSpace(_context.ActiveSheet)) meta.Add(_context.ActiveSheet);
         meta.Add($"v{_context.AppVersion}");
         meta.Add($"{_context.ReportedBy}@{_context.MachineName}");
-        if (_context.IsOffline) meta.Add("OFFLINE");
+        if (_context.IsOffline) meta.Add(Loc.T("bugReport.offline"));
         var lblMeta = new Label
         {
             Text = string.Join("  |  ", meta),
@@ -281,7 +279,7 @@ public sealed class BugReportSubmitDialog : Form
         };
         _btnSubmit = new Button
         {
-            Text = "Submit Bug Report",
+            Text = Loc.T("bugReport.submit"),
             AutoSize = true,
             MinimumSize = new Size(150, 32),
             BackColor = Indigo600,
@@ -296,7 +294,7 @@ public sealed class BugReportSubmitDialog : Form
 
         _btnCancel = new Button
         {
-            Text = "Cancel",
+            Text = Loc.T("common.cancel"),
             AutoSize = true,
             MinimumSize = new Size(90, 32),
             BackColor = Color.White,
@@ -311,9 +309,9 @@ public sealed class BugReportSubmitDialog : Form
         CancelButton = _btnCancel;
 
         _root.Controls.Add(header, 0, 0);
-        _root.Controls.Add(CreateFieldLabel("Title *"), 0, 1);
+        _root.Controls.Add(CreateFieldLabel(Loc.T("bugReport.titleLabel")), 0, 1);
         _root.Controls.Add(_txtTitle, 0, 2);
-        _root.Controls.Add(CreateFieldLabel("Description"), 0, 3);
+        _root.Controls.Add(CreateFieldLabel(Loc.T("bugReport.descLabel")), 0, 3);
         _root.Controls.Add(_txtDescription, 0, 4);
         _root.Controls.Add(toolbar, 0, 5);
         _root.Controls.Add(split, 0, 6);
@@ -374,7 +372,7 @@ public sealed class BugReportSubmitDialog : Form
 
         if (png == null)
         {
-            MessageBox.Show(this, "Could not capture the screen.", "Take Screenshot", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(this, Loc.T("bugReport.captureFailed"), Loc.T("bugReport.takeScreenshot"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return;
         }
         TryAddAttachment(new BugReportAttachmentInput
@@ -392,8 +390,8 @@ public sealed class BugReportSubmitDialog : Form
             if (!Clipboard.ContainsImage())
             {
                 if (showWarnings)
-                    MessageBox.Show(this, "The clipboard does not contain an image.\n\nTip: use 'Snip / Record' or Win+Shift+S to snip part of the screen first.",
-                        "Paste Image", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                    MessageBox.Show(this, Loc.T("bugReport.clipboardNoImage"),
+                        Loc.T("bugReport.pasteImage"), MessageBoxButtons.OK, MessageBoxIcon.Information);
                 return false;
             }
             using Image? img = Clipboard.GetImage();
@@ -407,7 +405,7 @@ public sealed class BugReportSubmitDialog : Form
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, $"Failed to paste image:\n{ex.Message}", "Paste Image", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(this, Loc.T("bugReport.pasteFailed", ex.Message), Loc.T("bugReport.pasteImage"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return false;
         }
     }
@@ -416,12 +414,12 @@ public sealed class BugReportSubmitDialog : Form
     {
         using var ofd = new OpenFileDialog
         {
-            Title = "Attach images or videos",
+            Title = Loc.T("bugReport.addFileTitle"),
             Multiselect = true,
-            Filter = "Images & Videos|*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp;*.mp4;*.mov;*.webm;*.mkv;*.avi|" +
-                     "Images|*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp|" +
-                     "Videos|*.mp4;*.mov;*.webm;*.mkv;*.avi|" +
-                     "All Files|*.*"
+            Filter = FilterName("bugReport.filter.imagesVideos") + "|*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp;*.mp4;*.mov;*.webm;*.mkv;*.avi|" +
+                     FilterName("bugReport.filter.images") + "|*.png;*.jpg;*.jpeg;*.gif;*.bmp;*.webp|" +
+                     FilterName("bugReport.filter.videos") + "|*.mp4;*.mov;*.webm;*.mkv;*.avi|" +
+                     FilterName("bugReport.filter.all") + "|*.*"
         };
         if (ofd.ShowDialog(this) != DialogResult.OK) return;
 
@@ -433,15 +431,15 @@ public sealed class BugReportSubmitDialog : Form
                 if (info.Length > BugReportRepository.MaxFileBytes)
                 {
                     MessageBox.Show(this,
-                        $"'{info.Name}' is {BugReportFormat.FormatSize(info.Length)}, which exceeds the 25 MB per-file limit.\n\nTrim or compress the video and try again.",
-                        "File Too Large", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        Loc.T("bugReport.fileTooLargeDetailed", info.Name, BugReportFormat.FormatSize(info.Length)),
+                        Loc.T("bugReport.fileTooLargeTitle"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     continue;
                 }
                 if (TotalBytes() + info.Length > BugReportRepository.MaxTotalBytes)
                 {
                     MessageBox.Show(this,
-                        $"Adding '{info.Name}' would exceed the 50 MB total attachment limit.\n\nRemove another attachment first.",
-                        "Attachment Limit Reached", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                        Loc.T("bugReport.limitDetailed", info.Name),
+                        Loc.T("bugReport.limitTitle"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
                     continue;
                 }
 
@@ -461,7 +459,8 @@ public sealed class BugReportSubmitDialog : Form
             }
             catch (Exception ex)
             {
-                MessageBox.Show(this, $"Could not read '{Path.GetFileName(path)}':\n{ex.Message}", "Add File", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show(this, Loc.T("bugReport.readFailed", Path.GetFileName(path), ex.Message),
+                    Loc.T("bugReport.addFile").TrimEnd('.', ' '), MessageBoxButtons.OK, MessageBoxIcon.Warning);
             }
         }
     }
@@ -474,8 +473,8 @@ public sealed class BugReportSubmitDialog : Form
         }
         catch (Exception ex)
         {
-            MessageBox.Show(this, $"Could not launch the Windows Snipping Tool:\n{ex.Message}\n\nYou can also press Win+Shift+S.",
-                "Snip / Record", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            MessageBox.Show(this, Loc.T("bugReport.snipFailed", ex.Message),
+                Loc.T("bugReport.snip"), MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
     }
 
@@ -492,13 +491,13 @@ public sealed class BugReportSubmitDialog : Form
         if (input.FileSize > BugReportRepository.MaxFileBytes)
         {
             if (showWarnings)
-                MessageBox.Show(this, $"'{input.FileName}' exceeds the 25 MB per-file limit.", "File Too Large", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show(this, Loc.T("bugReport.fileTooLarge", input.FileName), Loc.T("bugReport.fileTooLargeTitle"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return false;
         }
         if (TotalBytes() + input.FileSize > BugReportRepository.MaxTotalBytes)
         {
             if (showWarnings)
-                MessageBox.Show(this, $"Adding '{input.FileName}' would exceed the 50 MB total attachment limit.", "Attachment Limit Reached", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                MessageBox.Show(this, Loc.T("bugReport.limit", input.FileName), Loc.T("bugReport.limitTitle"), MessageBoxButtons.OK, MessageBoxIcon.Warning);
             return false;
         }
 
@@ -516,8 +515,8 @@ public sealed class BugReportSubmitDialog : Form
     {
         if (_lblTotals == null) return;
         _lblTotals.Text = _attachments.Count == 0
-            ? "None"
-            : $"{_attachments.Count} file(s), {BugReportFormat.FormatSize(TotalBytes())} / 50 MB";
+            ? Loc.T("bugReport.totalsNone")
+            : Loc.T("bugReport.totals", _attachments.Count, BugReportFormat.FormatSize(TotalBytes()));
     }
 
     // =========================================================================
@@ -530,8 +529,8 @@ public sealed class BugReportSubmitDialog : Form
         if (_lstAttachments.SelectedItem is not AttachmentItem item)
         {
             ShowPreviewMessage(_attachments.Count == 0
-                ? "No attachments yet.\n\nTake a screenshot, paste an image (Ctrl+V) or add a file."
-                : "Select an attachment to preview");
+                ? Loc.T("bugReport.previewEmpty")
+                : Loc.T("bugReport.previewSelect"));
             return;
         }
 
@@ -547,13 +546,15 @@ public sealed class BugReportSubmitDialog : Form
             }
             catch
             {
-                ShowPreviewMessage($"{item.Input.FileName}\n\nPreview not available — file attached, ready to submit.");
+                ShowPreviewMessage(Loc.T("bugReport.previewUnavailable", item.Input.FileName));
                 return;
             }
         }
 
-        string kind = item.Input.ContentType.StartsWith("video/", StringComparison.OrdinalIgnoreCase) ? "Video" : "File";
-        ShowPreviewMessage($"{kind} attached — ready to submit\n\n{item.Input.FileName}\n{BugReportFormat.FormatSize(item.Input.FileSize)}");
+        string kindKey = item.Input.ContentType.StartsWith("video/", StringComparison.OrdinalIgnoreCase)
+            ? "bugReport.previewVideo"
+            : "bugReport.previewFile";
+        ShowPreviewMessage(Loc.T(kindKey, item.Input.FileName, BugReportFormat.FormatSize(item.Input.FileSize)));
     }
 
     private void ShowPreviewMessage(string text)
@@ -602,7 +603,7 @@ public sealed class BugReportSubmitDialog : Form
         string title = _txtTitle.Text.Trim();
         if (title.Length == 0)
         {
-            MessageBox.Show(this, "Please enter a short title for the bug.", "Title Required", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            MessageBox.Show(this, Loc.T("bugReport.titleRequired"), Loc.T("bugReport.titleRequiredTitle"), MessageBoxButtons.OK, MessageBoxIcon.Information);
             _txtTitle.Focus();
             return;
         }
@@ -616,7 +617,7 @@ public sealed class BugReportSubmitDialog : Form
         {
             long bugId = await Task.Run(() => BugReportRepository.SubmitBugReport(title, description, _context, attachments));
             SetBusy(false);
-            MessageBox.Show(this, $"Bug Report #{bugId} submitted. Thank you!", "Bug Report Submitted", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            MessageBox.Show(this, Loc.T("bugReport.submitted", bugId), Loc.T("bugReport.submittedTitle"), MessageBoxButtons.OK, MessageBoxIcon.Information);
             DialogResult = DialogResult.OK;
             Close();
         }
@@ -625,8 +626,8 @@ public sealed class BugReportSubmitDialog : Form
             SetBusy(false);
             AppLogger.Error("[BugReport] Submit failed", ex);
             MessageBox.Show(this,
-                $"The bug report could not be submitted.\n\n{ex.Message}\n\nYour title, description and attachments are kept — check the server connection and try again.",
-                "Submit Failed", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                Loc.T("bugReport.submitFailed", ex.Message),
+                Loc.T("bugReport.submitFailedTitle"), MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 
@@ -636,8 +637,11 @@ public sealed class BugReportSubmitDialog : Form
         _root.Enabled = !busy;
         UseWaitCursor = busy;
         Cursor = busy ? Cursors.WaitCursor : Cursors.Default;
-        _btnSubmit.Text = busy ? "Submitting..." : "Submit Bug Report";
+        _btnSubmit.Text = busy ? Loc.T("bugReport.submitting") : Loc.T("bugReport.submit");
     }
+
+    /// <summary>OpenFileDialog filter names must never contain the '|' separator.</summary>
+    private static string FilterName(string key) => Loc.T(key).Replace("|", "/");
 
     protected override void OnFormClosing(FormClosingEventArgs e)
     {

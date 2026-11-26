@@ -111,6 +111,39 @@ internal static class ServerSyncCommands
     private static readonly TableBaseline<string> ProjectBaseline = new();
     private static readonly TableBaseline<long> CompanyBaseline = new();
 
+    // TableBaseline<T> does not expose its keys: mirror the project codes captured into ProjectBaseline so the
+    // sheet-change observer can tell saved (permanent) codes from unsaved ones.
+    private static readonly object _savedCodesSync = new();
+    private static HashSet<string> _savedProjectCodes = new(StringComparer.OrdinalIgnoreCase);
+
+    private static void CaptureProjectBaseline(List<ProjectRecord> projects)
+    {
+        ProjectBaseline.Capture(projects, p => p.ProjectCode, ProjectFingerprint, p => p.ServerUpdatedAt);
+        var codes = new HashSet<string>(projects.Select(p => NormalizeCode(p.ProjectCode)).Where(c => c.Length > 0), StringComparer.OrdinalIgnoreCase);
+        lock (_savedCodesSync) _savedProjectCodes = codes;
+    }
+
+    private static void UpsertProjectBaseline(ProjectRecord p)
+    {
+        ProjectBaseline.UpsertEntry(p.ProjectCode, ProjectFingerprint(p), p.ServerUpdatedAt);
+        string code = NormalizeCode(p.ProjectCode);
+        if (code.Length > 0) lock (_savedCodesSync) _savedProjectCodes.Add(code);
+    }
+
+    /// <summary>True when <paramref name="code"/> exists in the last server-loaded project baseline.</summary>
+    internal static bool IsSavedProjectCode(string? code)
+    {
+        string normalized = NormalizeCode(code);
+        if (normalized.Length == 0) return false;
+        lock (_savedCodesSync) return _savedProjectCodes.Contains(normalized);
+    }
+
+    /// <summary>Snapshot of the project codes currently in the server baseline.</summary>
+    internal static IEnumerable<string> GetBaselineProjectCodes()
+    {
+        lock (_savedCodesSync) return _savedProjectCodes.ToArray();
+    }
+
     private static string NormalizeCode(string? code) => (code ?? string.Empty).Trim().ToUpperInvariant();
     private static string Norm(string? s) => (s ?? string.Empty).Trim();
     private static string Norm(DateOnly d) => d.ToString("yyyy-MM-dd", CultureInfo.InvariantCulture);
@@ -123,6 +156,8 @@ internal static class ServerSyncCommands
         return string.Join("\u001F",
             NormalizeCode(p.ProjectCode),
             p.Category.ToString(),
+            Norm(d.ProjectName),
+            d.AutoSchedule.ToString(),
             Norm(d.ReferenceNo),
             string.Join(",", (d.ProjectType ?? new List<ProjectType>()).Where(t => t != ProjectType.None).Distinct().Select(t => t.ToString())),
             d.Priority.ToString(),
@@ -209,7 +244,7 @@ internal static class ServerSyncCommands
                 foreach (var r in db.Query<dynamic>("SELECT * FROM project_master WHERE project_id = ANY(@Ids);", new { Ids = projectIds }))
                 {
                     ProjectRecord p = BuildProject(r);
-                    ProjectBaseline.UpsertEntry(p.ProjectCode, ProjectFingerprint(p), p.ServerUpdatedAt);
+                    UpsertProjectBaseline(p);
                     refreshed++;
                 }
             }
@@ -229,15 +264,179 @@ internal static class ServerSyncCommands
     internal static List<ProjectRecord> FetchProjectRecords() =>
         ServerSyncHelper.FetchAuthoritativeList(Module, "ProjectRecord (project_master)", db =>
         {
+            // project_name / auto_schedule / nullable company_id (General + Internal Projects layout).
+            ServerDispatcher.EnsureProjectSchema();
+
             var rawProjects = db.Query<dynamic>("SELECT * FROM project_master ORDER BY project_id;").ToList();
             AppLogger.Info($"[PostgreSQL Query] project_master returned {rawProjects.Count} record(s).");
             var projects = new List<ProjectRecord>();
             foreach (var p in rawProjects) projects.Add(BuildProject(p));
 
+            ApplyDerivedLabourCosts(db, projects);
+
             // Only reached when the server answered: an empty result is an authoritative (empty) baseline.
-            ProjectBaseline.Capture(projects, p => p.ProjectCode, ProjectFingerprint, p => p.ServerUpdatedAt);
+            CaptureProjectBaseline(projects);
             return projects;
         });
+
+    // =========================================================================
+    // 2a. DERIVED LABOUR COST (effective-dated salaries x Schedule Manager attendance)
+    // =========================================================================
+    private static List<string> SplitProjectCodes(string? raw) =>
+        (raw ?? string.Empty)
+            .Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+            .Select(NormalizeCode)
+            .Where(c => c.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+    private static List<string> NormalizeDistinct(IEnumerable<string>? codes) =>
+        (codes ?? Enumerable.Empty<string>())
+            .Select(NormalizeCode)
+            .Where(c => c.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+    /// <summary>Check-Ins first, then projects_done, then on-board Planned Projects fallback (matches StaffManager).</summary>
+    private static List<string> ResolveWorkerDayProjects(dynamic a, DateOnly date, long staffId,
+        Dictionary<(DateOnly Date, long StaffId), List<string>> onBoardByDateStaff)
+    {
+        List<string> codes = SplitProjectCodes((a.project_check_ins as object)?.ToString());
+        if (codes.Count > 0) return codes;
+
+        codes = NormalizeDistinct((object?)a.projects_done as IEnumerable<string>);
+        if (codes.Count > 0) return codes;
+
+        Enum.TryParse<AttendanceStatus>((a.attendance_status as object)?.ToString() ?? string.Empty, true, out var status);
+        if (status is AttendanceStatus.Presence or AttendanceStatus.Late or AttendanceStatus.NightShift
+            && onBoardByDateStaff.TryGetValue((date, staffId), out var onBoard) && onBoard.Count > 0)
+        {
+            var onBoardSet = new HashSet<string>(onBoard, StringComparer.OrdinalIgnoreCase);
+            var planned = SplitProjectCodes((a.planned_projects as object)?.ToString())
+                .Where(onBoardSet.Contains).ToList();
+            return planned.Count > 0 ? planned : onBoard.Distinct(StringComparer.OrdinalIgnoreCase).ToList();
+        }
+        return new List<string>();
+    }
+
+    private static void ApplyDerivedLabourCosts(PostgreSqlService db, List<ProjectRecord> projects)
+    {
+        if (projects.Count == 0) return;
+        try
+        {
+            try { ServerDispatcher.EnsureScheduleSchema(); }
+            catch (Exception ex) { AppLogger.Warn($"[{Module}] Schedule schema bootstrap skipped: {ex.Message}"); }
+
+            var staffById = new Dictionary<long, StaffRecord>();
+            var staffIdsByName = new Dictionary<string, List<long>>(StringComparer.OrdinalIgnoreCase);
+            foreach (var r in db.Query<dynamic>("SELECT staff_id, staff_name, short_name FROM staff_master;"))
+            {
+                long id = Convert.ToInt64((object)r.staff_id, CultureInfo.InvariantCulture);
+                staffById[id] = new StaffRecord { StaffID = id };
+                foreach (string? n in new[] { (r.short_name as object)?.ToString(), (r.staff_name as object)?.ToString() })
+                {
+                    string key = (n ?? string.Empty).Trim();
+                    if (key.Length == 0) continue;
+                    if (!staffIdsByName.TryGetValue(key, out var ids)) staffIdsByName[key] = ids = new List<long>();
+                    if (!ids.Contains(id)) ids.Add(id);
+                }
+            }
+
+            try
+            {
+                foreach (var r in db.Query<dynamic>(
+                    "SELECT salary_id, staff_id, effective_date, salary_basis, salary_rate FROM staff_salaries ORDER BY staff_id, effective_date, salary_id;"))
+                {
+                    long staffId = Convert.ToInt64((object)r.staff_id, CultureInfo.InvariantCulture);
+                    if (!staffById.TryGetValue(staffId, out var staff))
+                        staffById[staffId] = staff = new StaffRecord { StaffID = staffId };
+                    if (!Enum.TryParse<SalaryBasis>((r.salary_basis as object)?.ToString() ?? string.Empty, true, out var basis))
+                        basis = SalaryBasis.Monthly;
+                    staff.Salaries.Add(new StaffSalary
+                    {
+                        SalaryID = Convert.ToInt64((object)r.salary_id, CultureInfo.InvariantCulture),
+                        StaffID = staffId,
+                        EffectiveDate = ServerSyncHelper.DateOrDefault((object?)r.effective_date, DateOnly.FromDateTime(DateTime.Today)),
+                        SalaryBasis = basis,
+                        SalaryRate = ServerSyncHelper.Dec((object?)r.salary_rate)
+                    });
+                }
+            }
+            catch (Exception exSal)
+            {
+                if (ServerEnvironment.IsConnectionException(exSal)) throw;
+                AppLogger.Warn($"[{Module}] staff_salaries unavailable; labour cost left as stored: {exSal.Message}");
+                return;
+            }
+
+            var onBoardByDateStaff = new Dictionary<(DateOnly Date, long StaffId), List<string>>();
+            foreach (var r in db.Query<dynamic>(
+                @"SELECT schedule_date, project_id, workers
+                  FROM daily_project_schedules
+                  WHERE COALESCE(trim(project_id), '') <> ''
+                    AND COALESCE(array_length(workers, 1), 0) > 0
+                  ORDER BY schedule_date ASC, shift, slot_index;"))
+            {
+                DateOnly date = ServerSyncHelper.DateOrDefault((object?)r.schedule_date, DateOnly.MinValue);
+                string projectId = NormalizeCode((r.project_id as object)?.ToString());
+                if (date == DateOnly.MinValue || projectId.Length == 0) continue;
+                if ((object?)r.workers is not IEnumerable<string> workers) continue;
+                foreach (string w in workers)
+                {
+                    if (!staffIdsByName.TryGetValue((w ?? string.Empty).Trim(), out var ids)) continue;
+                    foreach (long sid in ids)
+                    {
+                        if (!onBoardByDateStaff.TryGetValue((date, sid), out var list))
+                            onBoardByDateStaff[(date, sid)] = list = new List<string>();
+                        list.Add(projectId);
+                    }
+                }
+            }
+
+            var labourByProject = new Dictionary<string, decimal>(StringComparer.OrdinalIgnoreCase);
+            int workerDays = 0;
+            foreach (var a in db.Query<dynamic>(
+                @"SELECT schedule_date, staff_id, attendance_status,
+                         COALESCE(project_check_ins, '') AS project_check_ins,
+                         COALESCE(planned_projects, '') AS planned_projects,
+                         projects_done,
+                         total_flattened_hours
+                  FROM daily_attendances
+                  WHERE total_flattened_hours > 0;"))
+            {
+                long staffId = a.staff_id != null ? Convert.ToInt64((object)a.staff_id, CultureInfo.InvariantCulture) : 0;
+                decimal flattenHours = ServerSyncHelper.Dec((object?)a.total_flattened_hours);
+                DateOnly date = ServerSyncHelper.DateOrDefault((object?)a.schedule_date, DateOnly.MinValue);
+                if (staffId <= 0 || flattenHours <= 0m || date == DateOnly.MinValue) continue;
+
+                List<string> dayProjects = ResolveWorkerDayProjects(a, date, staffId, onBoardByDateStaff);
+                if (dayProjects.Count == 0) continue;
+                if (!staffById.TryGetValue(staffId, out var staff)) continue;
+
+                decimal hourly = staff.GetEffectiveSalary(date)?.GetHourlyRateExact() ?? 0m;
+                if (hourly <= 0m) continue;
+
+                decimal share = flattenHours * hourly / dayProjects.Count;
+                foreach (string code in dayProjects)
+                    labourByProject[code] = labourByProject.TryGetValue(code, out decimal cur) ? cur + share : share;
+                workerDays++;
+            }
+
+            foreach (var p in projects)
+            {
+                string code = NormalizeCode(p.ProjectCode);
+                p.ProjectDetails.LabourCost = labourByProject.TryGetValue(code, out decimal total)
+                    ? decimal.Round(total, 2, MidpointRounding.AwayFromZero)
+                    : null;
+            }
+            AppLogger.Info($"[{Module}] Derived labour cost: {workerDays} worker-day(s) across {labourByProject.Count} project(s).");
+        }
+        catch (Exception ex)
+        {
+            if (ServerEnvironment.IsConnectionException(ex)) throw;
+            AppLogger.Warn($"[{Module}] Derived labour cost calculation skipped: {ex.Message}");
+        }
+    }
 
     private static ProjectRecord BuildProject(dynamic p)
     {
@@ -262,6 +461,9 @@ internal static class ServerSyncCommands
         object? staffId = p.staff_id;
         object? companyId = p.company_id;
         object? actualEnd = p.actual_end_date;
+        object? autoRaw = Col((object)p, "auto_schedule");
+        bool autoSchedule = category != ProjectCategory.Internal
+            && (autoRaw == null || autoRaw is DBNull || Convert.ToBoolean(autoRaw, CultureInfo.InvariantCulture));
 
         return new ProjectRecord
         {
@@ -269,6 +471,8 @@ internal static class ServerSyncCommands
             Category = category,
             ProjectDetails = new ProjectDetails
             {
+                ProjectName = Str(Col((object)p, "project_name")),
+                AutoSchedule = autoSchedule,
                 ReferenceNo = Str(p.reference_no),
                 ProjectType = types,
                 Priority = priority,

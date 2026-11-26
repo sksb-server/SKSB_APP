@@ -62,9 +62,10 @@ public sealed class PropertyRuleDescriptor
         null;
 
     public bool HasDropdown =>
-        Sources.Length > 0 ||
-        (DefaultRule != null && DefaultRule.Kind != DefaultKind.None) ||
-        (CalculateRule != null && CalculateRule.Mode == CalculationMode.DefaultOnly);
+        !IsLocked &&
+        (Sources.Length > 0 ||
+         (DefaultRule != null && DefaultRule.Kind != DefaultKind.None) ||
+         (CalculateRule != null && CalculateRule.Mode == CalculationMode.DefaultOnly));
 
     public bool IsDateColumn =>
         (Nullable.GetUnderlyingType(PropertyType) ?? PropertyType) == typeof(DateOnly) ||
@@ -168,7 +169,11 @@ public static partial class RuleRegistry
             }
 
             var excelColAttr = prop.GetCustomAttribute<ExcelColumnAttribute>();
-            var ruleAttr = prop.GetCustomAttribute<ColumnRuleAttribute>();
+            var ruleCandidates = prop.GetCustomAttributes<ColumnRuleAttribute>().ToList();
+            var ruleAttr =
+                ruleCandidates.FirstOrDefault(r => !string.IsNullOrWhiteSpace(r.TableName) &&
+                                                   string.Equals(r.TableName, tableName, StringComparison.OrdinalIgnoreCase))
+                ?? ruleCandidates.FirstOrDefault(r => string.IsNullOrWhiteSpace(r.TableName));
             var defaultCandidates = prop.GetCustomAttributes<ColumnDefaultAttribute>().ToList();
             var defaultAttr =
                 defaultCandidates.FirstOrDefault(d => !string.IsNullOrWhiteSpace(d.TableName) &&

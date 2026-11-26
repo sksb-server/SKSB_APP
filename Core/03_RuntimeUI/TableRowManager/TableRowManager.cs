@@ -41,7 +41,7 @@ public static partial class TableRowManager
         new(StringComparer.OrdinalIgnoreCase)
         {
             "AllStaffsTable",
-            "iJobProjectsTable", "MWOProjectsTable", "PVTProjectsTable", "OtherProjectsTable", "AllProjectsTable",
+            "GeneralProjectsTable", "InternalProjectsTable", "AllProjectsTable",
             "CompaniesTable", "AllCompaniesTable",
             "AllVehiclesTable",
             "WorkshopsTable", "InsuranceCompaniesTable", "FuelCardsTable", "FuelCompanyNamesTable",
@@ -85,10 +85,8 @@ public static partial class TableRowManager
         TableNatures["SkillLicenseTypesTable"] = TableNature.Absolute;
         TableNatures["ProjectsTable"] = TableNature.Absolute;
         TableNatures["DailyAttendanceTable"] = TableNature.Absolute;
-        TableNatures["iJobProjectsTable"] = TableNature.Absolute;
-        TableNatures["MWOProjectsTable"] = TableNature.Absolute;
-        TableNatures["PVTProjectsTable"] = TableNature.Absolute;
-        TableNatures["OtherProjectsTable"] = TableNature.Absolute;
+        TableNatures["GeneralProjectsTable"] = TableNature.Absolute;
+        TableNatures["InternalProjectsTable"] = TableNature.Absolute;
         TableNatures["AllProjectsTable"] = TableNature.Absolute;
         TableNatures["CompaniesTable"] = TableNature.Absolute;
         TableNatures["AllCompaniesTable"] = TableNature.Absolute;
@@ -710,6 +708,8 @@ public static partial class TableRowManager
             }
         }
 
+        WithUnfilteredTable((object)table, () =>
+        {
         if (emptyRowIndices.Count > 1)
         {
             int toDeleteCount = emptyRowIndices.Count - 1;
@@ -741,6 +741,7 @@ public static partial class TableRowManager
         {
             SpawnRowSafely(worksheet, table, startCol, colCount, headerRow, insertMode == TableInsertMode.InsertAtTop, auditLog);
         }
+        });
     }
 
     public static bool CheckRowHasUserInput(dynamic worksheet, dynamic table, int rowIndex, int startCol, int colCount, int headerRow)
@@ -793,6 +794,8 @@ public static partial class TableRowManager
         bool atTop,
         List<string>? auditLog = null)
     {
+        WithUnfilteredTable((object)table, () =>
+        {
         string tableName = table.Name?.ToString() ?? string.Empty;
         int existingRows = 0;
         try { existingRows = (int)table.ListRows.Count; } catch { }
@@ -881,6 +884,7 @@ public static partial class TableRowManager
         auditLog?.Add(atTop
             ? "[INSERT] Spawned new entry row at TOP."
             : "[INSERT] Spawned new entry row at BOTTOM.");
+        });
     }
 
     /// <summary>Mirrors body-cell visual formatting onto a new top row (no clipboard, no FormatConditions).</summary>

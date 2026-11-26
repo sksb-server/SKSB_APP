@@ -1,4 +1,4 @@
-﻿namespace SKSB_App.Core.Types;
+namespace SKSB_App.Core.Types;
 
 using System;
 using System.Collections.Generic;
@@ -20,6 +20,32 @@ public enum ProjectType
     Civil_Earthworks,
     Machinery_Rental,
     General_Maintenance,
+    Office_Improvement,
+    IT_System,
+    Admin_Internal,
+    Other,
+    None
+}
+
+/// <summary>Project types selectable on GeneralProjectsTable (dropdown 'GeneralProjectTypeList').</summary>
+public enum GeneralProjectType
+{
+    Pipe_Repair,
+    Pipe_Laying,
+    Comm_Pipe_Meter,
+    Valve_Hydrant,
+    Tapping_Connection,
+    Road_Reinstatement,
+    Civil_Earthworks,
+    Machinery_Rental,
+    General_Maintenance,
+    Other,
+    None
+}
+
+/// <summary>Project types selectable on InternalProjectsTable (dropdown 'InternalProjectTypeList').</summary>
+public enum InternalProjectType
+{
     Office_Improvement,
     IT_System,
     Admin_Internal,
@@ -66,8 +92,22 @@ public enum ProjectStatus
     None
 }
 
-/// <summary>Which of the four master sheets a project lives on (Air Selangor iJob / MWO, Private, or Other internal projects).</summary>
+/// <summary>
+/// Project category persisted to <c>project_master.category</c>. iJob / MWO / PVT / Other live on the
+/// "General Projects" sheet; Internal (non-operational) projects live on the "Internal Projects" sheet.
+/// </summary>
 public enum ProjectCategory
+{
+    iJob,
+    MWO,
+    PVT,
+    Other,
+    Internal,
+    None
+}
+
+/// <summary>Categories selectable on GeneralProjectsTable (dropdown 'GeneralProjectCategoryList').</summary>
+public enum GeneralProjectCategory
 {
     iJob,
     MWO,
@@ -77,13 +117,11 @@ public enum ProjectCategory
 }
 
 // =========================================================================
-// 2. PROJECT RECORD (iJobProjectsTable / MWOProjectsTable / PVTProjectsTable / OtherProjectsTable)
+// 2. PROJECT RECORD (GeneralProjectsTable / InternalProjectsTable)
 // =========================================================================
 
-[ExcelTable("iJobProjectsTable")]
-[ExcelTable("MWOProjectsTable")]
-[ExcelTable("PVTProjectsTable")]
-[ExcelTable("OtherProjectsTable")]
+[ExcelTable("GeneralProjectsTable")]
+[ExcelTable("InternalProjectsTable")]
 [ExcelTable("AllProjectsTable")]
 public record ProjectRecord
 {
@@ -92,7 +130,9 @@ public record ProjectRecord
     [ColumnRule(IsRequired = true, Transform = TransformKind.UpperCase)]
     public string ProjectCode { get; set; } = string.Empty;
 
-    /// <summary>Set from the sheet the row was extracted from; not a table column.</summary>
+    /// <summary>'Category' column on GeneralProjectsTable; forced to Internal for InternalProjectsTable rows (no column there).</summary>
+    [ExcelColumn("Category", isRequired: false)]
+    [ColumnRule("GeneralProjectCategoryList", IsRequired = true)]
     public ProjectCategory Category { get; set; } = ProjectCategory.iJob;
 
     [DataDetail]
@@ -105,11 +145,21 @@ public record ProjectRecord
 
 public record ProjectDetails
 {
+    [ExcelColumn("Project Name")]
+    public string ProjectName { get; set; } = string.Empty;
+
+    /// <summary>Whether the schedule board may auto-assign this project; always false for Internal projects.</summary>
+    [ExcelColumn("Auto-Schedule")]
+    [ColumnDefault(DefaultKind.Literal, literalValue: "TRUE", TableName = "GeneralProjectsTable")]
+    public bool AutoSchedule { get; set; } = true;
+
     [ExcelColumn("Reference No")]
     public string ReferenceNo { get; set; } = string.Empty;
 
     /// <summary>Multi-select; stored in Excel and PostgreSQL as "Pipe_Repair, Road_Reinstatement".</summary>
     [ExcelColumn("Type", isRequired: true)]
+    [ColumnRule("GeneralProjectTypeList", IsRequired = true, IsMultiSelect = true, TableName = "GeneralProjectsTable")]
+    [ColumnRule("InternalProjectTypeList", IsRequired = true, IsMultiSelect = true, TableName = "InternalProjectsTable")]
     [ColumnRule("ProjectTypeList", IsRequired = true, IsMultiSelect = true)]
     public List<ProjectType> ProjectType { get; set; } = new();
 
@@ -125,23 +175,20 @@ public record ProjectDetails
     [ColumnStateGuard(2, StateConditionKind.DateExpired, "Expired", "Active", "Target End Date")]
     public ProjectStatus Status { get; set; } = ProjectStatus.Active;
 
-    [ExcelColumn("Company ID", isRequired: true)]
+    // Optional column: required on GeneralProjectsTable, absent on InternalProjectsTable.
+    // Category-aware 'SQL Account Project' defaults are applied by ProjectManager's sheet-change observer.
+    [ExcelColumn("Company ID", isRequired: false)]
     [ColumnRule("CompaniesTable[Company ID]", IsRequired = true)]
     [ColumnSync("Company Name", "CompaniesTable[Company ID]", "CompaniesTable[Short Company Name]")]
-    [ColumnSync("SQL Account Project", "CompaniesTable[Company ID]", "CompaniesTable[iJob SQL Account Project]", TableName = "iJobProjectsTable", OnlyWhenTargetBlank = true)]
     public long CompanyID { get; set; }
 
     [ExcelColumn("Company Name")]
     [ColumnRule("CompaniesTable[Short Company Name]", IsRequired = false)]
     [ColumnSync("Company ID", "CompaniesTable[Short Company Name]", "CompaniesTable[Company ID]")]
-    [ColumnSync("SQL Account Project", "CompaniesTable[Short Company Name]", "CompaniesTable[iJob SQL Account Project]", TableName = "iJobProjectsTable", OnlyWhenTargetBlank = true)]
     public string CompanyName { get; set; } = string.Empty;
 
     [ExcelColumn("SQL Account Project")]
     [ColumnRule("SqlAccountProjectList", IsRequired = false)]
-    [ColumnDefault(DefaultKind.Literal, literalValue: "2016 - C6-MWO", TableName = "MWOProjectsTable")]
-    [ColumnDefault(DefaultKind.Literal, literalValue: "2016 - PRIV - SHORT", TableName = "PVTProjectsTable")]
-    [ColumnDefault(DefaultKind.Literal, literalValue: "----", TableName = "OtherProjectsTable")]
     public string SqlAccountProjectCode { get; set; } = string.Empty;
 
     [ExcelColumn("Staff ID")]
@@ -270,16 +317,19 @@ public record CompanyRecord
 public record ProjectSummaryRow
 {
     [ExcelColumn("Date")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
     public DateOnly Date { get; set; } = DateOnly.FromDateTime(DateTime.Today);
 
     [ExcelColumn("Team Lead")]
-    [ColumnRule("StaffNameList", IsRequired = false, IsWarningOnly = true)]
+    [ColumnRule("StaffNameList", IsRequired = false, IsWarningOnly = true, IsReadOnly = true)]
     public string TeamLead { get; set; } = string.Empty;
 
     [ExcelColumn("Time Start")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
     public TimeOnly TimeStart { get; set; } = TimeOnly.MinValue;
 
     [ExcelColumn("Time End")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
     public TimeOnly TimeEnd { get; set; } = TimeOnly.MinValue;
 
     /// <summary>Strictly calculated: worked hours between Time Start and Time End, rounded down to 0.5.</summary>
@@ -290,52 +340,59 @@ public record ProjectSummaryRow
 
     /// <summary>(derived) Count of distinct workers present that day.</summary>
     [ExcelColumn("Workers")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
     public int Workers { get; set; }
 
     [ExcelColumn("Regular Shifts")]
-    [ColumnRule(IsRequired = false, AllowNonNegativeZero = true, RoundDownStep = 0.5)]
+    [ColumnRule(IsRequired = false, IsReadOnly = true, AllowNonNegativeZero = true, RoundDownStep = 0.5)]
     public decimal RegularShifts { get; set; }
 
     [ExcelColumn("Overtime Shifts")]
-    [ColumnRule(IsRequired = false, AllowNonNegativeZero = true, RoundDownStep = 0.5)]
+    [ColumnRule(IsRequired = false, IsReadOnly = true, AllowNonNegativeZero = true, RoundDownStep = 0.5)]
     public decimal OvertimeShifts { get; set; }
 
     [ExcelColumn("Overtime Hours")]
-    [ColumnRule(IsRequired = false, AllowNonNegativeZero = true, RoundDownStep = 0.5)]
+    [ColumnRule(IsRequired = false, IsReadOnly = true, AllowNonNegativeZero = true, RoundDownStep = 0.5)]
     public decimal OvertimeHours { get; set; }
 
     [ExcelColumn("Additional OT Hours")]
-    [ColumnRule(IsRequired = false, AllowNonNegativeZero = true, RoundDownStep = 0.5)]
+    [ColumnRule(IsRequired = false, IsReadOnly = true, AllowNonNegativeZero = true, RoundDownStep = 0.5)]
     public decimal AdditionalOTHours { get; set; }
 
     [ExcelColumn("Is Holiday")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
     public bool IsHoliday { get; set; }
 
     /// <summary>(derived) Sum of the day's attendance salaries (DailyAttendanceTable "Total Earned").</summary>
     [ExcelColumn("Labour Cost")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
     public decimal? LabourCost { get; set; }
 
     /// <summary>(derived, multi-select, not an input) Plates of every vehicle used that day, e.g. "VAB1234, WXY5678".</summary>
     [ExcelColumn("Vehicles Used")]
-    [ColumnRule("VehiclePlateList", IsRequired = false, IsMultiSelect = true)]
+    [ColumnRule("VehiclePlateList", IsRequired = false, IsReadOnly = true, IsMultiSelect = true)]
     public List<string> VehiclesUsed { get; set; } = new();
 
     /// <summary>(derived, multi-select, not an input) Distinct types of the Vehicles Used, e.g. "Lorry, Van".</summary>
     [JsonIgnore]
     [ExcelColumn("Vehicle Types")]
-    [ColumnRule("VehicleTypeList", IsRequired = false, IsMultiSelect = true)]
+    [ColumnRule("VehicleTypeList", IsRequired = false, IsReadOnly = true, IsMultiSelect = true)]
     public List<VehicleType> VehicleTypes { get; set; } = new();
 
     /// <summary>(derived) Distance / engine hours of the vehicles used (per-row unit follows the vehicle type).</summary>
     [ExcelColumn("Odometer Used")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
     public decimal? OdometerUsed { get; set; }
 
     [ExcelColumn("Fuel Cost")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
     public decimal? FuelCost { get; set; }
 
     [ExcelColumn("Claims Made")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
     public decimal? ClaimsMade { get; set; }
 
     [ExcelColumn("Pending Claims")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
     public decimal? PendingClaims { get; set; }
 }

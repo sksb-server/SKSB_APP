@@ -5,6 +5,7 @@ using System.Collections.Generic;
 using System.Drawing;
 using System.Linq;
 using System.Windows.Forms;
+using SKSB_App.Core.Localization;
 using SKSB_App.Core.Types.Attributes;
 
 /// <summary>
@@ -50,18 +51,18 @@ public static partial class RuleRegistry
         // ---- Output / Calculated / Read-only fields (never mention RoundDownStep) ----
         if (rule.IsStrictlyCalculated)
         {
-            return ("Auto-Calculated (Locked)",
-                $"{rule.DisplayFormula ?? "Calculated automatically by SKSB."}\nManaged automatically by SKSB (read-only).");
+            return (Loc.Tip("note.calculated.title"),
+                $"{rule.DisplayFormula ?? Loc.Tip("note.calculated.defaultBody")}\n{Loc.Tip("note.calculated.managed")}");
         }
 
         if (rule.IsReadOnly)
         {
-            return ("Read-Only Column", "Managed automatically by SKSB (read-only).");
+            return (Loc.Tip("note.readonly.title"), Loc.Tip("note.readonly.body"));
         }
 
         if (!string.IsNullOrWhiteSpace(legacyFormula))
         {
-            return ("Formula Column", $"Formula: {legacyFormula}");
+            return (Loc.Tip("note.formula.title"), Loc.Tip("note.formula.body", legacyFormula));
         }
 
         // ---- Input fields (editable columns) ----
@@ -70,35 +71,35 @@ public static partial class RuleRegistry
         Type baseType = Nullable.GetUnderlyingType(rule.PropertyType) ?? rule.PropertyType;
 
         if (rule.IsRequired && !rule.IsWarningOnly)
-            lines.Add("Required");
+            lines.Add(Loc.Tip("note.required"));
 
         if (isNric)
-            lines.Add("Numbers only (no dashes or letters)");
+            lines.Add(Loc.Tip("note.nric"));
         else if (rule.IsNumericColumn && rule.EffectiveFormatKind != ColumnFormatKind.Id)
-            lines.Add(rule.AllowNonNegativeZero ? "Numbers only (>= 0)" : "Numbers only");
+            lines.Add(rule.AllowNonNegativeZero ? Loc.Tip("note.numericNonNeg") : Loc.Tip("note.numeric"));
 
         if (rule.IsDateColumn)
-            lines.Add("Date (dd/mm/yyyy)");
+            lines.Add(Loc.Tip("note.date"));
 
         if (baseType == typeof(TimeOnly) || rule.EffectiveFormatKind == ColumnFormatKind.Time)
-            lines.Add("Time (hh:mm)");
+            lines.Add(Loc.Tip("note.time"));
 
         if (baseType == typeof(bool))
-            lines.Add("Yes / No (TRUE / FALSE)");
+            lines.Add(Loc.Tip("note.yesNo"));
 
         if (!string.IsNullOrWhiteSpace(rule.DateMustBeGreaterThanHeader))
         {
             lines.Add(rule.DateMustBeGreaterThanAllowEqual
-                ? $"Must be on or after {rule.DateMustBeGreaterThanHeader}"
-                : $"Must be after {rule.DateMustBeGreaterThanHeader}");
+                ? Loc.Tip("note.dateOnOrAfter", rule.DateMustBeGreaterThanHeader)
+                : Loc.Tip("note.dateAfter", rule.DateMustBeGreaterThanHeader));
         }
 
         if (rule.Sources.Length > 0)
         {
             if (rule.IsMultiSelect)
-                lines.Add(rule.IsWarningOnly ? "Multi-select dropdown (comma-separated, custom allowed)" : "Multi-select dropdown (comma-separated)");
+                lines.Add(rule.IsWarningOnly ? Loc.Tip("note.multiDropdownCustom") : Loc.Tip("note.multiDropdown"));
             else
-                lines.Add(rule.IsWarningOnly ? "Dropdown list (custom allowed)" : "Select from dropdown list");
+                lines.Add(rule.IsWarningOnly ? Loc.Tip("note.dropdownCustom") : Loc.Tip("note.dropdown"));
         }
 
         if (rule.SyncRules.Count > 0)
@@ -109,29 +110,29 @@ public static partial class RuleRegistry
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToList();
             if (distinctTargets.Count > 0)
-                lines.Add($"Auto-fills: {string.Join(", ", distinctTargets)}");
+                lines.Add(Loc.Tip("note.autoFills", string.Join(", ", distinctTargets)));
         }
 
         var syncSources = GetSyncSourcesForColumn(rule.TableName, rule.HeaderName);
         if (syncSources.Count > 0)
-            lines.Add($"Auto-filled by: {string.Join(", ", syncSources)}");
+            lines.Add(Loc.Tip("note.autoFilledBy", string.Join(", ", syncSources)));
 
         string? defaultLine = DescribeDefault(rule.DefaultRule);
         if (defaultLine != null)
             lines.Add(defaultLine);
 
         if (!rule.IsStrictlyCalculated && rule.HasCSharpFormula)
-            lines.Add($"Auto-default: {rule.DisplayFormula} (editable)");
+            lines.Add(Loc.Tip("note.autoDefaultFormula", rule.DisplayFormula ?? string.Empty));
 
         if (!rule.IsLocked && rule.RoundDownStep > 0)
-            lines.Add($"Rounds down to nearest {rule.RoundDownStep:0.##}");
+            lines.Add(Loc.Tip("note.roundDown", $"{rule.RoundDownStep:0.##}"));
 
         string? transformLine = rule.Transform switch
         {
-            TransformKind.UpperCase => "Auto-format: UPPERCASE",
-            TransformKind.Trim => "Auto-trimmed",
-            TransformKind.ShortNameFirstLast => "Auto-format: First + Last name",
-            TransformKind.ShortNameThreeWords => "Auto-format: 3-word short name",
+            TransformKind.UpperCase => Loc.Tip("note.transform.upper"),
+            TransformKind.Trim => Loc.Tip("note.transform.trim"),
+            TransformKind.ShortNameFirstLast => Loc.Tip("note.transform.shortFirstLast"),
+            TransformKind.ShortNameThreeWords => Loc.Tip("note.transform.shortThreeWords"),
             _ => null
         };
         if (transformLine != null)
@@ -145,9 +146,21 @@ public static partial class RuleRegistry
         }
 
         if (lines.Count == 0)
-            lines.Add("Optional text");
+            lines.Add(Loc.Tip("note.optionalText"));
 
-        return (rule.HeaderName, string.Join("\n", lines));
+        string title = rule.HeaderName;
+        try
+        {
+            string? displayName = Loc.ResolveColumnGuide(rule.TableName, rule.HeaderName).DisplayName;
+            if (!string.IsNullOrWhiteSpace(displayName) &&
+                !string.Equals(displayName, rule.HeaderName, StringComparison.OrdinalIgnoreCase))
+            {
+                title = $"{displayName} ({rule.HeaderName})";
+            }
+        }
+        catch { }
+
+        return (title, string.Join("\n", lines));
     }
 
     private static string? DescribeDefault(ColumnDefaultAttribute? def)
@@ -156,12 +169,12 @@ public static partial class RuleRegistry
 
         return def.Kind switch
         {
-            DefaultKind.AutoIncrement => "Auto-default: next ID",
-            DefaultKind.Today => "Auto-default: Today",
-            DefaultKind.Literal => $"Auto-default: {def.LiteralValue}",
-            DefaultKind.DateOffsetDays => $"Auto-default: {def.ReferenceHeader ?? "Today"} + {def.Offset} days",
-            DefaultKind.DateOffsetMonths => $"Auto-default: {def.ReferenceHeader ?? "Today"} + {def.Offset} months",
-            _ => null
+            DefaultKind.AutoIncrement => Loc.Tip("note.default.nextId"),
+            DefaultKind.Today => Loc.Tip("note.default.today"),
+            DefaultKind.Literal => Loc.Tip("note.default.literal", def.LiteralValue ?? string.Empty),
+            DefaultKind.DateOffsetDays => Loc.Tip("note.default.dateOffset", def.ReferenceHeader ?? Loc.Tip("note.unit.today"), $"{def.Offset} {Loc.Tip("note.unit.days")}"),
+            DefaultKind.DateOffsetMonths => Loc.Tip("note.default.dateOffset", def.ReferenceHeader ?? Loc.Tip("note.unit.today"), $"{def.Offset} {Loc.Tip("note.unit.months")}"),
+            _ => Loc.Tip("note.default.generic")
         };
     }
 
@@ -170,15 +183,15 @@ public static partial class RuleRegistry
         if (g == null || g.Condition == StateConditionKind.None) return null;
 
         string refs = string.Join("/", g.ReferenceHeaders);
-        string forced = $"Auto-sets '{g.ForcedValueWhenTrue}'";
+        string forced = g.ForcedValueWhenTrue ?? string.Empty;
 
         return g.Condition switch
         {
-            StateConditionKind.ColumnNotEmpty => $"{forced} when {refs} is filled",
-            StateConditionKind.DateExpired => $"{forced} when {refs} is past",
-            StateConditionKind.DateReached => $"{forced} when {refs} is reached",
-            StateConditionKind.ColumnEquals => $"{forced} when {refs} = '{g.ExpectedValue}'",
-            _ => $"{forced} based on {refs}"
+            StateConditionKind.ColumnNotEmpty => Loc.Tip("note.guard.notEmpty", forced, refs),
+            StateConditionKind.DateExpired => Loc.Tip("note.guard.dateExpired", forced, refs),
+            StateConditionKind.DateReached => Loc.Tip("note.guard.dateReached", forced, refs),
+            StateConditionKind.ColumnEquals => Loc.Tip("note.guard.equals", forced, refs, g.ExpectedValue ?? string.Empty),
+            _ => Loc.Tip("note.guard.other", forced, refs)
         };
     }
 
@@ -323,5 +336,80 @@ public static partial class RuleRegistry
             }
         }
         catch { }
+    }
+
+    /// <summary>
+    /// Re-applies localized header hover Notes to every table column across all visible worksheets
+    /// in the workbook. Must be called on Excel's macro thread.
+    /// </summary>
+    public static void RefreshWorkbookHeaderNotes(dynamic? wb)
+    {
+        if (wb == null) return;
+
+        dynamic? app = null;
+        bool origUpdating = true;
+        bool origEvents = true;
+        bool capturedUpdating = false;
+        bool capturedEvents = false;
+
+        try
+        {
+            app = wb.Application;
+            try { origUpdating = (bool)app.ScreenUpdating; capturedUpdating = true; app.ScreenUpdating = false; } catch { }
+            try { origEvents = (bool)app.EnableEvents; capturedEvents = true; app.EnableEvents = false; } catch { }
+
+            foreach (dynamic ws in wb.Worksheets)
+            {
+                try
+                {
+                    // xlSheetVisible = -1 (skip hidden / very-hidden sheets such as Lookups/Data).
+                    if ((int)ws.Visible != -1) continue;
+
+                    dynamic? listObjects = ws.ListObjects;
+                    if (listObjects == null) continue;
+
+                    int tableCount = (int)listObjects.Count;
+                    for (int t = 1; t <= tableCount; t++)
+                    {
+                        try
+                        {
+                            dynamic table = listObjects[t];
+                            string? tableName = table.Name?.ToString();
+                            if (string.IsNullOrWhiteSpace(tableName)) continue;
+
+                            dynamic? headerRow = table.HeaderRowRange;
+                            if (headerRow == null) continue;
+
+                            int colCount = (int)table.ListColumns.Count;
+                            for (int c = 1; c <= colCount; c++)
+                            {
+                                try
+                                {
+                                    dynamic headerCell = headerRow.Cells[1, c];
+                                    string? header = headerCell.Value2?.ToString()?.Trim();
+                                    if (string.IsNullOrWhiteSpace(header)) continue;
+
+                                    var rule = GetRule(tableName, header);
+                                    if (rule != null)
+                                        ApplyColumnHeaderNote(headerCell, rule);
+                                }
+                                catch { }
+                            }
+                        }
+                        catch { }
+                    }
+                }
+                catch { }
+            }
+        }
+        catch { }
+        finally
+        {
+            if (app != null)
+            {
+                if (capturedEvents) { try { app.EnableEvents = origEvents; } catch { } }
+                if (capturedUpdating) { try { app.ScreenUpdating = origUpdating; } catch { } }
+            }
+        }
     }
 }

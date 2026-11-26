@@ -13,6 +13,7 @@ using ExcelDna.Integration;
 using ExcelDna.Integration.CustomUI;
 using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.Integration.Database;
+using SKSB_App.Core.Localization;
 using SKSB_App.Core.RuntimeUI.Ribbon;
 using SKSB_App.Core.ThumbprintSync;
 using SKSB_App.Core.Types;
@@ -50,31 +51,31 @@ public class RibbonController : ManagerRibbonBase
     // 2. SCHEDULE GROUPS
     // =========================================================================
     protected override string GetCustomGroupsXml() => @"
-                <group id='grpScheduleDay' label='Working Day'>
+                <group id='grpScheduleDay' getLabel='GetCustomLabel'>
                   <box id='boxWorkingDay' boxStyle='vertical'>
                     <labelControl id='lblWorkingDate' getLabel='GetWorkingDateLabel' />
                     <labelControl id='lblWorkingDayOfWeek' getLabel='GetWorkingDayOfWeekLabel' />
                     <labelControl id='lblWorkingDayRelation' getLabel='GetWorkingDayRelationLabel' />
                   </box>
-                  <button id='btnPrevDay' label='Previous Day' size='large' imageMso='LeftArrow2' onAction='OnPreviousDayClicked'
-                          screentip='Previous Day' supertip='Loads the schedule for the day before the one on the board.' />
-                  <button id='btnToday' label='Today' size='large' imageMso='DateAndTimeInsert' onAction='OnTodayClicked'
-                          screentip='Today' supertip='Loads the schedule for today.' />
-                  <button id='btnNextDay' label='Next Day' size='large' imageMso='RightArrow2' onAction='OnNextDayClicked'
-                          screentip='Next Day' supertip='Loads the schedule for the day after the one on the board.' />
+                  <button id='btnPrevDay' getLabel='GetCustomLabel' size='large' imageMso='LeftArrow2' onAction='OnPreviousDayClicked'
+                          getScreentip='GetCustomScreentip' getSupertip='GetCustomSupertip' />
+                  <button id='btnToday' getLabel='GetCustomLabel' size='large' imageMso='DateAndTimeInsert' onAction='OnTodayClicked'
+                          getScreentip='GetCustomScreentip' getSupertip='GetCustomSupertip' />
+                  <button id='btnNextDay' getLabel='GetCustomLabel' size='large' imageMso='RightArrow2' onAction='OnNextDayClicked'
+                          getScreentip='GetCustomScreentip' getSupertip='GetCustomSupertip' />
                 </group>
-                <group id='grpScheduleBoard' label='Schedule Board'>
-                  <button id='btnPrintSchedule' label='Print Schedule' size='large' imageMso='FilePrintPreview' onAction='OnPrintScheduleClicked'
-                          screentip='Print Schedule (A4 Landscape PDF)'
-                          supertip='Exports the Daily Schedule board to a 1-page A4 Landscape PDF (without project/worker times or vehicle odometers) and opens it for printing or sharing.' />
+                <group id='grpScheduleBoard' getLabel='GetCustomLabel'>
+                  <button id='btnPrintSchedule' getLabel='GetCustomLabel' size='large' imageMso='FilePrintPreview' onAction='OnPrintScheduleClicked'
+                          getScreentip='GetCustomScreentip'
+                          getSupertip='GetCustomSupertip' />
                 </group>
-                <group id='grpScheduleAttendance' label='Attendance'>
-                  <button id='btnRollup' label='Roll Up Attendance' size='large' imageMso='Refresh' onAction='OnRollupClicked'
-                          screentip='Roll Up Attendance'
-                          supertip='Rebuilds Daily Attendances and the board check-in times from the approved Attendance Entries.' />
-                  <button id='btnSyncTerminal' label='Sync Thumbprint Terminal' size='large' imageMso='AccessRefreshAllLists' onAction='OnSyncTerminalClicked'
-                          screentip='Sync Thumbprint Terminal'
-                          supertip='Reads all punches from the attendance terminal, saves new entries across all dates to the database, and refreshes the current day.' />
+                <group id='grpScheduleAttendance' getLabel='GetCustomLabel'>
+                  <button id='btnRollup' getLabel='GetCustomLabel' size='large' imageMso='Refresh' onAction='OnRollupClicked'
+                          getScreentip='GetCustomScreentip'
+                          getSupertip='GetCustomSupertip' />
+                  <button id='btnSyncTerminal' getLabel='GetCustomLabel' size='large' imageMso='AccessRefreshAllLists' onAction='OnSyncTerminalClicked'
+                          getScreentip='GetCustomScreentip'
+                          getSupertip='GetCustomSupertip' />
                 </group>";
 
     // =========================================================================
@@ -103,20 +104,25 @@ public class RibbonController : ManagerRibbonBase
 
     private static DateOnly DisplayedDate => SheetMapper.LoadedDate ?? DateOnly.FromDateTime(DateTime.Today);
 
-    public string GetWorkingDateLabel(IRibbonControl control) => $"Date: {DisplayedDate:dd MMM yyyy}";
+    public string GetWorkingDateLabel(IRibbonControl control)
+        => Loc.T("schedule.workingDay.date", DisplayedDate.ToString("dd MMM yyyy"));
 
-    public string GetWorkingDayOfWeekLabel(IRibbonControl control) => $"Day: {DisplayedDate:dddd}";
+    public string GetWorkingDayOfWeekLabel(IRibbonControl control)
+    {
+        string dayKey = $"schedule.dayOfWeek.{DisplayedDate.DayOfWeek.ToString().ToLowerInvariant()}";
+        return Loc.T("schedule.workingDay.day", Loc.T(dayKey));
+    }
 
     public string GetWorkingDayRelationLabel(IRibbonControl control)
     {
         int diff = DisplayedDate.DayNumber - DateOnly.FromDateTime(DateTime.Today).DayNumber;
         return diff switch
         {
-            0 => "Status: Today",
-            -1 => "Status: Yesterday (Past)",
-            < -1 => $"Status: Past ({-diff}d ago)",
-            1 => "Status: Tomorrow",
-            _ => $"Status: Upcoming (+{diff}d)"
+            0 => Loc.T("schedule.workingDay.today"),
+            -1 => Loc.T("schedule.workingDay.yesterday"),
+            < -1 => Loc.T("schedule.workingDay.pastDays", -diff),
+            1 => Loc.T("schedule.workingDay.tomorrow"),
+            _ => Loc.T("schedule.workingDay.upcomingDays", diff)
         };
     }
 
@@ -151,7 +157,7 @@ public class RibbonController : ManagerRibbonBase
 
             var knownStaffIds = Roster.AttendanceStaff.Select(s => s.Id).ToHashSet();
             var sheetThumbprintEntries = SheetMapper.ReadCurrentSheetEntries().Where(e => e.Source == AttendanceSource.Thumbprint).ToList();
-            SetStatus($"Syncing all punches from thumbprint terminal ({DeviceSyncManager.DefaultIp})...");
+            SetStatus(Loc.T("schedule.syncTerminal.statusSyncing", DeviceSyncManager.DefaultIp));
             AppLogger.Info($"[ScheduleManager] Syncing all punches from thumbprint terminal ({DeviceSyncManager.DefaultIp})...");
 
             Task.Run(async () =>
@@ -164,8 +170,8 @@ public class RibbonController : ManagerRibbonBase
                         ExcelAsyncUtil.QueueAsMacro(() =>
                         {
                             SetStatus(false);
-                            MessageBox.Show($"Terminal {DeviceSyncManager.DefaultIp}: 0 punches found on the terminal.",
-                                "Thumbprint Sync", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                            MessageBox.Show(Loc.T("schedule.syncTerminal.zeroPunches", DeviceSyncManager.DefaultIp),
+                                Loc.T("schedule.syncTerminal.title"), MessageBoxButtons.OK, MessageBoxIcon.Information);
                         });
                         return;
                     }
@@ -190,21 +196,30 @@ public class RibbonController : ManagerRibbonBase
                         {
                             var allPersisted = dbEntries.Concat(newEntries).ToList();
                             var (totalAddedToSheet, addedForDate) = SheetMapper.MergePersistedEntries(allPersisted, date);
-                            string msg =
-                                $"Terminal {DeviceSyncManager.DefaultIp}: {punches.Count} punch(es) read, {firstDate:dd MMM yyyy} - {lastDate:dd MMM yyyy} ({totalDays} working day(s)).\n\n" +
-                                $"  Saved to database (all dates) : {savedToDb}" + (savedToDb > 0 ? $" (across {savedDays} day(s))" : "") + "\n" +
-                                $"  Added to Attendance Entries : {totalAddedToSheet} ({addedForDate} on {date:dd MMM yyyy})\n" +
-                                $"  Already present / double scans : {duplicates}\n" +
-                                $"  Unknown staff : {unknown}\n\n" +
-                                $"Attendance Entries holds all dates and is filtered to {date:dd MMM yyyy} via the Date header (clear the Date filter to view all dates)." +
-                                (addedForDate > 0 ? " The current day's board and Daily Attendances were refreshed; use 'Save to System' to persist the rolled-up Daily Attendances." : "");
+                            string savedDaysSuffix = savedToDb > 0 ? Loc.T("schedule.syncTerminal.savedDaysSuffix", savedDays) : string.Empty;
+                            string refreshedNote = addedForDate > 0 ? " " + Loc.T("schedule.syncTerminal.refreshedNote") : string.Empty;
+                            string msg = Loc.T(
+                                "schedule.syncTerminal.onlineSummary",
+                                DeviceSyncManager.DefaultIp,
+                                punches.Count,
+                                firstDate.ToString("dd MMM yyyy"),
+                                lastDate.ToString("dd MMM yyyy"),
+                                totalDays,
+                                savedToDb,
+                                savedDaysSuffix,
+                                totalAddedToSheet,
+                                addedForDate,
+                                date.ToString("dd MMM yyyy"),
+                                duplicates,
+                                unknown,
+                                refreshedNote);
                             SetStatus(false);
-                            MessageBox.Show(msg, "Thumbprint Sync", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                            MessageBox.Show(msg, Loc.T("schedule.syncTerminal.title"), MessageBoxButtons.OK, MessageBoxIcon.Information);
                         }
                         catch (Exception ex2)
                         {
                             AppLogger.Error("[ScheduleManager] Merging terminal punches failed", ex2);
-                            MessageBox.Show($"Entries were saved to the database, but refreshing the sheet failed:\n\n{ex2.Message}", "Thumbprint Sync", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                            MessageBox.Show(Loc.T("schedule.syncTerminal.mergeFailed", ex2.Message), Loc.T("schedule.syncTerminal.title"), MessageBoxButtons.OK, MessageBoxIcon.Error);
                         }
                         finally { SetStatus(false); }
                     });
@@ -215,7 +230,7 @@ public class RibbonController : ManagerRibbonBase
                     ExcelAsyncUtil.QueueAsMacro(() =>
                     {
                         SetStatus(false);
-                        MessageBox.Show($"Terminal sync failed:\n\n{ex.Message}", "Thumbprint Sync", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        MessageBox.Show(Loc.T("schedule.syncTerminal.failed", ex.Message), Loc.T("schedule.syncTerminal.title"), MessageBoxButtons.OK, MessageBoxIcon.Error);
                     });
                 }
             });
@@ -233,11 +248,11 @@ public class RibbonController : ManagerRibbonBase
         if (date < DateOnly.FromDateTime(DateTime.Today) &&
             !PastRecordGuard.ConfirmPastRecordEdit(SheetMapper.GuardSession, date, "Schedule Manager"))
         {
-            SheetOperations.ShowStatusConfirmation("Terminal sync cancelled.");
+            SheetOperations.ShowStatusConfirmation(Loc.T("schedule.syncTerminal.cancelled"));
             return;
         }
         AppLogger.Info($"[ScheduleManager] Offline: syncing all punches from thumbprint terminal ({DeviceSyncManager.DefaultIp})...");
-        SetStatus($"Syncing all punches from thumbprint terminal ({DeviceSyncManager.DefaultIp})...");
+        SetStatus(Loc.T("schedule.syncTerminal.statusSyncing", DeviceSyncManager.DefaultIp));
         Task.Run(async () =>
         {
             try
@@ -250,18 +265,20 @@ public class RibbonController : ManagerRibbonBase
                         var (added, duplicates, unknown) = SheetMapper.AppendTerminalPunches(punches, date);
                         SetStatus(false);
                         MessageBox.Show(
-                            $"Terminal {DeviceSyncManager.DefaultIp}: {punches.Count} punch(es) read (all dates).\n\n" +
-                            $"  Added to Attendance Entries : {added}\n" +
-                            $"  Already present / double scans : {duplicates}\n" +
-                            $"  Unknown staff / other dates :{unknown}\n\n" +
-                            $"Attendance Entries holds all dates and is filtered to {date:dd MMM yyyy} via the Date header (clear the Date filter to view all dates).\n" +
-                            "Use 'Save to System' to persist the new entries.",
-                            "Thumbprint Sync", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                            Loc.T(
+                                "schedule.syncTerminal.offlineSummary",
+                                DeviceSyncManager.DefaultIp,
+                                punches.Count,
+                                added,
+                                duplicates,
+                                unknown,
+                                date.ToString("dd MMM yyyy")),
+                            Loc.T("schedule.syncTerminal.title"), MessageBoxButtons.OK, MessageBoxIcon.Information);
                     }
                     catch (Exception ex2)
                     {
                         AppLogger.Error("[ScheduleManager] Appending terminal punches failed", ex2);
-                        MessageBox.Show($"Appending terminal punches failed:\n\n{ex2.Message}", "Thumbprint Sync", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                        MessageBox.Show(Loc.T("schedule.syncTerminal.appendFailed", ex2.Message), Loc.T("schedule.syncTerminal.title"), MessageBoxButtons.OK, MessageBoxIcon.Error);
                     }
                     finally { SetStatus(false); }
                 });
@@ -272,7 +289,7 @@ public class RibbonController : ManagerRibbonBase
                 ExcelAsyncUtil.QueueAsMacro(() =>
                 {
                     SetStatus(false);
-                    MessageBox.Show($"Terminal sync failed:\n\n{ex.Message}", "Thumbprint Sync", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    MessageBox.Show(Loc.T("schedule.syncTerminal.failed", ex.Message), Loc.T("schedule.syncTerminal.title"), MessageBoxButtons.OK, MessageBoxIcon.Error);
                 });
             }
         });

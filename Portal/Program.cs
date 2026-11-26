@@ -7,6 +7,12 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
 using SKSB_App.Core.RuntimeUI.BugReport;
+#if DEBUG
+using System.Collections.Generic;
+using System.Text;
+using System.Text.Json;
+using SKSB_App.Core.Localization;
+#endif
 
 static class Program
 {
@@ -21,10 +27,21 @@ static class Program
     private const int SW_RESTORE = 9;
 
     [STAThread]
-    static void Main()
+    static int Main(string[] args)
     {
 #if DEBUG
-        if (TryRelaunchFromShadow()) return;
+        if (args.Length >= 2 && string.Equals(args[0], "--export-dict-state", StringComparison.OrdinalIgnoreCase))
+        {
+            return RunExportDictStateCli(args[1]);
+        }
+
+        if (args.Length >= 2 && string.Equals(args[0], "--submit-dict-suggestions", StringComparison.OrdinalIgnoreCase))
+        {
+            string? outJsonPath = args.Length >= 3 ? args[2] : null;
+            return RunSubmitDictSuggestionsCli(args[1], outJsonPath);
+        }
+
+        if (TryRelaunchFromShadow()) return 0;
 #endif
 #if DEBUG
         string mutexName = GetPortalMutexName();
@@ -35,7 +52,7 @@ static class Program
         if (!isInitialInstance)
         {
             FocusExistingPortal();
-            return;
+            return 0;
         }
 
         Application.SetHighDpiMode(HighDpiMode.PerMonitorV2);
@@ -43,9 +60,68 @@ static class Program
         Application.SetCompatibleTextRenderingDefault(false);
         AutoBugReporter.InstallForPortal();
         Application.Run(new PortalForm());
+        return 0;
     }
 
 #if DEBUG
+    private static readonly UTF8Encoding Utf8NoBom = new(encoderShouldEmitUTF8Identifier: false);
+
+    private static void WriteCliOutputFile(string outJsonPath, string content)
+    {
+        string? dir = Path.GetDirectoryName(outJsonPath);
+        if (!string.IsNullOrEmpty(dir))
+            Directory.CreateDirectory(dir);
+        File.WriteAllText(outJsonPath, content, Utf8NoBom);
+    }
+
+    private static int RunExportDictStateCli(string outJsonPath)
+    {
+        try
+        {
+            var export = CollectiveDictionaryRepository.ExportStateForReview();
+            string json = JsonSerializer.Serialize(export, new JsonSerializerOptions { WriteIndented = true });
+            WriteCliOutputFile(outJsonPath, json);
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            string errJson = JsonSerializer.Serialize(new { error = ex.Message });
+            try { WriteCliOutputFile(outJsonPath, errJson); } catch { }
+            return 1;
+        }
+    }
+
+    private static int RunSubmitDictSuggestionsCli(string jsonPath, string? outJsonPath)
+    {
+        try
+        {
+            string json = File.ReadAllText(jsonPath, Encoding.UTF8);
+            var options = new JsonSerializerOptions
+            {
+                PropertyNameCaseInsensitive = true,
+                ReadCommentHandling = JsonCommentHandling.Skip,
+                AllowTrailingCommas = true
+            };
+            var items = JsonSerializer.Deserialize<List<CollectiveSuggestionInput>>(json, options)
+                ?? new List<CollectiveSuggestionInput>();
+            var result = CollectiveDictionaryRepository.SubmitAiSuggestions(items);
+            string outputJson = JsonSerializer.Serialize(result);
+            Console.WriteLine(outputJson);
+            if (!string.IsNullOrWhiteSpace(outJsonPath))
+                WriteCliOutputFile(outJsonPath, outputJson);
+            return 0;
+        }
+        catch (Exception ex)
+        {
+            string errJson = JsonSerializer.Serialize(new { error = ex.Message });
+            Console.WriteLine(errJson);
+            if (!string.IsNullOrWhiteSpace(outJsonPath))
+            {
+                try { WriteCliOutputFile(outJsonPath, errJson); } catch { }
+            }
+            return 1;
+        }
+    }
     private static string GetPortalMutexName()
     {
         try

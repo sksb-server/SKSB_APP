@@ -4,9 +4,12 @@ using System;
 using System.Linq;
 using ExcelDna.Integration;
 using SKSB_App.Core.Diagnostics;
+using SKSB_App.Core.Localization;
 using SKSB_App.Core.RuntimeUI.BugReport;
 using SKSB_App.Core.RuntimeUI.DropDown;
+using SKSB_App.Core.RuntimeUI.Guide;
 using SKSB_App.Core.RuntimeUI.Progress;
+using SKSB_App.Core.RuntimeUI.Ribbon;
 using SKSB_App.Core.WorkbookOpen.Sheet;
 using SKSB_App.Core.WorkbookOpen.Sync;
 using SKSB_App.Core.WorkbookSave.Entry;
@@ -175,6 +178,10 @@ public abstract class ManagerEventsBase<T> : IExcelAddIn
             new Action(UnhookApplicationEvents),
             onForceClose: () => ForceCloseWorkbook(wbObj)
         );
+        if (!cancel)
+        {
+            GuideTaskPaneManager.BeginShutdown();
+        }
     }
 
     /// <summary>
@@ -185,6 +192,7 @@ public abstract class ManagerEventsBase<T> : IExcelAddIn
     {
         _isExiting = true;
         UnhookApplicationEvents();
+        GuideTaskPaneManager.BeginShutdown();
         SaveEntry.ForceCloseAndQuit(wbObj, "ManagerEventsBase");
     }
 
@@ -246,17 +254,38 @@ public abstract class ManagerEventsBase<T> : IExcelAddIn
             return;
         }
 
-        using var progress = LoadingOverlay.BeginScope($"{contract.ModuleName} — Starting Up", "Checking PostgreSQL server connection...");
-        using var syncScope = SyncHelper.BeginSynchronousScope();
+        object? wbObj;
+        using (var progress = LoadingOverlay.BeginScope(
+            Loc.T("startup.overlay.title", Loc.ModuleDisplayName(contract.ModuleName)),
+            Loc.T("startup.overlay.checkingConnection"),
+            operationKey: $"{contract.ModuleName} — Starting Up"))
+        using (var syncScope = SyncHelper.BeginSynchronousScope())
+        {
+            OfflineSave.HandleStartup(contract);
 
-        OfflineSave.HandleStartup(contract);
+            wbObj = xlApp.ActiveWorkbook;
+            if (wbObj == null || SheetOperations.IsTemplateEditMode) return;
 
-        object? wbObj = xlApp.ActiveWorkbook;
-        if (wbObj == null || SheetOperations.IsTemplateEditMode) return;
+            LoadingOverlay.Report(Loc.T("startup.overlay.applyingRules"));
+            EventsAutoOpen.DelayedTemplateCheckMacro();
 
-        LoadingOverlay.Report("Applying table rules & column tooltips...");
-        EventsAutoOpen.DelayedTemplateCheckMacro();
+            SheetOperations.SetAuxiliarySheetsVisibility(visible: false, synchronous: true);
+        }
 
-        SheetOperations.SetAuxiliarySheetsVisibility(visible: false, synchronous: true);
+        if (wbObj != null && !SheetOperations.IsTemplateEditMode)
+        {
+            ManagerRibbonBase.ActivateManagerTab();
+            try
+            {
+                if (UserPreferences.Load().ShowGuideOnStartup)
+                {
+                    GuideTaskPaneManager.SetVisible(contract.ModuleName, true, persistPreference: false);
+                }
+            }
+            catch (Exception ex)
+            {
+                AppLogger.Warn($"[{contract.ModuleName}] Auto-open Cell Guide failed: {ex.Message}");
+            }
+        }
     }
 }

@@ -7,6 +7,7 @@ using System.Windows.Forms;
 using ExcelDna.Integration;
 using ExcelDna.Integration.CustomUI;
 using SKSB_App.Core.Diagnostics;
+using SKSB_App.Core.Localization;
 using SKSB_App.Core.RuntimeUI.Progress;
 using SKSB_App.Core.WorkbookOpen.Sheet;
 
@@ -28,9 +29,12 @@ public static class ValidationTaskPaneManager
         public ValidationTaskPaneControl Control = null!;
         public object? Workbook;
         public string WorkbookName = string.Empty;
+        public string ModuleName = string.Empty;
     }
 
     private static readonly Dictionary<string, PaneEntry> _panes = new(StringComparer.OrdinalIgnoreCase);
+    private static Action? _languageChangedHandler; // pinned static delegate (CLAUDE.md Rule 4)
+    private static bool _languageHooked;
 
     private static string BuildKey(object xlAppObj, object wbObj)
     {
@@ -75,15 +79,87 @@ public static class ValidationTaskPaneManager
         }
     }
 
+    private static string BuildPaneTitle(string moduleName)
+        => Loc.T("valPane.title", Loc.ModuleDisplayName(moduleName));
+
+    private static void HookLanguageChanged()
+    {
+        if (_languageHooked) return;
+        _languageHooked = true;
+        // May fire on a thread-pool thread (prefs file watcher): marshal to Excel's macro thread.
+        _languageChangedHandler ??= () =>
+        {
+            try { ExcelAsyncUtil.QueueAsMacro(RefreshAllLanguage); } catch { }
+        };
+        Loc.LanguageChanged += _languageChangedHandler;
+    }
+
+    private static void RefreshAllLanguage()
+    {
+        try
+        {
+            PruneDeadPanes();
+            foreach (var kv in _panes.ToList())
+            {
+                string key = kv.Key;
+                PaneEntry entry = kv.Value;
+                try
+                {
+                    bool wasVisible = false;
+                    try { wasVisible = entry.Pane.Visible; } catch { }
+
+                    string currentTitle = string.Empty;
+                    try { currentTitle = entry.Pane.Title ?? string.Empty; } catch { }
+
+                    string desiredTitle = BuildPaneTitle(entry.ModuleName);
+                    if (!wasVisible && !string.Equals(currentTitle, desiredTitle, StringComparison.Ordinal))
+                    {
+                        DisposeEntry(entry);
+                        _panes.Remove(key);
+                        continue;
+                    }
+
+                    entry.Control.RefreshLanguage();
+                }
+                catch (Exception ex)
+                {
+                    AppLogger.Warn($"[ValidationTaskPane] Language refresh failed for pane '{key}': {ex.Message}");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn($"[ValidationTaskPane] Language refresh failed: {ex.Message}");
+        }
+    }
+
     private static PaneEntry GetOrCreate(string key, object wb, string moduleName)
     {
         PruneDeadPanes();
-        if (_panes.TryGetValue(key, out var existing)) return existing;
+        HookLanguageChanged();
+        string desiredTitle = BuildPaneTitle(moduleName);
+
+        if (_panes.TryGetValue(key, out var existing))
+        {
+            bool visible = false;
+            string currentTitle = string.Empty;
+            try { visible = existing.Pane.Visible; } catch { }
+            try { currentTitle = existing.Pane.Title ?? string.Empty; } catch { }
+
+            if (visible || string.Equals(currentTitle, desiredTitle, StringComparison.Ordinal))
+            {
+                existing.ModuleName = moduleName;
+                return existing;
+            }
+
+            DisposeEntry(existing);
+            _panes.Remove(key);
+        }
 
         // Created without an explicit parent: Excel attaches it to the active window (the validated workbook).
         CustomTaskPane pane = CustomTaskPaneFactory.CreateCustomTaskPane(
             typeof(ValidationTaskPaneControl),
-            $"{moduleName} — Validation Issues");
+            desiredTitle);
         pane.DockPosition = MsoCTPDockPosition.msoCTPDockPositionBottom;
         try { pane.Height = DefaultPaneHeight; } catch { }
 
@@ -91,7 +167,8 @@ public static class ValidationTaskPaneManager
         {
             Pane = pane,
             Control = (ValidationTaskPaneControl)pane.ContentControl,
-            Workbook = wb
+            Workbook = wb,
+            ModuleName = moduleName
         };
         try { entry.WorkbookName = Convert.ToString(((dynamic)wb).Name) ?? string.Empty; } catch { }
         _panes[key] = entry;
@@ -116,7 +193,9 @@ public static class ValidationTaskPaneManager
         Action? onRevertHistoryEdits = null,
         Action? onCloneHistoryAsNewRows = null,
         bool showBlockingNotice = false,
-        Action? onKeepServerValues = null)
+        Action? onKeepServerValues = null,
+        Action? onSaveDraftAndClose = null,
+        Action? onDiscardDraftAndReload = null)
     {
         errors ??= new List<ValidationIssue>();
         warnings ??= new List<ValidationIssue>();
@@ -160,21 +239,25 @@ public static class ValidationTaskPaneManager
                 WrapMacro(onDebugQuitAnyway, "debug quit"),
                 WrapMacro(revertAction, "revert history edits"),
                 WrapMacro(cloneAction, "clone history edits as new rows"),
-                WrapMacro(onKeepServerValues, "keep server values"));
+                WrapMacro(onKeepServerValues, "keep server values"),
+                WrapMacro(onSaveDraftAndClose, "save draft and close"),
+                WrapMacro(onDiscardDraftAndReload, "discard draft and reload"));
 
             entry.Pane.Visible = true;
 
             bool isConflictMode = errors.Count == 0 && warnings.Any(w => w.IsConcurrencyConflict);
+            string displayModule = Loc.ModuleDisplayName(moduleName);
             string summary = isConflictMode
-                ? $"{moduleName}: {warnings.Count} concurrent edit conflict(s) — see the Validation Issues pane."
+                ? Loc.T("valPane.status.conflicts", displayModule, warnings.Count)
                 : errors.Count == 0 && warnings.Count == 0
-                ? $"{moduleName}: all validation checks passed."
-                : $"{moduleName}: {errors.Count} error(s), {warnings.Count} warning(s) — see the Validation Issues pane.";
+                ? Loc.T("valPane.status.passed", displayModule)
+                : Loc.T("valPane.status.issues", displayModule, errors.Count, warnings.Count);
             SheetOperations.ShowStatusConfirmation(summary);
 
             if (showBlockingNotice && (errors.Count > 0 || warnings.Count > 0))
             {
-                ShowBlockingNotice(moduleName, errors.Count, warnings.Count, isClosing, isConflictMode);
+                ShowBlockingNotice(moduleName, errors.Count, warnings.Count, isClosing, isConflictMode,
+                    canSaveDraft: onSaveDraftAndClose != null);
             }
         }
         catch (Exception ex)
@@ -252,6 +335,27 @@ public static class ValidationTaskPaneManager
         }
     }
 
+    /// <summary>Re-enables the active workbook pane's action buttons after a cancelled confirmation.</summary>
+    public static void ReenableActionsForActiveWorkbook()
+    {
+        try
+        {
+            dynamic xlApp = ExcelDnaUtil.Application;
+            dynamic? wb = xlApp.ActiveWorkbook;
+            if (wb == null) return;
+            string name = string.Empty;
+            try { name = Convert.ToString((object)wb.Name) ?? string.Empty; } catch { }
+            foreach (var e in _panes.Values.Where(p => string.Equals(p.WorkbookName, name, StringComparison.OrdinalIgnoreCase)))
+            {
+                try { e.Control.ReenableActions(); } catch { }
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn($"[ValidationTaskPane] ReenableActionsForActiveWorkbook warning: {ex.Message}");
+        }
+    }
+
     /// <summary>Hides and deletes every tracked pane. Called from <c>EventsAutoOpen.AutoClose</c>.</summary>
     public static void CloseAll()
     {
@@ -260,6 +364,12 @@ public static class ValidationTaskPaneManager
             DisposeEntry(entry);
         }
         _panes.Clear();
+
+        if (_languageHooked && _languageChangedHandler != null)
+        {
+            try { Loc.LanguageChanged -= _languageChangedHandler; } catch { }
+            _languageHooked = false;
+        }
     }
 
     // =========================================================================
@@ -294,8 +404,8 @@ public static class ValidationTaskPaneManager
             if (ws == null)
             {
                 SheetOperations.ShowStatusConfirmation(string.IsNullOrWhiteSpace(issue.SheetName)
-                    ? $"Issue: {issue.Message}"
-                    : $"Sheet '{issue.SheetName}' was not found. Issue: {issue.Message}");
+                    ? Loc.T("valPane.nav.issue", issue.Message)
+                    : Loc.T("valPane.nav.sheetNotFound", issue.SheetName, issue.Message));
                 return;
             }
 
@@ -304,7 +414,7 @@ public static class ValidationTaskPaneManager
             try { visibility = Convert.ToInt32(ws.Visible); } catch { }
             if (visibility != -1)
             {
-                SheetOperations.ShowStatusConfirmation($"Sheet '{issue.SheetName}' is hidden. Issue: {issue.Message}");
+                SheetOperations.ShowStatusConfirmation(Loc.T("valPane.nav.sheetHidden", issue.SheetName, issue.Message));
                 return;
             }
 
@@ -322,7 +432,10 @@ public static class ValidationTaskPaneManager
             }
 
             string location = issue.ExcelRow > 0 ? $"{issue.SheetName}!{issue.CellAddress}" : issue.SheetName;
-            SheetOperations.ShowStatusConfirmation($"{issue.Severity} at {location}: {issue.Message}");
+            string sevLabel = issue.Severity == ValidationSeverity.Error ? Loc.T("valPane.pill.error")
+                : issue.IsConcurrencyConflict ? Loc.T("valPane.pill.conflict")
+                : Loc.T("valPane.pill.warning");
+            SheetOperations.ShowStatusConfirmation(Loc.T("valPane.nav.atLocation", sevLabel, location, issue.Message));
         }
         catch (Exception ex)
         {
@@ -358,7 +471,7 @@ public static class ValidationTaskPaneManager
     }
 
     /// <summary>Concise Excel-owned notice explaining why Save/Close did not complete. Never throws.</summary>
-    private static void ShowBlockingNotice(string moduleName, int errorCount, int warningCount, bool isClosing, bool isConflict = false)
+    private static void ShowBlockingNotice(string moduleName, int errorCount, int warningCount, bool isClosing, bool isConflict = false, bool canSaveDraft = false)
     {
         try
         {
@@ -366,31 +479,34 @@ public static class ValidationTaskPaneManager
             try { dynamic xlApp = ExcelDnaUtil.Application; xlApp.EnableEvents = true; } catch { }
             try { dynamic xlApp = ExcelDnaUtil.Application; xlApp.ScreenUpdating = true; } catch { }
 
+            string displayModule = Loc.ModuleDisplayName(moduleName);
             string caption;
             string text;
             MessageBoxIcon icon;
             if (errorCount > 0)
             {
                 icon = MessageBoxIcon.Error;
-                caption = $"{moduleName} — Save Blocked";
+                caption = Loc.T("valPane.blocked.caption", displayModule);
                 string prefix = warningCount > 0
-                    ? $"{errorCount} error(s) and {warningCount} warning(s) were found."
-                    : $"{errorCount} error(s) were found.";
-                text = $"{prefix}\n\nSaving is blocked until all errors are resolved. Use the Validation Issues panel at the bottom of Excel to click, navigate to, and fix each error.";
+                    ? Loc.T("valPane.blocked.prefixErrorsWarnings", errorCount, warningCount)
+                    : Loc.T("valPane.blocked.prefixErrors", errorCount);
+                text = isClosing && canSaveDraft
+                    ? Loc.T("valPane.blocked.bodyDraft", prefix, Loc.T("valPane.btn.saveDraftClose"))
+                    : Loc.T("valPane.blocked.body", prefix);
             }
             else if (isConflict)
             {
                 icon = MessageBoxIcon.Warning;
-                caption = $"{moduleName} — Concurrent Edit Conflict";
-                string actionLabel = isClosing ? "Overwrite & Close" : "Overwrite Server & Save";
-                text = $"{warningCount} concurrent edit conflict(s) were detected because another user updated the same record(s) on the server. Save is paused.\n\nUse the Validation Issues panel at the bottom of Excel to review each difference, click \"Keep Server Values\" to keep the server copy, or edit the cell(s) and click \"{actionLabel}\" to overwrite.";
+                caption = Loc.T("valPane.conflict.caption", displayModule);
+                string actionLabel = isClosing ? Loc.T("valPane.btn.overwriteClose") : Loc.T("valPane.btn.overwriteSave");
+                text = Loc.T("valPane.conflict.body", warningCount, Loc.T("valPane.btn.keepServer"), actionLabel);
             }
             else
             {
                 icon = MessageBoxIcon.Warning;
-                caption = $"{moduleName} — Validation Warnings";
-                string actionLabel = isClosing ? "Save & Close" : "Proceed with Save";
-                text = $"{warningCount} warning(s) were found. Save is paused for review.\n\nUse the Validation Issues panel at the bottom of Excel to review or resolve them, or click \"{actionLabel}\" to continue.";
+                caption = Loc.T("valPane.warnings.caption", displayModule);
+                string actionLabel = isClosing ? Loc.T("valPane.btn.saveClose") : Loc.T("valPane.btn.proceed");
+                text = Loc.T("valPane.warnings.body", warningCount, actionLabel);
             }
 
             IntPtr hwnd = IntPtr.Zero;
@@ -445,7 +561,7 @@ public static class ValidationTaskPaneManager
             AppLogger.Error($"[{moduleName}] Validation summary fallback failed", ex);
             MessageBox.Show(
                 string.Join("\n", errors.Concat(warnings).Take(30).Select(i => i.ToDisplayString())),
-                $"{moduleName} - Data Integrity Check", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+                Loc.T("validation.windowTitle", Loc.ModuleDisplayName(moduleName)), MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
     }
 }

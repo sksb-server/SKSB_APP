@@ -10,6 +10,7 @@ using System.Runtime.InteropServices;
 using System.Threading;
 using System.Windows.Forms;
 using ExcelDna.Integration;
+using SKSB_App.Core.Localization;
 using SKSB_App.Core.RuntimeUI.DropDown;
 
 /// <summary>
@@ -35,11 +36,17 @@ public static class LoadingOverlay
     private static string _step = string.Empty;
     private static string? _detail;
 
+    private static readonly Stopwatch _rootStopwatch = new();
+    private static string _rootOperationKey = string.Empty;
+    private static double? _rootEstimateMs;
+
     // =========================================================================
     // 2. PUBLIC API
     // =========================================================================
-    public static IDisposable BeginScope(string title, string initialStep = "Processing...", string? detail = null)
+    public static IDisposable BeginScope(string title, string? initialStep = null, string? detail = null, string? operationKey = null)
     {
+        initialStep ??= Loc.T("loading.processing");
+
         IntPtr hwnd = IntPtr.Zero;
         try { hwnd = Arrow.GetExcelHwnd(ExcelDnaUtil.Application); } catch { }
 
@@ -52,6 +59,10 @@ public static class LoadingOverlay
                 _parents.Clear();
                 _excelHwnd = hwnd;
                 showNow = _suspendDepth == 0;
+                _rootOperationKey = LoadingTimeEstimator.NormalizeKey(title, operationKey);
+                _rootEstimateMs = LoadingTimeEstimator.GetEstimateMs(_rootOperationKey);
+                _rootStopwatch.Restart();
+                if (_suspendDepth > 0) _rootStopwatch.Stop(); // started while suspended: don't count modal wait time
             }
             else
             {
@@ -85,6 +96,8 @@ public static class LoadingOverlay
         {
             _suspendDepth++;
             hide = _suspendDepth == 1;
+            if (_suspendDepth == 1 && _scopeDepth > 0)
+                _rootStopwatch.Stop();
         }
         if (hide) HideForm();
         return new SuspendToken();
@@ -102,6 +115,8 @@ public static class LoadingOverlay
             if (Interlocked.Exchange(ref _disposed, 1) != 0) return;
 
             bool hide = false;
+            double elapsedMs = 0;
+            string rootKey = string.Empty;
             lock (_gate)
             {
                 if (_scopeDepth <= 0) return;
@@ -110,6 +125,11 @@ public static class LoadingOverlay
                 {
                     _parents.Clear();
                     hide = true;
+                    _rootStopwatch.Stop();
+                    elapsedMs = _rootStopwatch.Elapsed.TotalMilliseconds;
+                    rootKey = _rootOperationKey;
+                    _rootOperationKey = string.Empty;
+                    _rootEstimateMs = null;
                 }
                 else if (_parents.Count > 0)
                 {
@@ -117,7 +137,12 @@ public static class LoadingOverlay
                 }
             }
 
-            if (hide) HideForm();
+            if (hide)
+            {
+                HideForm();
+                if (!string.IsNullOrEmpty(rootKey))
+                    LoadingTimeEstimator.RecordDuration(rootKey, elapsedMs);
+            }
             else RequestRepaint();
         }
     }
@@ -134,7 +159,9 @@ public static class LoadingOverlay
             lock (_gate)
             {
                 if (_suspendDepth > 0) _suspendDepth--;
-                show = _scopeDepth > 0 && _suspendDepth == 0;
+                if (_suspendDepth == 0 && _scopeDepth > 0)
+                    _rootStopwatch.Start();
+                show =_scopeDepth > 0 && _suspendDepth == 0;
             }
             if (show) ShowForm(restartClock: false);
         }
@@ -143,9 +170,29 @@ public static class LoadingOverlay
     // =========================================================================
     // 4. UI THREAD MARSHALING
     // =========================================================================
-    private static (string Title, string Step, string? Detail) Snapshot()
+    private static (string Title, string Step, string? Detail, double? EstimateMs) Snapshot()
     {
-        lock (_gate) return (_title, _step, _detail);
+        string? pendingKey = null;
+        lock (_gate)
+        {
+            if (_rootEstimateMs == null && !string.IsNullOrEmpty(_rootOperationKey))
+                pendingKey = _rootOperationKey;
+        }
+
+        if (pendingKey != null)
+        {
+            double? est = LoadingTimeEstimator.GetEstimateMs(pendingKey);
+            if (est != null)
+            {
+                lock (_gate)
+                {
+                    if (_rootEstimateMs == null && _rootOperationKey == pendingKey)
+                        _rootEstimateMs = est;
+                }
+            }
+        }
+
+        lock (_gate) return (_title, _step, _detail, _rootEstimateMs);
     }
 
     [DllImport("user32.dll")]
@@ -360,6 +407,7 @@ public static class LoadingOverlay
         public void HideOverlay()
         {
             _timer.Stop();
+            _stopwatch.Stop();
             if (Visible) Hide();
         }
 
@@ -392,15 +440,30 @@ public static class LoadingOverlay
             float S(float v) => v * _dpiScale;
             int Si(float v) => (int)Math.Round(v * _dpiScale);
 
-            var (title, step, detail) = Snapshot();
-            if (string.IsNullOrWhiteSpace(detail)) detail = "Excel screen updating is paused while processing...";
+            var (title, step, detail, estimateMs) = Snapshot();
+            if (string.IsNullOrWhiteSpace(detail)) detail = Loc.T("loading.detailDefault"); // Loc is thread-safe (immutable dictionaries)
 
             // Border + accent bar
             int bw = Math.Max(1, (int)Math.Round(_dpiScale));
             using (var borderPen = new Pen(Color.FromArgb(203, 213, 225), bw) { Alignment = PenAlignment.Inset })
                 g.DrawRectangle(borderPen, 0, 0, Width - 1, Height - 1);
             using (var accent = new SolidBrush(Color.FromArgb(16, 149, 193)))
-                g.FillRectangle(accent, 0, 0, Width, Si(4));
+            {
+                if (estimateMs is double est && est > 0)
+                {
+                    using (var trackBrush = new SolidBrush(Color.FromArgb(226, 232, 240)))
+                        g.FillRectangle(trackBrush, 0, 0, Width, Si(4));
+                    double ratio = _stopwatch.Elapsed.TotalMilliseconds / est;
+                    double progress = ratio <= 0.95
+                        ? Math.Clamp(ratio, 0.0, 0.95)
+                        : 0.95 + 0.04 * (1.0 - Math.Exp(-(ratio - 0.95) * 2.0));
+                    g.FillRectangle(accent, 0, 0, Math.Max(Si(4), (int)Math.Round(Width * progress)), Si(4));
+                }
+                else
+                {
+                    g.FillRectangle(accent, 0, 0, Width, Si(4));
+                }
+            }
 
             // Spinner
             var spinRect = new RectangleF(S(22), S(36), S(34), S(34));
@@ -413,11 +476,24 @@ public static class LoadingOverlay
             // Text (GDI ClearType on a solid white background)
             const TextFormatFlags common = TextFormatFlags.SingleLine | TextFormatFlags.NoPrefix | TextFormatFlags.NoPadding;
             const TextFormatFlags left = common | TextFormatFlags.Left | TextFormatFlags.EndEllipsis;
-            string clock = $"{_stopwatch.Elapsed.TotalSeconds:0.0}s";
+            Rectangle clockRect, titleRect;
+            string clock;
+            if (estimateMs is double estClock && estClock > 0)
+            {
+                clock = $"{_stopwatch.Elapsed.TotalSeconds:0.0}s / ~{estClock / 1000.0:0.0}s";
+                clockRect = new Rectangle(Si(300), Si(20), Si(120), Si(20));
+                titleRect = new Rectangle(Si(72), Si(18), Si(224), Si(24));
+            }
+            else
+            {
+                clock = $"{_stopwatch.Elapsed.TotalSeconds:0.0}s";
+                clockRect = new Rectangle(Si(340), Si(20), Si(80), Si(20));
+                titleRect = new Rectangle(Si(72), Si(18), Si(264), Si(24));
+            }
 
-            TextRenderer.DrawText(g, clock, _clockFont, new Rectangle(Si(340), Si(20), Si(80), Si(20)),
+            TextRenderer.DrawText(g, clock, _clockFont, clockRect,
                 Color.FromArgb(148, 163, 184), common | TextFormatFlags.Right);
-            TextRenderer.DrawText(g, title, _titleFont, new Rectangle(Si(72), Si(18), Si(264), Si(24)),
+            TextRenderer.DrawText(g, title, _titleFont, titleRect,
                 Color.FromArgb(15, 23, 42), left);
             TextRenderer.DrawText(g, step, _stepFont, new Rectangle(Si(72), Si(45), Si(348), Si(22)),
                 Color.FromArgb(51, 65, 85), left);

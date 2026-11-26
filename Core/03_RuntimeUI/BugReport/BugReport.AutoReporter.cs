@@ -76,6 +76,15 @@ public static class AutoBugReporter
 #endif
     }
 
+    /// <summary>Call right before Excel quits: suppresses any further auto-reports (shutdown-time errors are noise).</summary>
+    public static void MarkShuttingDown()
+    {
+#if !DEBUG
+        Volatile.Write(ref _isShuttingDown, true);
+        UninstallForExcelAddIn();
+#endif
+    }
+
     public static void InstallForPortal()
     {
 #if !DEBUG
@@ -114,6 +123,7 @@ public static class AutoBugReporter
     private static string _sourceModule = "Core";
     private static ExcelDnaErrorTraceListener? _listener;
     private static bool _globalHooksInstalled;
+    private static bool _isShuttingDown;
 
     private static readonly ConcurrentDictionary<string, DateTime> _recent = new();
     private static readonly TimeSpan Cooldown = TimeSpan.FromMinutes(5);
@@ -178,6 +188,7 @@ public static class AutoBugReporter
     // =========================================================================
     private static void SubmitAutoReport(string category, string summary, string details, bool waitBriefly)
     {
+        if (Volatile.Read(ref _isShuttingDown) || Environment.HasShutdownStarted) return;
         if (_isReporting) return;
         _isReporting = true;
         try

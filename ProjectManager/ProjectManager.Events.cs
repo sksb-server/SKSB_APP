@@ -1,8 +1,10 @@
 namespace SKSB_App.ProjectManager;
 
+using SKSB_App.Core.RuntimeUI.DropDown;
 using SKSB_App.Core.Types;
 using SKSB_App.Core.WorkbookOpen.Entry;
 using SKSB_App.Core.WorkbookSave.Entry;
+using System;
 using System.Collections.Generic;
 
 public class Events : ManagerEventsBase<List<ProjectRecord>>
@@ -21,10 +23,13 @@ public class Events : ManagerEventsBase<List<ProjectRecord>>
         EnumsToSync = new[]
         {
             typeof(ProjectType),
+            typeof(GeneralProjectType),
+            typeof(InternalProjectType),
             typeof(ProjectDistrict),
             typeof(ProjectPriority),
             typeof(ProjectStatus),
             typeof(ProjectCategory),
+            typeof(GeneralProjectCategory),
             typeof(Shifts)
         },
         ExtractAndValidate = () => SheetMapper.ExtractProjectRecordsWithDiagnostics(),
@@ -56,6 +61,26 @@ public class Events : ManagerEventsBase<List<ProjectRecord>>
     };
 
     protected override SaveContract<List<ProjectRecord>> Contract => ProjectSyncDescriptor;
+
+    // =========================================================================
+    // 2. SHEET-CHANGE OBSERVER (auto Project Code / SQL Account Project on General & Internal Projects)
+    // =========================================================================
+    // Pinned in a static field so the same delegate instance is registered and later unregistered.
+    private static readonly Action<dynamic, dynamic> SheetObserver = SheetMapper.OnSheetChanged;
+
+    public override void AutoOpen()
+    {
+        base.AutoOpen();
+        ParameterCells.RegisterChangeObserver(SheetObserver);
+        DynamicCostToggle.Register();
+    }
+
+    public override void AutoClose()
+    {
+        DynamicCostToggle.Unregister();
+        ParameterCells.UnregisterChangeObserver(SheetObserver);
+        base.AutoClose();
+    }
 
     // =========================================================================
     // 3. LOOKUP SYNCHRONISATION (runs on the Excel macro thread via the base class)

@@ -8,9 +8,13 @@ using System.Linq;
 using System.Windows.Forms;
 using ExcelDna.Integration;
 using SKSB_App.Core.Integration.Database;
+using SKSB_App.Core.Localization;
+using SKSB_App.Core.RuntimeUI.BugReport;
 using SKSB_App.Core.RuntimeUI.Progress;
+using SKSB_App.Core.RuntimeUI.Ribbon;
 using SKSB_App.Core.RuntimeUI.Undo;
 using SKSB_App.Core.WorkbookOpen.Sheet;
+using SKSB_App.Core.WorkbookOpen.Sync;
 using SKSB_App.Core.WorkbookSave.SheetMapper;
 using SKSB_App.Core.WorkbookSave.Storage;
 using SKSB_App.Core.WorkbookSave.Validation;
@@ -68,14 +72,18 @@ public static class SaveEntry
 
         try
         {
-            using var progress = LoadingOverlay.BeginScope($"{contract.ModuleName} — Saving to System", "Extracting and validating workbook tables...");
+            string displayModule = Loc.ModuleDisplayName(contract.ModuleName);
+            using var progress = LoadingOverlay.BeginScope(
+                Loc.T("save.overlay.title", displayModule),
+                Loc.T("save.overlay.extracting"),
+                operationKey: $"{contract.ModuleName} — Saving to System");
 
             // 1. FREEZE ENTIRE SCREEN BEFORE ANY EXTRACTION OR POPULATION
             try { xlApp.ScreenUpdating = false; } catch { }
 
             while (true)
             {
-                LoadingOverlay.Report("Extracting and validating workbook tables...");
+                LoadingOverlay.Report(Loc.T("save.overlay.extracting"));
                 var (data, validationErrors, validationWarnings) = contract.ExtractAndValidate();
                 validationErrors ??= new List<ValidationIssue>();
                 validationWarnings ??= new List<ValidationIssue>();
@@ -101,7 +109,8 @@ public static class SaveEntry
                             validationWarnings,
                             onRevalidate: () => ValidateAndShow(contract, proceed),
                             onProceedWithSave: proceed,
-                            showBlockingNotice: true);
+                            showBlockingNotice: true,
+                            onDiscardDraftAndReload: BuildDiscardDraftAction(contract));
                     }
                     return false;
                 }
@@ -117,7 +126,7 @@ public static class SaveEntry
                 {
                     if (data == null) return false;
                     if (showSuccessNotification)
-                        SaveNotificationDialog.ShowSuccess(contract.ModuleName, "The worksheet contains no records to save.");
+                        SaveNotificationDialog.ShowSuccess(contract.ModuleName, Loc.T("save.msg.noRecords"));
                     return true; // Nothing to save
                 }
 
@@ -157,17 +166,19 @@ public static class SaveEntry
                             try { xlApp.ScreenUpdating = false; } catch { }
                             break; // Proceed to the server commit below
                         case ExitResolution.SaveLocallyAndQuit:
-                            LoadingOverlay.Report("Saving records to local offline storage...");
+                            LoadingOverlay.Report(Loc.T("save.overlay.savingOffline"));
                             contract.SaveOffline(data);
+                            WorkbookDraft.Clear<T>();
                             ServerEnvironment.EnterOfflineMode("Saved records to local offline storage.");
                             contract.UpdateWindowCaption();
-                            LoadingOverlay.Report("Refreshing worksheet tables...");
+                            ManagerRibbonBase.InvalidateRibbon();
+                            LoadingOverlay.Report(Loc.T("save.overlay.refreshing"));
                             if (repopulateAfterSave) (contract.RefreshAfterSave ?? contract.PopulateWorksheet)?.Invoke(data);
                             StackedEntryGuard.RefreshWorkbookSnapshots(activeWb);
                             UndoManager.ClearWorkbook(activeWb);
                             try { ((dynamic)ExcelDnaUtil.Application).ActiveWorkbook.Saved = true; } catch { }
                             if (showSuccessNotification)
-                                SaveNotificationDialog.ShowOffline(contract.ModuleName, "Debug: Records stashed to offline JSON storage.");
+                                SaveNotificationDialog.ShowOffline(contract.ModuleName, Loc.T("save.msg.debugOffline"));
                             return true;
                         case ExitResolution.QuitAnyway:
                         case ExitResolution.Cancel:
@@ -178,7 +189,7 @@ public static class SaveEntry
                 }
 #endif
 
-                LoadingOverlay.Report("Committing records to PostgreSQL server...", "Executing database transaction...");
+                LoadingOverlay.Report(Loc.T("save.overlay.committing"), Loc.T("save.overlay.committingDetail"));
                 var (success, dbErrRelease, conflicts) = CommitToServer(contract, data, forceOverwrite);
                 if (!success && conflicts is { Count: > 0 })
                 {
@@ -219,7 +230,7 @@ public static class SaveEntry
                         onKeepServerValues: keepServer,
                         showBlockingNotice: true);
                     SheetOperations.ShowStatusConfirmation(
-                        $"{contract.ModuleName}: save paused — {conflictIssues.Count} concurrent edit conflict(s). See the Validation Issues pane.");
+                        Loc.T("save.status.pausedConflicts", displayModule, conflictIssues.Count));
                     return false;
                 }
 
@@ -228,13 +239,16 @@ public static class SaveEntry
                     AppLogger.Info($"[{contract.ModuleName}] Save committed to PostgreSQL.");
                     ValidationTaskPaneManager.HideForActiveWorkbook();
                     OfflineSnapshot.ClearPendingSnapshot<T>();
-                    LoadingOverlay.Report("Refreshing worksheet tables...");
+                    WorkbookDraft.Clear<T>();
+                    contract.UpdateWindowCaption();
+                    ManagerRibbonBase.InvalidateRibbon();
+                    LoadingOverlay.Report(Loc.T("save.overlay.refreshing"));
                     if (repopulateAfterSave) (contract.RefreshAfterSave ?? contract.PopulateWorksheet)?.Invoke(data);
                     StackedEntryGuard.RefreshWorkbookSnapshots(activeWb);
                     UndoManager.ClearWorkbook(activeWb);
                     try { ((dynamic)ExcelDnaUtil.Application).ActiveWorkbook.Saved = true; } catch { }
                     if (showSuccessNotification)
-                        SaveNotificationDialog.ShowSuccess(contract.ModuleName, "Save completed successfully. All records persisted to database.");
+                        SaveNotificationDialog.ShowSuccess(contract.ModuleName, Loc.T("save.msg.success"));
                     return true;
                 }
 
@@ -245,7 +259,7 @@ public static class SaveEntry
 
                 using var conflictDialog = new ExitConflictDialog(
                     contract.ModuleName,
-                    string.IsNullOrWhiteSpace(dbErrRelease) ? "Could not establish a connection to PostgreSQL." : dbErrRelease,
+                    string.IsNullOrWhiteSpace(dbErrRelease) ? Loc.T("save.err.noConnection") : dbErrRelease,
                     isClosing: false
                 );
                 using (LoadingOverlay.Suspend())
@@ -259,17 +273,19 @@ public static class SaveEntry
                         if (ServerEnvironment.IsOffline && !ServerEnvironment.SimulateOffline) ServerEnvironment.PingServer(out _);
                         continue;
                     case ExitResolution.SaveLocallyAndQuit:
-                        LoadingOverlay.Report("Saving records to local offline storage...");
+                        LoadingOverlay.Report(Loc.T("save.overlay.savingOffline"));
                         contract.SaveOffline(data);
+                        WorkbookDraft.Clear<T>();
                         ServerEnvironment.EnterOfflineMode("Saved records to local offline storage.");
                         contract.UpdateWindowCaption();
-                        LoadingOverlay.Report("Refreshing worksheet tables...");
+                        ManagerRibbonBase.InvalidateRibbon();
+                        LoadingOverlay.Report(Loc.T("save.overlay.refreshing"));
                         if (repopulateAfterSave) (contract.RefreshAfterSave ?? contract.PopulateWorksheet)?.Invoke(data);
                         StackedEntryGuard.RefreshWorkbookSnapshots(activeWb);
                         UndoManager.ClearWorkbook(activeWb);
                         try { ((dynamic)ExcelDnaUtil.Application).ActiveWorkbook.Saved = true; } catch { }
                         if (showSuccessNotification)
-                            SaveNotificationDialog.ShowOffline(contract.ModuleName, "Saved records to local offline storage.");
+                            SaveNotificationDialog.ShowOffline(contract.ModuleName, Loc.T("save.msg.savedOffline"));
                         return true;
                     case ExitResolution.Cancel:
                     default:
@@ -442,7 +458,7 @@ public static class SaveEntry
                         excelRow,
                         excelCol,
                         diff.ColumnHeader,
-                        $"{conflict.RecordKey}: Server has \"{diff.ServerDisplay}\" — your save would replace it with \"{diff.LocalDisplay}\".",
+                        Loc.T("save.conflict.fieldDiff", conflict.RecordKey, diff.ServerDisplay, diff.LocalDisplay),
                         IsStackedHistoryEdit: false,
                         OriginalValue: diff.ServerExcelValue,
                         RowKey: rowKey,
@@ -533,7 +549,7 @@ public static class SaveEntry
         }
 
         AppLogger.Info($"[SaveEntry] Keep Server Values: wrote {written}/{targets.Count} conflicting cell(s).");
-        SheetOperations.ShowStatusConfirmation($"Restored {written} cell(s) to the server's values.");
+        SheetOperations.ShowStatusConfirmation(Loc.T("save.status.restoredServerValues", written));
     }
 
     /// <summary>Server value -> COM-safe Value2 (OADate for dates, double for numbers; null clears the cell).</summary>
@@ -602,7 +618,7 @@ public static class SaveEntry
             onKeepServerValues: keepServer,
             showBlockingNotice: true);
         SheetOperations.ShowStatusConfirmation(
-            $"{contract.ModuleName}: close paused — {conflictIssues.Count} concurrent edit conflict(s). See the Validation Issues pane.");
+            Loc.T("save.status.closePausedConflicts", Loc.ModuleDisplayName(contract.ModuleName), conflictIssues.Count));
     }
 
     // =========================================================================
@@ -616,7 +632,7 @@ public static class SaveEntry
     {
         if (SheetOperations.IsMasterTemplateFile() || SheetOperations.IsTemplateEditMode)
         {
-            SheetOperations.ShowStatusConfirmation("Check Issues is unavailable while editing a template.");
+            SheetOperations.ShowStatusConfirmation(Loc.T("save.status.validateUnavailableTemplate"));
             return;
         }
 
@@ -635,7 +651,8 @@ public static class SaveEntry
             errors,
             warnings,
             onRevalidate: () => ValidateAndShow(contract, onProceedWithSave),
-            onProceedWithSave: onProceedWithSave);
+            onProceedWithSave: onProceedWithSave,
+            onDiscardDraftAndReload: BuildDiscardDraftAction(contract));
     }
 
     /// <summary>Extract + validate under a frozen screen (restored in <c>finally</c>); nothing is persisted.</summary>
@@ -649,7 +666,10 @@ public static class SaveEntry
 
         try
         {
-            using var progress = LoadingOverlay.BeginScope($"{contract.ModuleName} — Checking Issues", "Extracting and validating workbook tables...");
+            using var progress = LoadingOverlay.BeginScope(
+                Loc.T("save.overlay.checkingTitle", Loc.ModuleDisplayName(contract.ModuleName)),
+                Loc.T("save.overlay.extracting"),
+                operationKey: $"{contract.ModuleName} — Checking Issues");
             try { xlApp.ScreenUpdating = false; } catch { }
 
             var (_, errors, warnings) = contract.ExtractAndValidate();
@@ -663,7 +683,7 @@ public static class SaveEntry
         {
             AppLogger.Error($"[{contract.ModuleName}] Validation run failed", ex);
             return (
-                new List<ValidationIssue> { new(ValidationSeverity.Error, string.Empty, string.Empty, 0, 0, string.Empty, $"Validation failed: {ex.Message}") },
+                new List<ValidationIssue> { new(ValidationSeverity.Error, string.Empty, string.Empty, 0, 0, string.Empty, Loc.T("save.err.validationFailed", ex.Message)) },
                 new List<ValidationIssue>());
         }
         finally
@@ -709,7 +729,10 @@ public static class SaveEntry
 
         try
         {
-            using var progress = LoadingOverlay.BeginScope($"{contract.ModuleName} — Saving to System", "Extracting and validating workbook tables...");
+            using var progress = LoadingOverlay.BeginScope(
+                Loc.T("save.overlay.title", Loc.ModuleDisplayName(contract.ModuleName)),
+                Loc.T("save.overlay.extracting"),
+                operationKey: $"{contract.ModuleName} — Saving to System");
 
             while (true)
             {
@@ -717,7 +740,7 @@ public static class SaveEntry
                 try { xlApp.ScreenUpdating = false; } catch { }
                 try { xlApp.EnableEvents = false; } catch { }
 
-                LoadingOverlay.Report("Extracting and validating workbook tables...");
+                LoadingOverlay.Report(Loc.T("save.overlay.extracting"));
                 var (data, validationErrors, validationWarnings) = contract.ExtractAndValidate();
                 validationErrors ??= new List<ValidationIssue>();
                 validationWarnings ??= new List<ValidationIssue>();
@@ -789,9 +812,11 @@ public static class SaveEntry
                         case ExitResolution.Retry:
                             break; // Proceed to freeze + server commit below
                         case ExitResolution.SaveLocallyAndQuit:
-                            LoadingOverlay.Report("Saving records to local offline storage...");
+                            LoadingOverlay.Report(Loc.T("save.overlay.savingOffline"));
                             contract.SaveOffline(data);
+                            WorkbookDraft.Clear<T>();
                             ServerEnvironment.EnterOfflineMode("Saved records to local offline storage.");
+                            ManagerRibbonBase.InvalidateRibbon();
                             isExiting = true;
                             unEventHooks();
                             wb.Saved = true;
@@ -817,7 +842,7 @@ public static class SaveEntry
                 try { xlApp.ScreenUpdating = false; } catch { }
                 try { xlApp.EnableEvents = false; } catch { }
 
-                LoadingOverlay.Report("Committing records to PostgreSQL server...", "Executing database transaction...");
+                LoadingOverlay.Report(Loc.T("save.overlay.committing"), Loc.T("save.overlay.committingDetail"));
                 var (success, dbError, conflicts) = CommitToServer(contract, data, forceOverwrite: false);
 
                 if (!success && conflicts is { Count: > 0 })
@@ -843,6 +868,9 @@ public static class SaveEntry
                 if (success)
                 {
                     OfflineSnapshot.ClearPendingSnapshot<T>();
+                    WorkbookDraft.Clear<T>();
+                    contract.UpdateWindowCaption();
+                    ManagerRibbonBase.InvalidateRibbon();
                     isExiting = true;
                     unEventHooks();
                     wb.Saved = true;
@@ -856,7 +884,7 @@ public static class SaveEntry
 
                 using var dialog = new ExitConflictDialog(
                     contract.ModuleName,
-                    string.IsNullOrWhiteSpace(dbError) ? "Could not persist records to the PostgreSQL server." : dbError,
+                    string.IsNullOrWhiteSpace(dbError) ? Loc.T("save.err.couldNotPersist") : dbError,
                     isClosing: true
                 );
                 using (LoadingOverlay.Suspend())
@@ -870,9 +898,11 @@ public static class SaveEntry
                         if (ServerEnvironment.IsOffline && !ServerEnvironment.SimulateOffline) ServerEnvironment.PingServer(out _);
                         continue;
                     case ExitResolution.SaveLocallyAndQuit:
-                        LoadingOverlay.Report("Saving records to local offline storage...");
+                        LoadingOverlay.Report(Loc.T("save.overlay.savingOffline"));
                         contract.SaveOffline(data);
+                        WorkbookDraft.Clear<T>();
                         ServerEnvironment.EnterOfflineMode("Saved records to local offline storage.");
+                        ManagerRibbonBase.InvalidateRibbon();
                         isExiting = true;
                         unEventHooks();
                         wb.Saved = true;
@@ -891,8 +921,8 @@ public static class SaveEntry
             AppLogger.Error("Error encountered during exit validation", ex);
             using (LoadingOverlay.Suspend())
             {
-                MessageBox.Show($"Error encountered during exit validation:\n\n{ex.Message}\n\nDetails were written to the runtime log.",
-                    "Exit Validation Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show(Loc.T("save.err.exitValidationBody", ex.Message),
+                    Loc.T("save.err.exitValidationTitle"), MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
             cancel = true;
         }
@@ -920,10 +950,16 @@ public static class SaveEntry
         Action forceClose,
         bool showBlockingNotice = false)
     {
+        Action? saveDraftAndClose = errors.Count > 0
+            ? () => SaveDraftAndClose(contract, errors.Count, warnings.Count, forceClose)
+            : null;
+
         ValidationTaskPaneManager.ShowIssues(
             contract.ModuleName,
             errors,
             warnings,
+            onSaveDraftAndClose: saveDraftAndClose,
+            onDiscardDraftAndReload: BuildDiscardDraftAction(contract),
             onRevalidate: () =>
             {
                 var (e, w) = RunValidation(contract);
@@ -959,6 +995,103 @@ public static class SaveEntry
 #else
             onDebugQuitAnyway: null);
 #endif
+    }
+
+    // =========================================================================
+    // 4. LOCAL DRAFT ("SAVE DRAFT & CLOSE")
+    // =========================================================================
+    /// <summary>
+    /// "Save Draft &amp; Close": writes a lossless cell-level draft of the workbook (never uploaded to PostgreSQL),
+    /// then closes. On a failed write the workbook stays open. Must run on the macro thread.
+    /// </summary>
+    private static void SaveDraftAndClose<T>(SaveContract<T> contract, int errorCount, int warningCount, Action forceClose)
+    {
+        dynamic xlApp = ExcelDnaUtil.Application;
+        dynamic? activeWb = null;
+        try { activeWb = xlApp.ActiveWorkbook; } catch { }
+
+        string displayModule = Loc.ModuleDisplayName(contract.ModuleName);
+        try
+        {
+            using (LoadingOverlay.BeginScope(
+                Loc.T("save.overlay.draftTitle", displayModule),
+                Loc.T("save.overlay.draftStep"),
+                operationKey: $"{contract.ModuleName} — Saving Local Draft"))
+            {
+                WorkbookDraft.Save<T>((object?)activeWb, contract.ModuleName, errorCount, warningCount);
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error($"[{contract.ModuleName}] Save Draft & Close failed", ex);
+            SKSB_App.Core.RuntimeUI.DropDown.Arrow.HideAll();
+            try { xlApp.EnableEvents = true; } catch { }
+            try { xlApp.ScreenUpdating = true; } catch { }
+            MessageBox.Show(
+                Loc.T("save.draft.failedBody", ex.Message),
+                Loc.T("save.draft.failedTitle", displayModule), MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
+
+        AppLogger.Info($"[{contract.ModuleName}] Close: saved local draft with {errorCount} error(s), {warningCount} warning(s).");
+        contract.UpdateWindowCaption();
+        ManagerRibbonBase.InvalidateRibbon();
+
+        // Rule 2 modal exception: unfreeze + hide floating widgets before the notification.
+        SKSB_App.Core.RuntimeUI.DropDown.Arrow.HideAll();
+        try { xlApp.EnableEvents = true; } catch { }
+        try { xlApp.ScreenUpdating = true; } catch { }
+        SaveNotificationDialog.ShowOffline(
+            contract.ModuleName,
+            Loc.T("save.draft.savedBody"));
+
+        forceClose();
+    }
+
+    /// <summary>
+    /// Startup after a draft was restored: validates and opens the Validation Issues pane (no blocking popup) with
+    /// "Proceed with Save" (enabled once errors are fixed) and "Discard Draft &amp; Load Server". Macro thread only.
+    /// </summary>
+    public static void ShowDraftIssues<T>(SaveContract<T> contract)
+    {
+        Action proceed = () => TrySave(contract, bypassWarnings: true);
+        var (errors, warnings) = RunValidation(contract);
+        SKSB_App.Core.RuntimeUI.DropDown.Arrow.HideAll();
+        ValidationTaskPaneManager.ShowIssues(
+            contract.ModuleName,
+            errors,
+            warnings,
+            onRevalidate: () => ValidateAndShow(contract, proceed),
+            onProceedWithSave: proceed,
+            showBlockingNotice: false,
+            onDiscardDraftAndReload: BuildDiscardDraftAction(contract));
+    }
+
+    /// <summary>"Discard Draft &amp; Load Server" action, or null when no local draft exists.</summary>
+    private static Action? BuildDiscardDraftAction<T>(SaveContract<T> contract)
+    {
+        if (!contract.HasLocalDraft) return null;
+        return () =>
+        {
+            SKSB_App.Core.RuntimeUI.DropDown.Arrow.HideAll();
+            try { ((dynamic)ExcelDnaUtil.Application).ScreenUpdating = true; } catch { }
+            try { ((dynamic)ExcelDnaUtil.Application).EnableEvents = true; } catch { }
+
+            var answer = MessageBox.Show(
+                Loc.T("save.draft.discardConfirmBody"),
+                Loc.T("save.draft.discardConfirmTitle", Loc.ModuleDisplayName(contract.ModuleName)),
+                MessageBoxButtons.YesNo,
+                MessageBoxIcon.Warning);
+            if (answer != DialogResult.Yes)
+            {
+                // Re-enable the pane's draft buttons (disabled by the double-click guard) without leaving closing mode.
+                ValidationTaskPaneManager.ReenableActionsForActiveWorkbook();
+                return;
+            }
+
+            AppLogger.Info($"[{contract.ModuleName}] User discarded local draft; reloading from server.");
+            OfflineSave.DiscardDraftAndReload(contract);
+        };
     }
 
     /// <summary>Fallback for <see cref="InterceptClose{T}"/> callers that do not supply their own force-close.</summary>
@@ -1035,6 +1168,7 @@ public static class SaveEntry
                 if (count == 0)
                 {
                     AppLogger.Info("[SaveEntry] No workbooks remain after force close; quitting Excel.");
+                    AutoBugReporter.MarkShuttingDown();
                     app.Quit();
                 }
                 else
@@ -1062,6 +1196,7 @@ public static class SaveEntry
                     if (count <= 1)
                     {
                         AppLogger.Info($"[SaveEntry] Last workbook closing ({count} open); quitting Excel.");
+                        AutoBugReporter.MarkShuttingDown();
                         app.Quit();
                     }
                 }

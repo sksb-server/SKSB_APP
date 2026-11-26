@@ -39,6 +39,8 @@ public static partial class ServerDispatcher
     /// <summary>SQL Payroll calendar mirror: per-date holiday flag, public holidays and date-scoped leave days.</summary>
     private const string SqlPayrollCalendarSchema = @"
         ALTER TABLE daily_schedule_settings ADD COLUMN IF NOT EXISTS is_holiday BOOLEAN NOT NULL DEFAULT FALSE;
+        ALTER TABLE daily_schedule_settings ADD COLUMN IF NOT EXISTS dismissed_projects TEXT[] NOT NULL DEFAULT '{}';
+        ALTER TABLE daily_attendances ADD COLUMN IF NOT EXISTS planned_projects TEXT NOT NULL DEFAULT '';
 
         CREATE TABLE IF NOT EXISTS public_holidays (
             holiday_date DATE PRIMARY KEY,
@@ -239,11 +241,11 @@ public static partial class ServerDispatcher
 
     private const string SqlDailyAttendanceUpsert = @"
         INSERT INTO daily_attendances (
-            schedule_date, staff_id, attendance_status, clock_in_time, clock_out_time, project_check_ins, projects_done,
+            schedule_date, staff_id, attendance_status, clock_in_time, clock_out_time, project_check_ins, planned_projects, projects_done,
             regular_shift, additional_shifts, ot_hours, additional_ot_hours, total_flattened_hours,
             is_allocated, updated_at)
         VALUES (
-            @ScheduleDate, @StaffId, @AttendanceStatus, @ClockInTime, @ClockOutTime, @ProjectCheckIns, @ProjectsDone,
+            @ScheduleDate, @StaffId, @AttendanceStatus, @ClockInTime, @ClockOutTime, @ProjectCheckIns, @PlannedProjects, @ProjectsDone,
             @RegularShift, @AdditionalShifts, @OtHours, @AdditionalOtHours, @TotalFlattenedHours,
             @IsAllocated, clock_timestamp())
         ON CONFLICT (schedule_date, staff_id) DO UPDATE SET
@@ -251,6 +253,7 @@ public static partial class ServerDispatcher
             clock_in_time         = EXCLUDED.clock_in_time,
             clock_out_time        = EXCLUDED.clock_out_time,
             project_check_ins     = EXCLUDED.project_check_ins,
+            planned_projects      = EXCLUDED.planned_projects,
             projects_done         = EXCLUDED.projects_done,
             regular_shift         = EXCLUDED.regular_shift,
             additional_shifts     = EXCLUDED.additional_shifts,
@@ -261,13 +264,14 @@ public static partial class ServerDispatcher
             updated_at            = GREATEST(clock_timestamp(), daily_attendances.updated_at + INTERVAL '1 millisecond');";
 
     private const string SqlScheduleSettingsUpsert = @"
-        INSERT INTO daily_schedule_settings (schedule_date, day_start_time, late_cut_off_time, ot_start_time, is_holiday, updated_at)
-        VALUES (@ScheduleDate, @DayStartTime, @LateCutOffTime, @OtStartTime, @IsHoliday, clock_timestamp())
+        INSERT INTO daily_schedule_settings (schedule_date, day_start_time, late_cut_off_time, ot_start_time, is_holiday, dismissed_projects, updated_at)
+        VALUES (@ScheduleDate, @DayStartTime, @LateCutOffTime, @OtStartTime, @IsHoliday, @DismissedProjects, clock_timestamp())
         ON CONFLICT (schedule_date) DO UPDATE SET
-            day_start_time    = EXCLUDED.day_start_time,
-            late_cut_off_time = EXCLUDED.late_cut_off_time,
-            ot_start_time     = EXCLUDED.ot_start_time,
-            is_holiday        = EXCLUDED.is_holiday,
+            day_start_time     = EXCLUDED.day_start_time,
+            late_cut_off_time  = EXCLUDED.late_cut_off_time,
+            ot_start_time      = EXCLUDED.ot_start_time,
+            is_holiday         = EXCLUDED.is_holiday,
+            dismissed_projects = EXCLUDED.dismissed_projects,
             updated_at        = GREATEST(clock_timestamp(), daily_schedule_settings.updated_at + INTERVAL '1 millisecond');";
 
     /// <summary>
@@ -302,6 +306,7 @@ public static partial class ServerDispatcher
             ClockInTime = a.ClockInTime.HasValue ? (TimeSpan?)a.ClockInTime.Value.ToTimeSpan() : null,
             ClockOutTime = a.ClockOutTime.HasValue ? (TimeSpan?)a.ClockOutTime.Value.ToTimeSpan() : null,
             ProjectCheckIns = a.ProjectCheckIns ?? string.Empty,
+            PlannedProjects = a.PlannedProjects ?? string.Empty,
             ProjectsDone = CleanList(a.ProjectsDone),
             a.RegularShift,
             a.AdditionalShifts,
@@ -318,7 +323,11 @@ public static partial class ServerDispatcher
             DayStartTime = schedule.DayStartTime.ToTimeSpan(),
             LateCutOffTime = schedule.LateCutOffTime.ToTimeSpan(),
             OtStartTime = schedule.OTStartTime.ToTimeSpan(),
-            schedule.IsHoliday
+            schedule.IsHoliday,
+            DismissedProjects = CleanList(schedule.DismissedProjects)
+                .Select(p => p.ToUpperInvariant())
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToArray()
         }, trans);
 
         // Date-scoped reconciliation: removed slots / workers disappear for THIS date only.

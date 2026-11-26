@@ -7,6 +7,7 @@ using System.Linq;
 using System.Text.RegularExpressions;
 using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.Integration.Erp;
+using SKSB_App.Core.Localization;
 using SKSB_App.Core.RuntimeUI.RuleEngine;
 using SKSB_App.Core.ThumbprintSync;
 using SKSB_App.Core.Types;
@@ -80,15 +81,15 @@ public class StaffImportResult
     public ImportSummaryReport ToGenericReport() => new()
     {
         SourceSystemName = "SQL Payroll",
-        EntityLabel = "staff profile(s)",
+        EntityLabel = Loc.T("staff.import.entityLabel"),
         SuccessfullyImportedCount = ImportedStaffs.Count,
         FilteredExclusionCount = 0,
-        FilterRuleDescription = "Status follows Resign Date; Department must be Worker / Admin / Office; salaries rebuilt from HR_EMP + HR_EMP_HISTORY.",
+        FilterRuleDescription = Loc.T("staff.import.filterRule"),
         SkippedErrors = AdvisoryItems,
-        AdvisoryBanner = AdvisoryBannerText,
-        SkippedSectionTitle = "Advisories (Warnings)",
-        Title = AdvisoryItems.Count > 0 ? "SQL Payroll Sync Completed with Advisories" : "SQL Payroll Sync Completed",
-        FooterHint = "Staff sheets are read-only. Fix the source data in SQL Payroll, then click 'Load from System' to resync."
+        AdvisoryBanner = Loc.T("staff.import.advisoryBanner"),
+        SkippedSectionTitle = Loc.T("staff.import.skippedSectionTitle"),
+        Title = AdvisoryItems.Count > 0 ? Loc.T("staff.import.titleAdvisories") : Loc.T("staff.import.titleSuccess"),
+        FooterHint = Loc.T("staff.import.footerHint")
     };
 }
 

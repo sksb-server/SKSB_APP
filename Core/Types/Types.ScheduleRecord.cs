@@ -138,6 +138,12 @@ public record ScheduleRecord
     /// <summary>Day / Night dispatch board slots (8 per band) for <see cref="DailyScheduleDate"/>.</summary>
     public List<DailyProjectSchedule> Projects { get; set; } = new();
 
+    /// <summary>
+    /// Auto-scheduled project IDs the user removed from the board for <see cref="DailyScheduleDate"/> ("✕ Remove Slot");
+    /// they are not auto-populated again for this date until re-added.
+    /// </summary>
+    public List<string> DismissedProjects { get; set; } = new();
+
     /// <summary>Per-worker rollup for <see cref="DailyScheduleDate"/>.</summary>
     public List<DailyWorkerAttendance> WorkerAttendance { get; set; } = new();
 
@@ -275,6 +281,14 @@ public record DailyWorkerAttendance
     [ColumnRule(IsRequired = false)]
     public string ProjectCheckIns { get; set; } = string.Empty;
 
+    /// <summary>
+    /// Projects the worker is planned on, comma-separated: on-board slots listing the worker, plus projects whose slot was
+    /// removed from the board (kept so re-adding the project restores its workers; shown in grey).
+    /// </summary>
+    [ExcelColumn("Planned Projects")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
+    public string PlannedProjects { get; set; } = string.Empty;
+
     /// <summary>Distinct projects worked that day (derived from <see cref="ProjectCheckIns"/>; not an Excel column).</summary>
     public List<string> ProjectsDone { get; set; } = new();
 
@@ -305,8 +319,7 @@ public record DailyWorkerAttendance
     [ColumnFormat(ColumnFormatKind.Hours)]
     public decimal TotalFlattenedHours { get; set; }
 
-    [ExcelColumn("Is Allocated")]
-    [ColumnRule(IsRequired = false, IsReadOnly = true)]
+    /// <summary>Persisted for DB / JSON compatibility; no longer an Excel column (replaced by <see cref="PlannedProjects"/>).</summary>
     public bool IsAllocated { get; set; }
 }
 

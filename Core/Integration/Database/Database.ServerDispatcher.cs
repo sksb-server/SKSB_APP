@@ -1624,6 +1624,11 @@ WHERE vehicle_plate = @VehiclePlate
             string serverTypes = JoinProjectTypes(server.ProjectType);
             long serverStaff = server.StaffID ?? 0;
 
+            string serverAutoRaw = Text(row, "auto_schedule");
+            bool serverAuto = bool.TryParse(serverAutoRaw, out var sa) ? sa : local.Category != ProjectCategory.Internal;
+
+            AddText(diffs, "Project Name", Text(row, "project_name"), d.ProjectName);
+            Add(diffs, "Auto-Schedule", serverAuto ? "TRUE" : "FALSE", d.AutoSchedule ? "TRUE" : "FALSE", serverAuto);
             AddText(diffs, "Reference No", server.ReferenceNo, d.ReferenceNo);
             Add(diffs, "Type", ShowText(serverTypes), ShowText(JoinProjectTypes(d.ProjectType)), serverTypes.Length == 0 ? null : serverTypes);
             AddEnum(diffs, "Priority", server.Priority, d.Priority);
@@ -2045,6 +2050,8 @@ WHERE vehicle_plate = @VehiclePlate
     {
         public string ProjectId { get; init; } = string.Empty;
         public string Category { get; init; } = string.Empty;
+        public string ProjectName { get; init; } = string.Empty;
+        public bool AutoSchedule { get; init; } = true;
         public string ReferenceNo { get; init; } = string.Empty;
         public string ProjectType { get; init; } = string.Empty;
         public string Priority { get; init; } = string.Empty;
@@ -2093,6 +2100,8 @@ WHERE vehicle_plate = @VehiclePlate
         {
             ProjectId = NormalizeProjectCode(p.ProjectCode),
             Category = p.Category.ToString(),
+            ProjectName = d.ProjectName?.Trim() ?? string.Empty,
+            AutoSchedule = p.Category != ProjectCategory.Internal && d.AutoSchedule,
             ReferenceNo = d.ReferenceNo ?? string.Empty,
             ProjectType = string.Join(", ", (d.ProjectType ?? new List<ProjectType>()).Select(t => t.ToString())),
             Priority = d.Priority.ToString(),
@@ -2140,10 +2149,8 @@ WHERE vehicle_plate = @VehiclePlate
 
     private static string ProjectExcelTable(ProjectCategory category) => category switch
     {
-        ProjectCategory.iJob => "iJobProjectsTable",
-        ProjectCategory.MWO => "MWOProjectsTable",
-        ProjectCategory.PVT => "PVTProjectsTable",
-        ProjectCategory.Other => "OtherProjectsTable",
+        ProjectCategory.Internal => "InternalProjectsTable",
+        ProjectCategory.iJob or ProjectCategory.MWO or ProjectCategory.PVT or ProjectCategory.Other => "GeneralProjectsTable",
         _ => "AllProjectsTable"
     };
 
@@ -2155,17 +2162,19 @@ INSERT INTO project_master (
     project_id, category, reference_no, project_type, priority, status, company_id, company_name, staff_id, pic,
     district, address, start_date, target_end_date, actual_end_date, estimated_cost, promised_return, actual_return,
     remarks, days_worked, total_regular_shifts, total_hours, overtime_shifts, total_overtime_hours, total_odometer, fuel_cost, labour_cost, claim_cost,
-    actual_project_cost, profit_margin, sql_account_project_code, updated_at
+    actual_project_cost, profit_margin, sql_account_project_code, project_name, auto_schedule, updated_at
 ) VALUES (
     @ProjectId, @Category, @ReferenceNo, @ProjectType, @Priority, @Status, @CompanyId, @CompanyName, @StaffId, @Pic,
     @District, @Address, @StartDate, @TargetEndDate, @ActualEndDate, @EstimatedCost, @PromisedReturn, @ActualReturn,
     @Remarks, @DaysWorked, @TotalRegularShifts, @TotalHours, @OvertimeShifts, @TotalOvertimeHours, @TotalOdometer, @FuelCost, @LabourCost, @ClaimCost,
-    @ActualProjectCost, @ProfitMargin, @SqlAccountProjectCode, clock_timestamp()
+    @ActualProjectCost, @ProfitMargin, @SqlAccountProjectCode, @ProjectName, @AutoSchedule, clock_timestamp()
 )";
 
     private const string SqlProjectUpsert = SqlProjectInsert + @"
 ON CONFLICT (project_id) DO UPDATE SET
     category            = EXCLUDED.category,
+    project_name        = EXCLUDED.project_name,
+    auto_schedule       = EXCLUDED.auto_schedule,
     reference_no        = EXCLUDED.reference_no,
     project_type        = EXCLUDED.project_type,
     priority            = EXCLUDED.priority,
@@ -2203,6 +2212,8 @@ ON CONFLICT (project_id) DO NOTHING;";
     private const string SqlProjectConditionalUpdate = @"
 UPDATE project_master SET
     category            = @Category,
+    project_name        = @ProjectName,
+    auto_schedule       = @AutoSchedule,
     reference_no        = @ReferenceNo,
     project_type        = @ProjectType,
     priority            = @Priority,
@@ -2405,6 +2416,19 @@ WHERE project_id = @ProjectId
     // -------------------------------------------------------------------------
     // 4e. IDEMPOTENT SCHEMA MIGRATIONS
     // -------------------------------------------------------------------------
+    private static bool _projectSchemaEnsured;
+
+    /// <summary>
+    /// Runs the project_master migration once per process (General / Internal Projects layout: project_name,
+    /// auto_schedule, nullable company_id). Called before the first project fetch; saves also run it in-transaction.
+    /// </summary>
+    public static void EnsureProjectSchema()
+    {
+        if (_projectSchemaEnsured) return;
+        Db.ExecuteInTransaction((conn, trans) => EnsureProjectSchema(conn, trans));
+        _projectSchemaEnsured = true;
+    }
+
     /// <summary>Safe on a fresh database and on the legacy project_master layout.</summary>
     private static void EnsureProjectSchema(System.Data.IDbConnection conn, System.Data.IDbTransaction trans)
     {
@@ -2445,7 +2469,11 @@ ALTER TABLE project_master ADD COLUMN IF NOT EXISTS claim_cost          NUMERIC(
 ALTER TABLE project_master ADD COLUMN IF NOT EXISTS actual_project_cost NUMERIC(14,2) DEFAULT 0;
 ALTER TABLE project_master ADD COLUMN IF NOT EXISTS profit_margin       NUMERIC(14,2) DEFAULT 0;
 ALTER TABLE project_master ADD COLUMN IF NOT EXISTS sql_account_project_code VARCHAR(80);
-ALTER TABLE project_master ADD COLUMN IF NOT EXISTS updated_at          TIMESTAMPTZ   DEFAULT CURRENT_TIMESTAMP;", transaction: trans);
+ALTER TABLE project_master ADD COLUMN IF NOT EXISTS updated_at          TIMESTAMPTZ   DEFAULT CURRENT_TIMESTAMP;
+ALTER TABLE project_master ADD COLUMN IF NOT EXISTS project_name        TEXT          NOT NULL DEFAULT '';
+ALTER TABLE project_master ADD COLUMN IF NOT EXISTS auto_schedule       BOOLEAN       NOT NULL DEFAULT TRUE;
+ALTER TABLE project_master ALTER COLUMN company_id DROP NOT NULL;", transaction: trans);
+        _projectSchemaEnsured = true;
     }
 
     private static void EnsureCompanySchema(System.Data.IDbConnection conn, System.Data.IDbTransaction trans)

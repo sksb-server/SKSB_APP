@@ -4,9 +4,11 @@ using ExcelDna.Integration;
 using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.Integration.Database;
 using SKSB_App.Core.RuntimeUI.Progress;
+using SKSB_App.Core.RuntimeUI.Ribbon;
 using SKSB_App.Core.WorkbookOpen.Sheet;
 using SKSB_App.Core.WorkbookSave.Entry;
 using SKSB_App.Core.WorkbookSave.Storage;
+using SKSB_App.Core.WorkbookSave.Validation;
 using System;
 using System.IO;
 using System.Windows.Forms;
@@ -40,6 +42,36 @@ public static class OfflineSave
             AppLogger.Info("Calling contract.SyncLookups...");
             LoadingOverlay.Report("Synchronizing lookup lists & dropdowns...");
             contract.SyncLookups?.Invoke(false);
+
+            // Local draft ("Save Draft & Close"): restore it onto the fresh template and let the user finish fixing
+            // errors. NEVER auto-upload a draft and NEVER overwrite it with server data.
+            if (WorkbookDraft.HasDraft<T>())
+            {
+                var draft = WorkbookDraft.Load<T>();
+                if (draft == null)
+                {
+                    AppLogger.Warn($"Local draft for {typeof(T).Name} is unreadable; discarding it and continuing normal startup.");
+                    WorkbookDraft.Clear<T>();
+                }
+                else
+                {
+                    AppLogger.Info($"Restoring local draft saved {draft.SavedUtc.ToLocalTime():yyyy-MM-dd HH:mm:ss} ({draft.ErrorCount} error(s)).");
+                    LoadingOverlay.Report("Restoring local draft...");
+                    WorkbookDraft.Restore<T>((object?)wb, draft);
+                    if (activeSheetBefore != null)
+                    {
+                        try { activeSheetBefore.Activate(); } catch { }
+                    }
+                    contract.UpdateWindowCaption();
+                    ManagerRibbonBase.InvalidateRibbon();
+                    SheetOperations.ShowStatusConfirmation(
+                        $"[LOCAL DRAFT] {contract.ModuleName} restored local draft ({draft.ErrorCount} error(s) to fix before saving to server).");
+
+                    progress.Dispose(); // end the overlay before the task pane opens
+                    SaveEntry.ShowDraftIssues(contract);
+                    return;
+                }
+            }
 
             bool hasPending = OfflineSnapshot.HasPendingSnapshot<T>();
             AppLogger.Info($"HasPendingSnapshot<{typeof(T).Name}> = {hasPending}");
@@ -223,6 +255,75 @@ public static class OfflineSave
         {
             AppLogger.Error("OfflineSave.HandleStartup failed", ex);
         }
+    }
+
+    /// <summary>
+    /// "Discard Draft &amp; Load Server": deletes the local draft, hides the issue pane and repopulates the workbook
+    /// from the server (or the offline snapshot while offline). Must run on the macro thread.
+    /// </summary>
+    public static void DiscardDraftAndReload<T>(SaveContract<T> contract)
+    {
+        WorkbookDraft.Clear<T>();
+        ValidationTaskPaneManager.HideForActiveWorkbook();
+        contract.UpdateWindowCaption();
+        ManagerRibbonBase.InvalidateRibbon();
+
+        dynamic xlApp = ExcelDnaUtil.Application;
+        dynamic? activeSheetBefore = null;
+        try { activeSheetBefore = xlApp.ActiveSheet; } catch { }
+
+        bool loaded = false;
+        try
+        {
+            using (LoadingOverlay.BeginScope($"{contract.ModuleName} — Loading from System", "Fetching records..."))
+            {
+                LoadingOverlay.Report(ServerEnvironment.IsOffline
+                    ? "Loading local offline snapshot..."
+                    : $"Fetching {contract.ModuleName} records from server...");
+                T? data = contract.FetchFromServer != null
+                    ? contract.FetchFromServer()
+                    : (ServerEnvironment.IsOffline ? OfflineSnapshot.Load<T>() : default);
+
+                if (data != null && contract.PopulateWorksheet != null)
+                {
+                    bool origUpdating = true;
+                    bool origEvents = true;
+                    int origCalculation = -4105; // xlCalculationAutomatic
+                    try { origUpdating = (bool)xlApp.ScreenUpdating; xlApp.ScreenUpdating = false; } catch { }
+                    try { origEvents = (bool)xlApp.EnableEvents; xlApp.EnableEvents = false; } catch { }
+                    try { origCalculation = (int)xlApp.Calculation; xlApp.Calculation = -4135; /* xlCalculationManual */ } catch { }
+                    try
+                    {
+                        LoadingOverlay.Report($"Populating {contract.ModuleName} worksheets...");
+                        contract.PopulateWorksheet(data);
+                        loaded = true;
+                        if (activeSheetBefore != null)
+                        {
+                            try { activeSheetBefore.Activate(); } catch { }
+                        }
+                    }
+                    finally
+                    {
+                        try { xlApp.Calculation = origCalculation; } catch { }
+                        try { xlApp.EnableEvents = origEvents; } catch { }
+                        try { xlApp.ScreenUpdating = origUpdating; } catch { }
+                    }
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Error($"[{contract.ModuleName}] Discard draft & reload failed", ex);
+        }
+
+        contract.UpdateWindowCaption();
+        ManagerRibbonBase.InvalidateRibbon();
+        SheetOperations.ShowStatusConfirmation(!loaded
+            ? $"{contract.ModuleName}: local draft discarded (no records were available to reload)."
+            : ServerEnvironment.IsOffline
+                ? $"[OFFLINE MODE] {contract.ModuleName}: local draft discarded, reloaded from local offline snapshot."
+                : $"{contract.ModuleName}: local draft discarded, records reloaded from server.");
+        if (loaded) RunAfterLoadHook(contract);
     }
 
     /// <summary>Offline Mode startup: loads the local snapshot (and auxiliary snapshots) into the workbook.</summary>

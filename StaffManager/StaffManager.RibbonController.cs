@@ -10,6 +10,7 @@ using System.Windows.Forms;
 using ExcelDna.Integration;
 using ExcelDna.Integration.CustomUI;
 using SKSB_App.Core.Diagnostics;
+using SKSB_App.Core.Localization;
 using SKSB_App.Core.RuntimeUI.Ribbon;
 using SKSB_App.Core.ThumbprintSync;
 using SKSB_App.Core.Types;
@@ -36,17 +37,17 @@ public class RibbonController : ManagerRibbonBase
         saveSupertip: "Validates and commits employee profiles and licenses.");
 
     protected override string GetCustomGroupsXml() => @"
-                <group id='grpThumbprintTerminal' label='Thumbprint Terminal'>
+                <group id='grpThumbprintTerminal' getLabel='GetCustomLabel'>
                   <button id='btnPushStaffToTerminal'
-                          label='Push ID &amp; Name&#10;to Controller'
+                          getLabel='GetCustomLabel'
                           size='large'
                           imageMso='AccessRefreshAllLists'
-                          screentip='Push Staff ID &amp; Name to Controller'
-                          supertip='Compares Staff IDs on the thumbprint controller and updates matching users names (preserving fingerprint templates and roles) after confirmation.'
+                          getScreentip='GetCustomScreentip'
+                          getSupertip='GetCustomSupertip'
                           onAction='OnPushStaffToTerminalClicked' />
                 </group>";
 
-    protected override string EmptyLoadMessage => "No staff records found in database or local snapshot.";
+    protected override string EmptyLoadMessage => Loc.T("ribbon.load.emptyBody", ModuleDisplayName);
 
     // =========================================================================
     // 2. EXCEL COMMANDS (must live on a non-generic type)
@@ -62,7 +63,7 @@ public class RibbonController : ManagerRibbonBase
     // =========================================================================
     public void OnPushStaffToTerminalClicked(IRibbonControl control)
     {
-        const string Title = "Push ID & Name to Controller";
+        string title = Loc.T("staff.pushTerminal.title");
         const int MaxNameLen = 23;
 
         ExcelAsyncUtil.QueueAsMacro(() =>
@@ -86,7 +87,7 @@ public class RibbonController : ManagerRibbonBase
             catch (Exception ex)
             {
                 AppLogger.Error("Failed to read staff records for terminal push", ex);
-                MessageBox.Show($"Failed to read staff records: {ex.Message}", Title, MessageBoxButtons.OK, MessageBoxIcon.Error);
+                MessageBox.Show(Loc.T("staff.pushTerminal.readFailed", ex.Message), title, MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
             }
 
@@ -124,12 +125,12 @@ public class RibbonController : ManagerRibbonBase
                         if (updates.Count == 0)
                         {
                             MessageBox.Show(
-                                $"Nothing to update.\n\nAlready synced: {alreadySynced}\nNot in staff list: {unmatched}",
-                                Title, MessageBoxButtons.OK, MessageBoxIcon.Information);
+                                Loc.T("staff.pushTerminal.nothingToUpdate", alreadySynced, unmatched),
+                                title, MessageBoxButtons.OK, MessageBoxIcon.Information);
                             return;
                         }
 
-                        if (!ConfirmTerminalNameUpdates(Title, DeviceSyncManager.DefaultIp, preview, alreadySynced, unmatched)) return;
+                        if (!ConfirmTerminalNameUpdates(title, DeviceSyncManager.DefaultIp, preview, alreadySynced, unmatched)) return;
 
                         Task.Run(async () =>
                         {
@@ -137,14 +138,14 @@ public class RibbonController : ManagerRibbonBase
                             {
                                 int updated = await DeviceSyncManager.ApplyTerminalUsersAsync(updates);
                                 ExcelAsyncUtil.QueueAsMacro(() => MessageBox.Show(
-                                    $"Updated {updated} user name(s) on the controller.",
-                                    Title, MessageBoxButtons.OK, MessageBoxIcon.Information));
+                                    Loc.T("staff.pushTerminal.updated", updated),
+                                    title, MessageBoxButtons.OK, MessageBoxIcon.Information));
                             }
                             catch (Exception ex)
                             {
                                 AppLogger.Error("Terminal name push failed", ex);
                                 ExcelAsyncUtil.QueueAsMacro(() => MessageBox.Show(
-                                    $"Push failed: {ex.Message}", Title, MessageBoxButtons.OK, MessageBoxIcon.Error));
+                                    Loc.T("staff.pushTerminal.pushFailed", ex.Message), title, MessageBoxButtons.OK, MessageBoxIcon.Error));
                             }
                         });
                     });
@@ -153,7 +154,7 @@ public class RibbonController : ManagerRibbonBase
                 {
                     AppLogger.Error("Terminal fetch failed", ex);
                     ExcelAsyncUtil.QueueAsMacro(() => MessageBox.Show(
-                        $"Could not read users from controller: {ex.Message}", Title, MessageBoxButtons.OK, MessageBoxIcon.Error));
+                        Loc.T("staff.pushTerminal.fetchFailed", ex.Message), title, MessageBoxButtons.OK, MessageBoxIcon.Error));
                 }
             });
         });
@@ -183,8 +184,7 @@ public class RibbonController : ManagerRibbonBase
             Dock = DockStyle.Top,
             AutoSize = true,
             Padding = new Padding(0, 0, 0, 8),
-            Text = $"Names to update: {preview.Count}   |   Already synced: {alreadySynced}   |   Not in staff list: {unmatched}\n" +
-                   $"Controller: {hostIp} — fingerprint templates, cards, PINs and roles are preserved."
+            Text = Loc.T("staff.pushTerminal.confirmHeader", preview.Count, alreadySynced, unmatched, hostIp)
         };
 
         var list = new ListView
@@ -195,22 +195,23 @@ public class RibbonController : ManagerRibbonBase
             GridLines = true,
             HeaderStyle = ColumnHeaderStyle.Nonclickable
         };
-        list.Columns.Add("ID", 70);
-        list.Columns.Add("Current Name (Controller)", 225);
-        list.Columns.Add("New Name (Staff Sheet)", 225);
+        list.Columns.Add(Loc.T("staff.pushTerminal.colId"), 70);
+        list.Columns.Add(Loc.T("staff.pushTerminal.colCurrentName"), 225);
+        list.Columns.Add(Loc.T("staff.pushTerminal.colNewName"), 225);
+        string blankLabel = Loc.T("staff.pushTerminal.blank");
         foreach (var (id, oldName, newName) in preview)
-            list.Items.Add(new ListViewItem(new[] { id, string.IsNullOrEmpty(oldName) ? "(blank)" : oldName, newName }));
+            list.Items.Add(new ListViewItem(new[] { id, string.IsNullOrEmpty(oldName) ? blankLabel : oldName, newName }));
 
         var btnCancel = new Button
         {
-            Text = "Cancel",
+            Text = Loc.T("common.cancel"),
             DialogResult = DialogResult.Cancel,
             AutoSize = true,
             Padding = new Padding(10, 4, 10, 4)
         };
         var btnPush = new Button
         {
-            Text = "Push Updates",
+            Text = Loc.T("staff.pushTerminal.btnPush"),
             DialogResult = DialogResult.OK,
             AutoSize = true,
             Padding = new Padding(10, 4, 10, 4)

@@ -3,6 +3,7 @@
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Windows.Forms;
+using SKSB_App.Core.Localization;
 
 public enum ExitResolution
 {
@@ -23,9 +24,10 @@ public class ExitConflictDialog : Form
         bool isDebugPrompt = false)
     {
         SuspendLayout();
+        string displayName = Loc.ModuleDisplayName(moduleName);
         Text = isDebugPrompt
-            ? $"[DEBUG MODE] {moduleName} - Save & Exit Options"
-            : $"{moduleName} - Synchronization Alert";
+            ? Loc.T("exitConflict.windowTitleDebug", displayName)
+            : Loc.T("exitConflict.windowTitle", displayName);
 
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.FixedDialog;
@@ -84,7 +86,7 @@ public class ExitConflictDialog : Form
 
         var lblTitle = new Label
         {
-            Text = isDebugPrompt ? "Debug Save Intercept" : "Server Database Offline",
+            Text = isDebugPrompt ? Loc.T("exitConflict.titleDebug") : Loc.T("exitConflict.title"),
             Font = new Font("Segoe UI", 11.5f, FontStyle.Bold),
             ForeColor = Color.FromArgb(30, 41, 59),
             AutoSize = true,
@@ -92,14 +94,14 @@ public class ExitConflictDialog : Form
         };
 
         string actionPrompt = isClosing
-            ? "Would you like to retry the server, save an offline stash and quit, or stay in Excel?"
-            : "Would you like to retry connecting, or save an offline stash to upload later?";
+            ? Loc.T("exitConflict.promptClosing")
+            : Loc.T("exitConflict.promptSaving");
 
         var lblMessage = new Label
         {
             Text = isDebugPrompt
-                ? "Pending records ready to persist.\n\nDebug Mode is active. Select how to proceed with this record batch:"
-                : $"Unable to persist records to the server database.\n\nDetails:\n{errorMessage}\n\n{actionPrompt}",
+                ? Loc.T("exitConflict.bodyDebug")
+                : Loc.T("exitConflict.body", errorMessage, actionPrompt),
             Font = new Font("Segoe UI", 9.5f),
             ForeColor = Color.FromArgb(71, 85, 105),
             AutoSize = true,
@@ -117,7 +119,7 @@ public class ExitConflictDialog : Form
 
         var btnCancel = new Button
         {
-            Text = isClosing ? "Cancel (Stay in Excel)" : "Cancel",
+            Text = isClosing ? Loc.T("exitConflict.cancelClosing") : Loc.T("common.cancel"),
             Font = new Font("Segoe UI", 9f),
             AutoSize = true,
             Padding = new Padding(14, 6, 14, 6),
@@ -136,7 +138,7 @@ public class ExitConflictDialog : Form
         {
             var btnQuitAnyway = new Button
             {
-                Text = "Quit Anyway (Discard)",
+                Text = Loc.T("exitConflict.quitAnyway"),
                 Font = new Font("Segoe UI", 9f, FontStyle.Italic),
                 ForeColor = Color.FromArgb(185, 28, 28),
                 BackColor = Color.FromArgb(254, 242, 242),
@@ -152,7 +154,7 @@ public class ExitConflictDialog : Form
 
         var btnSaveLocal = new Button
         {
-            Text = isClosing ? "Save Offline & Quit" : "Save Offline",
+            Text = isClosing ? Loc.T("exitConflict.saveOfflineQuit") : Loc.T("exitConflict.saveOffline"),
             Font = new Font("Segoe UI", 9f, FontStyle.Bold),
             AutoSize = true,
             Padding = new Padding(14, 6, 14, 6),
@@ -166,7 +168,7 @@ public class ExitConflictDialog : Form
 
         var btnRetry = new Button
         {
-            Text = isDebugPrompt ? "Save to Server" : "Retry Server",
+            Text = isDebugPrompt ? Loc.T("exitConflict.saveToServer") : Loc.T("exitConflict.retry"),
             Font = new Font("Segoe UI", 9f, FontStyle.Bold),
             AutoSize = true,
             Padding = new Padding(14, 6, 14, 6),

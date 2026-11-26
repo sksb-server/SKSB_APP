@@ -15,6 +15,17 @@
 	<ItemGroup>
 	  <EmbeddedResource Include="Integration\Database\Schema\schedule_schema.sql" LogicalName="schedule_schema.sql" />
 	  <EmbeddedResource Include="Integration\Database\Schema\bug_report_schema.sql" LogicalName="bug_report_schema.sql" />
+	  <EmbeddedResource Include="Integration\Database\Schema\collective_dictionary_schema.sql" LogicalName="collective_dictionary_schema.sql" />
+	</ItemGroup>
+
+	<!-- Localization: embedded dictionaries (Loc fallback) + loose copies (admin-editable overrides).
+	     WithCulture="false" is REQUIRED: otherwise MSBuild infers cultures from "ui.en/ms/zh/id.json" and moves
+	     those files into satellite assemblies (en\Core.resources.dll ...) instead of embedding them in Core.dll.
+	     Covers both ui.<code>.json (Ribbon/dialog text) and tooltips.<code>.json (Cell Guide panel). -->
+	<ItemGroup>
+	  <EmbeddedResource Include="Localization\*.json" LogicalName="Localization.%(Filename)%(Extension)" WithCulture="false" />
+	  <None Remove="Localization\*.json" />
+	  <None Include="Localization\*.json" CopyToOutputDirectory="PreserveNewest" />
 	</ItemGroup>
 
 	<ItemGroup>

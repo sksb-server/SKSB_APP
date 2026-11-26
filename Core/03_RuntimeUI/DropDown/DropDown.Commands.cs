@@ -60,9 +60,9 @@ public static class Commands
         {
             dynamic singleCell = cell.Cells[1, 1];
 
-            // 0. Module-supplied dropdowns (Schedule board)
+            // 0. Module-supplied dropdowns (Schedule board, Project Manager dynamic cost toggle, etc.)
             bool onBoard = IsScheduleBoardSheet(singleCell);
-            if (CustomDropdowns.AppliesTo(singleCell)) return true;
+            if (CustomDropdowns.TryMatch(singleCell, out bool allowOnLocked)) return allowOnLocked || !IsCellValidationLocked(singleCell);
             if (onBoard)
             {
                 // Logged once per address so moving around the board does not flood the trace.
@@ -84,9 +84,10 @@ public static class Commands
                     return false;
 
                 var rule = RuleRegistry.GetRuleForCell(singleCell);
-                if (rule != null && rule!.HasDropdown)
+                if (rule != null && rule.IsLocked) return false;
+                if (rule != null && rule.HasDropdown)
                 {
-                    return true;
+                    return !IsCellValidationLocked(singleCell);
                 }
             }
 
@@ -98,13 +99,39 @@ public static class Commands
             }
 
             var cfg = Metadata.ReadConfig(singleCell);
-            return !cfg.IsEmpty;
+            return !cfg.IsEmpty && !IsCellValidationLocked(singleCell);
         }
         catch (Exception ex)
         {
             AppLogger.Warn($"[Dropdown] IsDropdownCell failed: {ex.GetType().Name}: {ex.Message}");
             return false;
         }
+    }
+
+    /// <summary>True when the cell holds a formula or carries the template's custom '=FALSE' validation lock.</summary>
+    internal static bool IsCellValidationLocked(dynamic singleCell)
+    {
+        try
+        {
+            string? f = singleCell.Formula?.ToString();
+            if (f != null && f.StartsWith("=", StringComparison.Ordinal)) return true;
+        }
+        catch { }
+
+        try
+        {
+            int type = (int)singleCell.Validation.Type;
+            if (type == 7)
+            {
+                string? f1 = singleCell.Validation.Formula1?.ToString()?.Trim();
+                if (string.Equals(f1, "=FALSE", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(f1, "FALSE", StringComparison.OrdinalIgnoreCase))
+                    return true;
+            }
+        }
+        catch { }
+
+        return false;
     }
 
     public static bool IsInsideTableDataBody(dynamic singleCell, dynamic cellTable)

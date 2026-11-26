@@ -48,8 +48,9 @@ public enum TransformKind
 
 /// <summary>
 /// Primary column rule governing dropdown sources, required status, and text transformation.
+/// AllowMultiple = true supports per-table rules via <see cref="TableName"/> (a null/blank TableName is the fallback).
 /// </summary>
-[AttributeUsage(AttributeTargets.Property, AllowMultiple = false, Inherited = true)]
+[AttributeUsage(AttributeTargets.Property, AllowMultiple = true, Inherited = true)]
 public sealed class ColumnRuleAttribute : Attribute
 {
     /// <summary>
@@ -57,6 +58,10 @@ public sealed class ColumnRuleAttribute : Attribute
     /// Multiple sources are stacked in sections (Section 0 at top, Section 1 below, etc.).
     /// </summary>
     public string[] Sources { get; }
+
+    /// <summary>When set, this rule only applies to this Excel table (case-insensitive); null/blank is the fallback.</summary>
+    public string? TableName { get; set; }
+
     public bool IsRequired { get; set; } = true;
     public bool IsWarningOnly { get; set; } = false;
     public bool IsMultiSelect { get; set; } = false;

@@ -38,7 +38,13 @@ public interface ISaveContract
     /// <summary>Deletes the queued offline upload.</summary>
     void ClearPendingUpload();
 
-    /// <summary>Applies the module window caption, with an <c>[OFFLINE MODE]</c> suffix while offline.</summary>
+    /// <summary>True while a "Save Draft &amp; Close" draft (<c>*_Draft.json</c>) with unfixed errors exists.</summary>
+    bool HasLocalDraft { get; }
+
+    /// <summary>Deletes the local draft (never uploaded to the server).</summary>
+    void ClearLocalDraft();
+
+    /// <summary>Applies the module window caption, with an <c>[OFFLINE MODE]</c> / <c>[LOCAL DRAFT]</c> suffix when applicable.</summary>
     void UpdateWindowCaption();
 
     /// <summary>
@@ -141,6 +147,10 @@ public class SaveContract<T> : ISaveContract
 
     public void ClearPendingUpload() => OfflineSnapshot.ClearPendingSnapshot<T>();
 
+    public bool HasLocalDraft => WorkbookDraft.HasDraft<T>();
+
+    public void ClearLocalDraft() => WorkbookDraft.Clear<T>();
+
     public void UpdateWindowCaption()
     {
         if (string.IsNullOrWhiteSpace(WindowCaption)) return;
@@ -148,6 +158,15 @@ public class SaveContract<T> : ISaveContract
         {
             dynamic xlApp = ExcelDnaUtil.Application;
             if (xlApp?.ActiveWindow == null) return;
+            if (HasLocalDraft)
+            {
+#if DEBUG
+                xlApp.ActiveWindow.Caption = ServerEnvironment.IsOffline ? $"{WindowCaption} [DEBUG - OFFLINE / LOCAL DRAFT]" : $"{WindowCaption} [DEBUG - LOCAL DRAFT]";
+#else
+                xlApp.ActiveWindow.Caption = ServerEnvironment.IsOffline ? $"{WindowCaption} [OFFLINE - LOCAL DRAFT]" : $"{WindowCaption} [LOCAL DRAFT - FIX ERRORS]";
+#endif
+                return;
+            }
 #if DEBUG
             xlApp.ActiveWindow.Caption = ServerEnvironment.IsOffline ? $"{WindowCaption} [DEBUG - OFFLINE MODE]" : $"{WindowCaption} [DEBUG SERVER]";
 #else

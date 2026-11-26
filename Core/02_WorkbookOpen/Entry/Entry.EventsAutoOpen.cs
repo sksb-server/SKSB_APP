@@ -4,8 +4,10 @@ using System;
 using System.Diagnostics;
 using ExcelDna.Integration;
 using SKSB_App.Core.Diagnostics;
+using SKSB_App.Core.Localization;
 using SKSB_App.Core.RuntimeUI.BugReport;
 using SKSB_App.Core.RuntimeUI.DropDown;
+using SKSB_App.Core.RuntimeUI.Guide;
 using SKSB_App.Core.RuntimeUI.Progress;
 using SKSB_App.Core.RuntimeUI.Ribbon;
 using SKSB_App.Core.RuntimeUI.RuleEngine;
@@ -101,6 +103,7 @@ public class EventsAutoOpen : IExcelAddIn
         StackedEntryGuard.ClearAll();
         UndoManager.ClearAll();
         ValidationTaskPaneManager.CloseAll();
+        GuideTaskPaneManager.CloseAll();
         _lastSelectedTableName = null;
         AutoBugReporter.UninstallForExcelAddIn();
         UnEventHooks();
@@ -137,8 +140,9 @@ public class EventsAutoOpen : IExcelAddIn
             AppLogger.Info($"Workbook='{wbName}', IsMasterTemplateFile={isTemplate}");
 
             using var progress = LoadingOverlay.BeginScope(
-                isTemplate ? "Template Mode — Initializing" : "Initializing Workbook",
-                "Applying table rules & column tooltips...");
+                isTemplate ? Loc.T("startup.overlay.templateInitTitle") : Loc.T("startup.overlay.workbookInitTitle"),
+                Loc.T("startup.overlay.applyingRules"),
+                operationKey: isTemplate ? "Template Mode — Initializing" : "Initializing Workbook");
             using var syncScope = SyncHelper.BeginSynchronousScope();
 
             bool origUpdating = true;
@@ -418,7 +422,7 @@ public class EventsAutoOpen : IExcelAddIn
                 try { origEvents = (bool)xlApp.EnableEvents; xlApp.EnableEvents = false; } catch { }
                 try { xlApp.Undo(); } catch { }
                 try { xlApp.EnableEvents = origEvents; } catch { }
-                SheetOperations.ShowStatusConfirmation("Table headers are protected to allow sorting and cannot be modified.");
+                SheetOperations.ShowStatusConfirmation(Loc.T("sheet.status.headersProtected"));
                 return;
             }
 
@@ -432,8 +436,8 @@ public class EventsAutoOpen : IExcelAddIn
                 try { xlApp.Undo(); } catch { }
                 try { xlApp.EnableEvents = origEvents; } catch { }
                 SheetOperations.ShowStatusConfirmation(lockedRule.IsStrictlyCalculated
-                    ? $"Column '{lockedRule.HeaderName}' is locked (Formula evaluated cell: {lockedRule.DisplayFormula})."
-                    : $"Column '{lockedRule.HeaderName}' is read-only and cannot be edited manually.");
+                    ? Loc.T("sheet.status.colLockedFormula", lockedRule.HeaderName, lockedRule.DisplayFormula ?? string.Empty)
+                    : Loc.T("sheet.status.colReadOnly", lockedRule.HeaderName));
                 return;
             }
 

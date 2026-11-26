@@ -3,6 +3,7 @@
 using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Windows.Forms;
+using SKSB_App.Core.Localization;
 using SKSB_App.Core.RuntimeUI.Progress;
 
 public enum SaveNotificationType
@@ -17,7 +18,7 @@ public class SaveNotificationDialog : Form
     public SaveNotificationDialog(string moduleName, string message, SaveNotificationType type = SaveNotificationType.Success)
     {
         SuspendLayout();
-        Text = $"{moduleName} - Save Status";
+        Text = Loc.T("saveNotify.windowTitle", Loc.ModuleDisplayName(moduleName));
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
@@ -82,10 +83,10 @@ public class SaveNotificationDialog : Form
         {
             Text = type switch
             {
-                SaveNotificationType.Success => "Saved Successfully",
-                SaveNotificationType.Offline => "Saved Offline",
-                SaveNotificationType.Error => "Save Failed",
-                _ => "Save Status"
+                SaveNotificationType.Success => Loc.T("saveNotify.success"),
+                SaveNotificationType.Offline => Loc.T("saveNotify.offline"),
+                SaveNotificationType.Error => Loc.T("saveNotify.error"),
+                _ => Loc.T("saveNotify.status")
             },
             Font = new Font("Segoe UI", 11.5f, FontStyle.Bold),
             ForeColor = Color.FromArgb(30, 41, 59),
@@ -113,7 +114,7 @@ public class SaveNotificationDialog : Form
 
         var btnOk = new Button
         {
-            Text = "OK",
+            Text = Loc.T("common.ok"),
             Font = new Font("Segoe UI", 9.5f, FontStyle.Regular),
             AutoSize = true,
             Padding = new Padding(18, 6, 18, 6),
@@ -140,10 +141,10 @@ public class SaveNotificationDialog : Form
         PerformLayout();
     }
 
-    public static void ShowSuccess(string moduleName, string message = "All records have been safely synchronized to the system.")
+    public static void ShowSuccess(string moduleName, string? message = null)
     {
         using var _ = LoadingOverlay.Suspend();
-        using var dlg = new SaveNotificationDialog(moduleName, message, SaveNotificationType.Success);
+        using var dlg = new SaveNotificationDialog(moduleName, message ?? Loc.T("saveNotify.defaultSuccess"), SaveNotificationType.Success);
         dlg.ShowDialog();
     }
 

@@ -39,6 +39,7 @@ if (Test-Path $StagingDir) { Remove-Item $StagingDir -Recurse -Force }
 if (Test-Path $ZipOut) { Remove-Item $ZipOut -Force }
 New-Item -ItemType Directory -Path (Join-Path $StagingDir "Templates") -Force | Out-Null
 New-Item -ItemType Directory -Path (Join-Path $StagingDir "AddIns") -Force | Out-Null
+New-Item -ItemType Directory -Path (Join-Path $StagingDir "Localization") -Force | Out-Null
 
 # 2. Determine Version: Manual Override vs Auto-Increment
 $CurrentVerStr = "1.0.0"
@@ -119,6 +120,14 @@ $TemplatesSource = Join-Path $ScriptDir "Templates"
 if (Test-Path $TemplatesSource) {
     Get-ChildItem -Path $TemplatesSource -Filter "*.xlt*" | ForEach-Object {
         Copy-Item $_.FullName -Destination (Join-Path $StagingDir "Templates") -Force
+    }
+}
+
+# 5b. Collect Localization dictionaries (ui.<code>.json overrides read by Core Loc at runtime)
+$LocalizationSource = Join-Path $ScriptDir "Core\Localization"
+if (Test-Path $LocalizationSource) {
+    Get-ChildItem -Path $LocalizationSource -Filter "*.json" -File | ForEach-Object {
+        Copy-Item $_.FullName -Destination (Join-Path $StagingDir "Localization") -Force
     }
 }
 

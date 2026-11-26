@@ -9,6 +9,7 @@ using ExcelDna.Integration;
 using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.Integration.Database;
 using SKSB_App.Core.Integration.Erp;
+using SKSB_App.Core.Localization;
 using SKSB_App.Core.RuntimeUI.DropDown;
 using SKSB_App.Core.Types;
 using SKSB_App.Core.WorkbookOpen.Sync;
@@ -248,10 +249,12 @@ internal static class ServerSyncCommands
         {
             parts.Add(string.Join("|",
                 a.StaffID.ToString(CultureInfo.InvariantCulture), a.AttendanceStatus.ToString(),
-                NormTime(a.ClockInTime), NormTime(a.ClockOutTime), Norm(a.ProjectCheckIns),
+                NormTime(a.ClockInTime), NormTime(a.ClockOutTime), Norm(a.ProjectCheckIns), Norm(a.PlannedProjects),
                 NormDec(a.RegularShift), NormDec(a.AdditionalShifts), NormDec(a.OTHours), NormDec(a.AdditionalOTHours),
                 a.IsAllocated ? "1" : "0"));
         }
+
+        parts.Add("dismissed:" + NormList(s.DismissedProjects ?? new List<string>(), upper: true));
 
         return string.Join(Sep, parts);
     }
@@ -494,11 +497,7 @@ internal static class ServerSyncCommands
             int year = DateTime.Today.Year;
             if (!map.Keys.Any(d => d.Year == year))
             {
-                string advisory =
-                    $"SQL Payroll has no public holidays for {year}.\n\n" +
-                    "'Is Holiday' on the Daily Schedule is evaluated from the SQL Payroll calendar, so no day this year will be " +
-                    "marked as a holiday until it is maintained.\n\n" +
-                    $"HR: in SQL Payroll, open Leave -> Maintain Calendar and enter the {year} public holidays, then click 'Load from System'.";
+                string advisory = Loc.T("schedule.calendar.noHolidaysBody", year);
                 AppLogger.Warn($"[{Module}] SQL Payroll LV_CALENDAR_DAYS has 0 public holidays for {year}.");
                 lock (_calendarSync)
                 {
@@ -636,7 +635,7 @@ internal static class ServerSyncCommands
             try { xlApp.EnableEvents = true; } catch { }
             try { Arrow.HideAll(); } catch { }
 
-            MessageBox.Show(advisory, "Schedule Manager - SQL Payroll Calendar", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            MessageBox.Show(advisory, Loc.T("schedule.calendar.advisoryTitle", Loc.ModuleDisplayName(Module)), MessageBoxButtons.OK, MessageBoxIcon.Warning);
         }
         catch (Exception ex)
         {
@@ -679,7 +678,7 @@ internal static class ServerSyncCommands
         // The next date's Day Start Time is the exclusive end boundary of this working day.
         DateTime dNext = date.AddDays(1).ToDateTime(TimeOnly.MinValue);
         foreach (var r in db.Query<dynamic>(
-            "SELECT schedule_date, day_start_time, late_cut_off_time, ot_start_time FROM daily_schedule_settings WHERE schedule_date IN (@D, @DNext);",
+            "SELECT * FROM daily_schedule_settings WHERE schedule_date IN (@D, @DNext);",
             new { D = d, DNext = dNext }))
         {
             DateOnly rowDate = DateOnly.FromDateTime(Convert.ToDateTime(r.schedule_date));
@@ -688,6 +687,7 @@ internal static class ServerSyncCommands
                 record.DayStartTime = Time(r.day_start_time) ?? record.DayStartTime;
                 record.LateCutOffTime = Time(r.late_cut_off_time) ?? record.LateCutOffTime;
                 record.OTStartTime = Time(r.ot_start_time) ?? record.OTStartTime;
+                record.DismissedProjects = Arr(ServerSyncHelper.Col((object)r, "dismissed_projects"));
             }
             else if (rowDate == date.AddDays(1))
             {
@@ -741,6 +741,7 @@ internal static class ServerSyncCommands
                 ClockInTime = Time(r.clock_in_time),
                 ClockOutTime = Time(r.clock_out_time),
                 ProjectCheckIns = Text(r.project_check_ins),
+                PlannedProjects = Text(ServerSyncHelper.Col((object)r, "planned_projects")),
                 ProjectsDone = Arr(r.projects_done),
                 RegularShift = ServerSyncHelper.Dec(r.regular_shift),
                 AdditionalShifts = ServerSyncHelper.Dec(r.additional_shifts),

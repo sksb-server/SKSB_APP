@@ -5,6 +5,7 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Text;
 using System.Windows.Forms;
+using SKSB_App.Core.Localization;
 
 public enum ValidationDialogAction
 {
@@ -20,7 +21,7 @@ public class SummaryDialog : Form
     public SummaryDialog(string moduleName, List<string> errors, List<string> warnings, bool allowDebugQuit = false)
     {
         SuspendLayout();
-        Text = $"{moduleName} - Data Integrity Check";
+        Text = Loc.T("validation.windowTitle", Loc.ModuleDisplayName(moduleName));
         StartPosition = FormStartPosition.CenterScreen;
         FormBorderStyle = FormBorderStyle.FixedDialog;
         MaximizeBox = false;
@@ -72,7 +73,7 @@ public class SummaryDialog : Form
 
         var lblTitle = new Label
         {
-            Text = hasErrors ? "Validation Issues Found" : "Validation Advisories",
+            Text = hasErrors ? Loc.T("validation.titleErrors") : Loc.T("validation.titleWarnings"),
             Font = new Font("Segoe UI", 12f, FontStyle.Bold),
             ForeColor = Color.FromArgb(30, 41, 59),
             AutoSize = true,
@@ -82,19 +83,19 @@ public class SummaryDialog : Form
         var sbMessage = new StringBuilder();
         if (hasErrors)
         {
-            sbMessage.AppendLine("Cannot save records to the system until critical data conflicts are resolved.");
+            sbMessage.AppendLine(Loc.T("validation.msgErrors"));
             sbMessage.AppendLine();
-            sbMessage.AppendLine($"  Critical Errors: {errors.Count} issue(s) detected.");
+            sbMessage.AppendLine(Loc.T("validation.errorCount", errors.Count));
         }
         else
         {
-            sbMessage.AppendLine("All critical checks passed, but some recommended fields are missing.");
+            sbMessage.AppendLine(Loc.T("validation.msgWarningsOnly"));
             sbMessage.AppendLine();
         }
 
         if (hasWarnings)
         {
-            sbMessage.AppendLine($"  Advisories / Warnings: {warnings.Count} item(s) to review.");
+            sbMessage.AppendLine(Loc.T("validation.warningCount", warnings.Count));
         }
 
         var lblMessage = new Label
@@ -118,7 +119,7 @@ public class SummaryDialog : Form
         {
             var btnViewErrors = new Button
             {
-                Text = $"View Errors ({errors.Count})...",
+                Text = Loc.T("validation.viewErrors", errors.Count),
                 Font = new Font("Segoe UI", 9f, FontStyle.Bold),
                 ForeColor = Color.FromArgb(185, 28, 28),
                 BackColor = Color.FromArgb(254, 242, 242),
@@ -128,7 +129,7 @@ public class SummaryDialog : Form
                 Margin = new Padding(0, 0, 8, 0)
             };
             btnViewErrors.FlatAppearance.BorderColor = Color.FromArgb(252, 165, 165);
-            btnViewErrors.Click += (_, _) => ShowDetailsModal("Critical Validation Errors", errors);
+            btnViewErrors.Click += (_, _) => ShowDetailsModal(Loc.T("validation.detailsErrorsTitle"), errors);
             flowDrillDown.Controls.Add(btnViewErrors);
         }
 
@@ -136,7 +137,7 @@ public class SummaryDialog : Form
         {
             var btnViewWarnings = new Button
             {
-                Text = $"View Warnings ({warnings.Count})...",
+                Text = Loc.T("validation.viewWarnings", warnings.Count),
                 Font = new Font("Segoe UI", 9f, FontStyle.Regular),
                 ForeColor = Color.FromArgb(180, 83, 9),
                 BackColor = Color.FromArgb(254, 252, 232),
@@ -146,7 +147,7 @@ public class SummaryDialog : Form
                 Margin = new Padding(0, 0, 8, 0)
             };
             btnViewWarnings.FlatAppearance.BorderColor = Color.FromArgb(253, 224, 71);
-            btnViewWarnings.Click += (_, _) => ShowDetailsModal("Validation Advisories & Warnings", warnings);
+            btnViewWarnings.Click += (_, _) => ShowDetailsModal(Loc.T("validation.detailsWarningsTitle"), warnings);
             flowDrillDown.Controls.Add(btnViewWarnings);
         }
 
@@ -160,7 +161,7 @@ public class SummaryDialog : Form
 
         var btnCancel = new Button
         {
-            Text = hasErrors ? "Return to Sheet (Fix Errors)" : "Cancel",
+            Text = hasErrors ? Loc.T("validation.returnToSheet") : Loc.T("common.cancel"),
             Font = new Font("Segoe UI", 9.5f, hasErrors ? FontStyle.Bold : FontStyle.Regular),
             AutoSize = true,
             Padding = new Padding(14, 6, 14, 6),
@@ -173,7 +174,7 @@ public class SummaryDialog : Form
         {
             var btnProceed = new Button
             {
-                Text = "Proceed with Save",
+                Text = Loc.T("validation.proceed"),
                 Font = new Font("Segoe UI", 9.5f, FontStyle.Bold),
                 AutoSize = true,
                 Padding = new Padding(14, 6, 14, 6),
@@ -188,7 +189,7 @@ public class SummaryDialog : Form
         {
             var btnDebugQuit = new Button
             {
-                Text = "Debug: Quit Anyway (No Save)",
+                Text = Loc.T("validation.debugQuit"),
                 Font = new Font("Segoe UI", 9f, FontStyle.Italic),
                 ForeColor = Color.FromArgb(185, 28, 28),
                 BackColor = Color.FromArgb(254, 242, 242),
@@ -247,7 +248,7 @@ public class SummaryDialog : Form
 
         var sb = new StringBuilder();
         sb.AppendLine("==========================================================================");
-        sb.AppendLine($" {title.ToUpperInvariant()} ({items.Count} items total)");
+        sb.AppendLine(" " + Loc.T("validation.detailsCount", title.ToUpper(System.Globalization.CultureInfo.CurrentCulture), items.Count));
         sb.AppendLine("==========================================================================");
         sb.AppendLine();
 

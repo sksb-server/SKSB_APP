@@ -6,6 +6,7 @@ using System.Runtime.InteropServices;
 using System.Windows.Forms;
 using ExcelDna.Integration;
 using ExcelDna.Integration.CustomUI;
+using SKSB_App.Core.Localization;
 using SKSB_App.Core.RuntimeUI.Progress;
 using SKSB_App.Core.RuntimeUI.Ribbon;
 using SKSB_App.Core.WorkbookSave.Entry;
@@ -31,20 +32,20 @@ public class RibbonController : ManagerRibbonBase
         saveSupertip: "Validates and commits fleet specifications, maintenance records and insurance claims.");
 
     protected override string GetCustomGroupsXml() => @"
-                <group id='grpFuelImport' label='Portal Integration'>
+                <group id='grpFuelImport' getLabel='GetCustomLabel'>
                   <button id='btnImportFuelStatement'
-                          label='Import Fuel&#10;Statement'
+                          getLabel='GetCustomLabel'
                           size='large'
                           imageMso='ImportExcel'
-                          screentip='Import Petronas / Shell Monthly Statement'
-                          supertip='Parses monthly PDF invoices or portal Excel files and appends fuel logs into OdometersTable.'
+                          getScreentip='GetCustomScreentip'
+                          getSupertip='GetCustomSupertip'
                           onAction='OnImportFuelStatementClicked' />
                   <button id='btnSortAndHealOdometers'
-                          label='Sort &amp; Match&#10;Odometers'
+                          getLabel='GetCustomLabel'
                           size='large'
                           imageMso='SortAscendingExcel'
-                          screentip='Auto-Sort &amp; Reconcile OdometersTable'
-                          supertip='Sorts all odometer logs chronologically, reads Remarks so edits are never applied twice, normalizes machinery engine hours (0.1 hr), matches cross-card fueling trajectories across the fleet, flags ambiguous or invalid odometers, and recomputes Odometer Before.'
+                          getScreentip='GetCustomScreentip'
+                          getSupertip='GetCustomSupertip'
                           onAction='OnSortAndHealOdometersClick' />
                 </group>";
 
@@ -70,8 +71,11 @@ public class RibbonController : ManagerRibbonBase
         {
             using var openFileDialog = new OpenFileDialog
             {
-                Title = "Select PETRONAS SmartPay or Shell Fleet Hub Statement",
-                Filter = "All Statements (*.pdf;*.xlsx;*.xls;*.csv)|*.pdf;*.xlsx;*.xls;*.csv|PDF Invoices (*.pdf)|*.pdf|Excel / CSV (*.xlsx;*.xls;*.csv)|*.xlsx;*.xls;*.csv|All Files (*.*)|*.*",
+                Title = Loc.T("vehicle.fuelImport.dialogTitle"),
+                Filter = $"{Loc.T("vehicle.fuelImport.filterAllStatements")} (*.pdf;*.xlsx;*.xls;*.csv)|*.pdf;*.xlsx;*.xls;*.csv|" +
+                         $"{Loc.T("vehicle.fuelImport.filterPdf")} (*.pdf)|*.pdf|" +
+                         $"{Loc.T("vehicle.fuelImport.filterExcelCsv")} (*.xlsx;*.xls;*.csv)|*.xlsx;*.xls;*.csv|" +
+                         $"{Loc.T("bugReport.filter.all")} (*.*)|*.*",
                 FilterIndex = 1,
                 RestoreDirectory = true,
                 CheckFileExists = true,
@@ -90,7 +94,10 @@ public class RibbonController : ManagerRibbonBase
                 int imported, skipped;
                 decimal totalAmount;
                 string provider;
-                using (LoadingOverlay.BeginScope("Vehicle Manager — Importing Fuel Statement", $"Parsing {fileNameOnly}..."))
+                using (LoadingOverlay.BeginScope(
+                    Loc.T("vehicle.fuelImport.overlayTitle", ModuleDisplayName),
+                    Loc.T("vehicle.fuelImport.overlayStep", fileNameOnly),
+                    operationKey: "Vehicle Manager — Importing Fuel Statement"))
                 {
                     (imported, skipped, totalAmount, provider) = SheetMapper.ImportFuelStatement(selectedFilePath);
                 }
@@ -98,29 +105,28 @@ public class RibbonController : ManagerRibbonBase
                 if (imported == 0 && skipped == 0)
                 {
                     MessageBox.Show(
-                        $"No valid fuel transactions could be parsed from:\n{fileNameOnly}\n\n" +
-                        "Ensure the file is an original PDF invoice or portal export from PETRONAS SmartPay or Shell Fleet Hub.",
-                        "Import Unsuccessful",
+                        Loc.T("vehicle.fuelImport.noTransactionsBody", fileNameOnly),
+                        Loc.T("vehicle.fuelImport.noTransactionsTitle"),
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Warning
                     );
                     return;
                 }
 
-                string summary =
-                    $"Provider Detected : {provider}\n" +
-                    $"Source File       : {fileNameOnly}\n\n" +
-                    $"  • New Logs Appended : {imported}\n" +
-                    $"  • Duplicates Skipped: {skipped}\n" +
-                    $"  • Net Fuel Expense  : RM {totalAmount:N2}\n\n" +
-                    "All records have been written to 'OdometersTable' via TableMapper.";
+                string summary = Loc.T(
+                    "vehicle.fuelImport.completeBody",
+                    provider,
+                    fileNameOnly,
+                    imported,
+                    skipped,
+                    totalAmount.ToString("N2"));
 
-                MessageBox.Show(summary, "Fuel Statement Import Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show(summary, Loc.T("vehicle.fuelImport.completeTitle"), MessageBoxButtons.OK, MessageBoxIcon.Information);
             });
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Fuel import failed:\n{ex.Message}", "Import Error", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            MessageBox.Show(Loc.T("vehicle.fuelImport.errorBody", ex.Message), Loc.T("vehicle.fuelImport.errorTitle"), MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
     }
 
@@ -136,33 +142,37 @@ public class RibbonController : ManagerRibbonBase
             try
             {
                 SheetMapper.OdometerReconcileResult result;
-                using (LoadingOverlay.BeginScope("Vehicle Manager — Sorting & Matching Odometers", "Reconciling fleet odometer trajectories..."))
+                using (LoadingOverlay.BeginScope(
+                    Loc.T("vehicle.sortOdo.overlayTitle", ModuleDisplayName),
+                    Loc.T("vehicle.sortOdo.overlayStep"),
+                    operationKey: "Vehicle Manager — Sorting & Matching Odometers"))
                 {
                     result = SheetMapper.SortAndHealOdometers();
                 }
 
                 if (result.RowsSorted == 0)
                 {
-                    MessageBox.Show("OdometersTable has no rows to sort.", "Sort & Match Odometers",
+                    MessageBox.Show(Loc.T("vehicle.sortOdo.emptyBody"), Loc.T("vehicle.sortOdo.emptyTitle"),
                         MessageBoxButtons.OK, MessageBoxIcon.Information);
                     return;
                 }
 
-                string summary =
-                    $"  • Total Rows Sorted: {result.RowsSorted}\n" +
-                    $"  • Vehicles Matched by Odometer Trajectory: {result.VehiclesMatched}\n" +
-                    $"  • Ambiguous / Unresolved Plates Flagged for Review: {result.FlaggedPlates}\n" +
-                    $"  • Machinery Hour Readings Normalized (÷ 10): {result.HoursNormalized}\n" +
-                    $"  • Invalid / Dummy Odometers Zeroed: {result.InvalidZeroed}";
+                string summary = Loc.T(
+                    "vehicle.sortOdo.completeBody",
+                    result.RowsSorted,
+                    result.VehiclesMatched,
+                    result.FlaggedPlates,
+                    result.HoursNormalized,
+                    result.InvalidZeroed);
 
                 if (result.FlaggedPlates > 0)
-                    summary += "\n\nRows tagged [Unrecognized Plate: ...] or [Ambiguous Odometer ...] need a valid Vehicle Plate before the workbook can be saved.";
+                    summary += "\n\n" + Loc.T("vehicle.sortOdo.flaggedNote");
 
-                MessageBox.Show(summary, "Sort & Match Odometers Complete", MessageBoxButtons.OK, MessageBoxIcon.Information);
+                MessageBox.Show(summary, Loc.T("vehicle.sortOdo.completeTitle"), MessageBoxButtons.OK, MessageBoxIcon.Information);
             }
             catch (Exception ex)
             {
-                MessageBox.Show($"Sort & Match Odometers failed:\n{ex.Message}", "Odometer Error",
+                MessageBox.Show(Loc.T("vehicle.sortOdo.errorBody", ex.Message), Loc.T("vehicle.sortOdo.errorTitle"),
                     MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         });

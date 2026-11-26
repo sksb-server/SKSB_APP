@@ -32,9 +32,13 @@ internal sealed record VehicleInfo(
     IReadOnlyList<VehicleRenewalSpan> RoadTaxes, IReadOnlyList<VehicleInspectionSpan> Inspections,
     IReadOnlyList<VehicleRenewalSpan> Insurances, IReadOnlyList<VehicleRenewalSpan> Permits,
     IReadOnlyList<VehicleMaintenanceSpan> Maintenances);
+/// <summary>
+/// A project as the board sees it. <see cref="AutoSchedule"/> is false for Internal projects and for General projects
+/// with Auto-Schedule = FALSE: those are never auto-listed on the board but can be picked manually.
+/// </summary>
 internal sealed record ProjectInfo(
-    string Id, IReadOnlyList<ProjectType> Types,
-    ProjectStatus Status, ProjectCategory Category,
+    string Id, string Name, IReadOnlyList<ProjectType> Types,
+    ProjectStatus Status, ProjectCategory Category, bool AutoSchedule,
     DateOnly StartDate, DateOnly TargetEndDate, DateOnly? ActualEndDate);
 
 /// <summary>
@@ -195,15 +199,32 @@ internal static class Roster
     internal static bool SupportsPremixHoles(string? projectId) =>
         FindProject(projectId)?.Types.Contains(ProjectType.Road_Reinstatement) == true;
 
+    private static bool IsActiveWindow(ProjectInfo p, DateOnly date) =>
+        p.Status == ProjectStatus.Active && p.StartDate <= date && date <= (p.ActualEndDate ?? p.TargetEndDate);
+
     /// <summary>
-    /// Projects that are Active on <paramref name="date"/> (started, and not past the actual / target end date),
-    /// ordered iJob -> MWO -> PVT -> others, then by project ID. <see cref="ProjectCategory.Other"/> (internal)
-    /// projects are excluded from the schedule board but stay in <see cref="Projects"/> / ProjectIDList.
+    /// Auto-scheduled projects that are Active on <paramref name="date"/> (started, and not past the actual / target end
+    /// date), ordered iJob -> MWO -> PVT -> Other, then by project ID. Internal projects and projects with
+    /// Auto-Schedule = FALSE are excluded (see <see cref="ActiveManualProjectsOn"/>) but stay in <see cref="Projects"/>.
     /// </summary>
     public static IReadOnlyList<ProjectInfo> ActiveProjectsOn(DateOnly date) =>
         Projects
-            .Where(p => p.Category != ProjectCategory.Other && p.Status == ProjectStatus.Active && p.StartDate <= date && date <= (p.ActualEndDate ?? p.TargetEndDate))
-            .OrderBy(p => p.Category switch { ProjectCategory.iJob => 0, ProjectCategory.MWO => 1, ProjectCategory.PVT => 2, _ => 3 })
+            .Where(p => p.Category != ProjectCategory.Internal && p.AutoSchedule && IsActiveWindow(p, date))
+            .OrderBy(p => p.Category switch
+            {
+                ProjectCategory.iJob => 0, ProjectCategory.MWO => 1, ProjectCategory.PVT => 2, ProjectCategory.Other => 3, _ => 4
+            })
+            .ThenBy(p => p.Id, StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+    /// <summary>
+    /// Active projects on <paramref name="date"/> that are only ever placed on the board by hand: Internal projects and
+    /// General projects with Auto-Schedule = FALSE. General projects first, then Internal, then by project ID.
+    /// </summary>
+    public static IReadOnlyList<ProjectInfo> ActiveManualProjectsOn(DateOnly date) =>
+        Projects
+            .Where(p => (p.Category == ProjectCategory.Internal || !p.AutoSchedule) && IsActiveWindow(p, date))
+            .OrderBy(p => p.Category == ProjectCategory.Internal ? 1 : 0)
             .ThenBy(p => p.Id, StringComparer.OrdinalIgnoreCase)
             .ToList();
 
@@ -299,20 +320,26 @@ internal static class Roster
                     maintenances.GetValueOrDefault(plate) ?? new()));
             }
 
+            // project_name / auto_schedule come from the General / Internal Projects migration.
+            ServerDispatcher.EnsureProjectSchema();
             _projects = new List<ProjectInfo>();
-            foreach (var r in db.Query<dynamic>("SELECT project_id, project_type, status, category, start_date, target_end_date, actual_end_date FROM project_master ORDER BY project_id;"))
+            foreach (var r in db.Query<dynamic>("SELECT project_id, project_name, project_type, status, category, auto_schedule, start_date, target_end_date, actual_end_date FROM project_master ORDER BY project_id;"))
             {
                 string id = ((string)r.project_id).Trim().ToUpperInvariant();
+                string? name = r.project_name;
                 string? types = r.project_type;
                 string? statusText = r.status;
                 string? categoryText = r.category;
+                object? autoRaw = r.auto_schedule;
                 object? start = r.start_date;
                 object? target = r.target_end_date;
                 object? actual = r.actual_end_date;
+                var pc = Enum.TryParse<ProjectCategory>(categoryText, true, out var parsedCategory) ? parsedCategory : ProjectCategory.None;
+                bool auto = autoRaw is bool b ? b : pc != ProjectCategory.Internal;
                 _projects.Add(new ProjectInfo(
-                    id, ParseProjectTypes(types),
+                    id, name?.Trim() ?? string.Empty, ParseProjectTypes(types),
                     Enum.TryParse<ProjectStatus>(statusText, true, out var ps) ? ps : ProjectStatus.None,
-                    Enum.TryParse<ProjectCategory>(categoryText, true, out var pc) ? pc : ProjectCategory.None,
+                    pc, pc != ProjectCategory.Internal && auto,
                     ToDate(start) ?? DateOnly.MinValue, ToDate(target) ?? DateOnly.MaxValue, ToDate(actual)));
             }
         }
@@ -371,8 +398,10 @@ internal static class Roster
             .Where(p => !string.IsNullOrWhiteSpace(p.ProjectCode))
             .Select(p => new ProjectInfo(
                 p.ProjectCode.Trim().ToUpperInvariant(),
+                (p.ProjectDetails.ProjectName ?? string.Empty).Trim(),
                 p.ProjectDetails.ProjectType.Where(t => t != ProjectType.None).ToList(),
                 p.ProjectDetails.Status, p.Category,
+                p.Category != ProjectCategory.Internal && p.ProjectDetails.AutoSchedule,
                 p.ProjectDetails.StartDate, p.ProjectDetails.TargetEndDate, p.ProjectDetails.ActualEndDate))
             .ToList();
     }

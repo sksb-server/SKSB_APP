@@ -7,6 +7,7 @@ using System.Linq;
 using System.Text;
 using System.Text.RegularExpressions;
 using SKSB_App.Core.Diagnostics;
+using SKSB_App.Core.Localization;
 using SKSB_App.Core.RuntimeUI.DropDown;
 using SKSB_App.Core.RuntimeUI.RuleEngine;
 using SKSB_App.Core.Types;
@@ -45,6 +46,24 @@ internal static class ScheduleBoardMapper
     /// <summary>Slots currently drawn across the board (refreshed by <see cref="Read"/> / <see cref="Render"/>).</summary>
     private static int _slotCount = 1;
     internal static void ResetSlotCount() => _slotCount = 1;
+
+    /// <summary>Raw value of the "✕ Remove Slot" Project Header option.</summary>
+    private const string RemoveSlotToken = "__REMOVE_SLOT__";
+    private const string RemoveSlotDisplay = "✕ Remove Slot";
+
+    /// <summary>
+    /// Auto-scheduled projects removed from the shown date's board ("✕ Remove Slot"). Persisted per date as
+    /// <see cref="ScheduleRecord.DismissedProjects"/> so a date load never auto-populates them again.
+    /// </summary>
+    private static HashSet<string> _dismissedProjects = new(StringComparer.OrdinalIgnoreCase);
+
+    internal static void SetDismissedProjects(IEnumerable<string>? projects) =>
+        _dismissedProjects = new HashSet<string>(
+            (projects ?? Enumerable.Empty<string>()).Where(p => !string.IsNullOrWhiteSpace(p)).Select(p => p.Trim().ToUpperInvariant()),
+            StringComparer.OrdinalIgnoreCase);
+
+    internal static List<string> GetDismissedProjects() =>
+        _dismissedProjects.OrderBy(p => p, StringComparer.OrdinalIgnoreCase).ToList();
     private static int LastBoardColumn => FirstSlotColumn + (_slotCount * SlotWidth) - 1;
 
     private sealed record Band(Shifts Shift, string Label, int HeaderRow, int FirstWorkerRow, int FirstVehicleRow)
@@ -207,7 +226,7 @@ internal static class ScheduleBoardMapper
                 cell.Validation.Delete();
                 cell.Validation.Add(7 /* xlValidateCustom */, 1 /* xlValidAlertStop */, 1 /* xlBetween */, "=FALSE");
                 cell.Validation.ErrorTitle = IsHolidayHeader;
-                cell.Validation.ErrorMessage = "Is Holiday is set automatically from the SQL Payroll calendar (Leave -> Maintain Calendar).";
+                cell.Validation.ErrorMessage = Loc.T("schedule.calendar.isHolidayLocked");
             }
             catch { }
         }
@@ -364,7 +383,7 @@ internal static class ScheduleBoardMapper
     internal static List<string> FindDuplicateWorkers(IEnumerable<DailyProjectSchedule> slots, DateOnly date, IEnumerable<AttendanceEntry> entries)
     {
         var list = slots.ToList();
-        var spans = AttendanceRollupService.BuildSpans(entries, date, BoardContext.DayStartTime, BoardContext.NextDayStartTime);
+        var spans = AttendanceRollupService.BuildSpans(entries, date, BoardContext.DayStartTime, BoardContext.NextDayStartTime, list, BoardContext.OTStartTime);
         var messages = new List<string>();
         foreach (var c in ComputeWorkerConflicts(list, spans))
         {
@@ -467,7 +486,8 @@ internal static class ScheduleBoardMapper
     // =========================================================================
     /// <summary>
     /// Slots to draw for one band, left to right. With <paramref name="autoPopulate"/> (a date load) every project that is
-    /// Active on the date gets a slot (iJob -> MWO -> PVT) merged with its saved row; saved rows for other projects follow.
+    /// Active on the date gets a slot (iJob -> MWO -> PVT -> Other) merged with its saved row; saved rows for other projects
+    /// follow. Auto-scheduled projects the user removed for this date (<see cref="_dismissedProjects"/>) are skipped.
     /// Without it (a live refresh) the slots the user currently has are kept in place.
     /// </summary>
     private static List<DailyProjectSchedule> LayoutSlots(Shifts shift, DateOnly date, IReadOnlyList<DailyProjectSchedule> slots, bool autoPopulate)
@@ -479,6 +499,8 @@ internal static class ScheduleBoardMapper
         var used = new HashSet<int>();
         foreach (var project in Roster.ActiveProjectsOn(date))
         {
+            if (_dismissedProjects.Contains(project.Id)) continue;
+
             int idx = -1;
             for (int i = 0; i < saved.Count && idx < 0; i++)
                 if (!used.Contains(i) && saved[i].ProjectID.Trim().Equals(project.Id, StringComparison.OrdinalIgnoreCase)) idx = i;
@@ -493,11 +515,16 @@ internal static class ScheduleBoardMapper
     internal static void Render(object wsObj, DateOnly date, IReadOnlyList<DailyProjectSchedule> slots, IReadOnlyList<AttendanceEntry> entries, bool autoPopulate = false)
     {
         dynamic ws = wsObj;
-        var spans = AttendanceRollupService.BuildSpans(entries, date, BoardContext.DayStartTime, BoardContext.NextDayStartTime);
         string cutOffText = BoardContext.LateCutOff.ToString("HH:mm", CultureInfo.InvariantCulture);
 
         var layouts = Bands.ToDictionary(b => b.Shift, b => LayoutSlots(b.Shift, date, slots, autoPopulate));
-        int slotCount = Math.Max(1, layouts.Values.Max(l => l.Count));
+
+        // Always keep one blank slot on the right so a new project can be picked without widening the board by hand.
+        // Only the board's rightmost column counts (a shorter band already has blank slots on its right).
+        int maxCount = layouts.Values.Max(l => l.Count);
+        bool lastOccupied = layouts.Values.Any(l => l.Count > 0 && l.Count == maxCount &&
+            (!string.IsNullOrWhiteSpace(l[^1].ProjectID) || l[^1].Workers.Count > 0 || l[^1].Vehicles.Count > 0));
+        int slotCount = Math.Max(1, lastOccupied ? maxCount + 1 : maxCount);
 
         // Laid-out board (position = slot): feeds per-worker match breakdowns and the conflict checks below.
         var board = new List<DailyProjectSchedule>();
@@ -507,6 +534,9 @@ internal static class ScheduleBoardMapper
             for (int i = 0; i < layout.Count; i++)
                 board.Add(new DailyProjectSchedule { DailyScheduleDate = date, Shift = band.Shift, SlotIndex = i, ProjectID = layout[i].ProjectID, Workers = layout[i].Workers, Vehicles = layout[i].Vehicles });
         }
+
+        // Blank-project (thumbprint-only) punches are attributed in memory to the worker's on-board planned project.
+        var spans = AttendanceRollupService.BuildSpans(entries, date, BoardContext.DayStartTime, BoardContext.NextDayStartTime, board, BoardContext.OTStartTime);
 
         int drawn = DetectSlotCount(wsObj);
         int previous = Math.Max(drawn, _slotCount);
@@ -994,12 +1024,7 @@ internal static class ScheduleBoardMapper
         switch (loc.Kind)
         {
             case CellKind.Header:
-            {
-                var active = Roster.ActiveProjectsOn(date).Select(p => p.Id).ToList();
-                var ordered = active.Concat(Roster.Projects.Select(p => p.Id).Where(id => !active.Contains(id, StringComparer.OrdinalIgnoreCase)))
-                    .Select((id, i) => new DropdownOption { Display = id, Raw = id, Section = i }).ToList();
-                return new CustomDropdownResult(ordered, (c, opt) => ApplyHeaderPick(c, loc, opt.Raw));
-            }
+                return BuildHeaderDropdown(cell, date, loc);
 
             case CellKind.Vehicle:
                 return BuildVehicleDropdown(ws, date, loc, (int)cell.Row, (int)cell.Column);
@@ -1018,9 +1043,44 @@ internal static class ScheduleBoardMapper
         }
     }
 
+    private static string FormatProjectDisplay(ProjectInfo p) =>
+        string.IsNullOrWhiteSpace(p.Name) ? p.Id : $"{p.Id} — {p.Name}";
+
     /// <summary>
-    /// Project Header pick. When the project already sits in another slot of the same band, the two whole slot columns
-    /// (header, premix, window, workers, vehicles) are swapped with two bulk 2D writes instead of creating a duplicate.
+    /// Project Header options, in order: "✕ Remove Slot" (only when the slot holds a project), auto-scheduled projects
+    /// Active on the date, manual-only Active projects (Internal / Auto-Schedule = FALSE), then every other project
+    /// greyed out. Section is a running rank so the order above is preserved.
+    /// </summary>
+    private static CustomDropdownResult BuildHeaderDropdown(dynamic cell, DateOnly date, CellLocation loc)
+    {
+        var options = new List<DropdownOption>();
+        int rank = 0;
+
+        string currentCode = string.Empty;
+        try { currentCode = ParseProjectCode((cell.Value2 as object)?.ToString() ?? string.Empty); } catch { }
+        if (currentCode.Length > 0)
+            options.Add(new DropdownOption { Display = RemoveSlotDisplay, Raw = RemoveSlotToken, Section = rank++, IsValid = true });
+
+        var listed = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        void AddProjects(IEnumerable<ProjectInfo> projects, bool isValid)
+        {
+            foreach (var p in projects)
+                if (listed.Add(p.Id))
+                    options.Add(new DropdownOption { Display = FormatProjectDisplay(p), Raw = p.Id, Section = rank++, IsValid = isValid });
+        }
+
+        AddProjects(Roster.ActiveProjectsOn(date), isValid: true);
+        AddProjects(Roster.ActiveManualProjectsOn(date), isValid: true);
+        AddProjects(Roster.Projects, isValid: false);
+
+        return new CustomDropdownResult(options, (c, opt) => ApplyHeaderPick(c, loc, opt.Raw));
+    }
+
+    /// <summary>
+    /// Project Header pick. "✕ Remove Slot" removes the slot (see <see cref="RemoveSlot"/>). When the picked project already
+    /// sits in another slot of the same band, the two whole slot columns (header, premix, window, workers, vehicles) are
+    /// swapped with two bulk 2D writes instead of creating a duplicate. Otherwise the project is written and, when the slot
+    /// has no workers yet, the workers whose Planned Projects still list it (removed earlier) are restored.
     /// Runs inside the dropdown commit (events suppressed; observers are notified afterwards).
     /// </summary>
     private static void ApplyHeaderPick(dynamic cell, CellLocation loc, string pickedProjectId)
@@ -1028,6 +1088,15 @@ internal static class ScheduleBoardMapper
         object wsObj = cell.Worksheet;
         dynamic ws = wsObj;
         var band = Bands.FirstOrDefault(b => b.Shift == loc.Shift);
+
+        if (pickedProjectId == RemoveSlotToken)
+        {
+            if (band != null) RemoveSlot(ws, band, loc);
+            return;
+        }
+
+        pickedProjectId = pickedProjectId.Trim();
+        _dismissedProjects.Remove(pickedProjectId);
         if (band == null) { cell.Value2 = pickedProjectId; return; }
 
         int otherSlot = -1;
@@ -1046,7 +1115,12 @@ internal static class ScheduleBoardMapper
         }
         catch (Exception ex) { AppLogger.Warn($"[ScheduleBoard] duplicate project lookup failed: {ex.Message}"); }
 
-        if (otherSlot < 0) { cell.Value2 = pickedProjectId; return; }
+        if (otherSlot < 0)
+        {
+            cell.Value2 = pickedProjectId;
+            RestorePlannedWorkers(ws, band, loc.Slot, pickedProjectId);
+            return;
+        }
 
         try
         {
@@ -1063,6 +1137,154 @@ internal static class ScheduleBoardMapper
         {
             AppLogger.Warn($"[ScheduleBoard] slot swap failed: {ex.Message}");
             cell.Value2 = pickedProjectId;
+        }
+    }
+
+    /// <summary>
+    /// "✕ Remove Slot": asks first when workers / vehicles are assigned, records the project as dismissed for the date
+    /// (so a reload does not auto-populate it again), then shifts every slot right of it one slot left in this band with a
+    /// single bulk 2D read / write and clears the vacated rightmost slot. Workers keep the project in Planned Projects
+    /// (grey) so re-adding it restores them (<see cref="RestorePlannedWorkers"/>).
+    /// </summary>
+    private static void RemoveSlot(dynamic ws, Band band, CellLocation loc)
+    {
+        try
+        {
+            _slotCount = Math.Max(_slotCount, DetectSlotCount((object)ws));
+            int slots = Math.Max(1, _slotCount - loc.Slot);
+            int rows = band.LastVehicleRow - band.HeaderRow + 1;
+            int cols = slots * SlotWidth;
+            dynamic range = ws.Range[ws.Cells[band.HeaderRow, SlotColumn(loc.Slot)], ws.Cells[band.LastVehicleRow, SlotColumn(loc.Slot) + cols - 1]];
+            object[,] values = TableMapper.GetRange2DValues(range, rows, cols);
+
+            string Cell(int sheetRow, int c) => values[sheetRow - band.HeaderRow + 1, c]?.ToString()?.Trim() ?? string.Empty;
+            bool IsEntry(string s) => s.Length > 0 && !PlaceholderTexts.Contains(s);
+
+            string currentCode = ParseProjectCode(Cell(band.HeaderRow, 1));
+            int workerCount = 0, vehicleCount = 0;
+            for (int r = band.FirstWorkerRow; r <= band.LastWorkerRow; r++) if (IsEntry(ScheduleMatchEngine.StripPercent(Cell(r, 1)))) workerCount++;
+            for (int r = band.FirstVehicleRow; r <= band.LastVehicleRow; r++) if (IsEntry(Cell(r, 1))) vehicleCount++;
+
+            if ((workerCount > 0 || vehicleCount > 0) && !ConfirmRemoveSlot(currentCode, band, workerCount, vehicleCount)) return;
+
+            if (currentCode.Length > 0) _dismissedProjects.Add(currentCode);
+
+            var shifted = new object?[rows, cols];
+            for (int r = 0; r < rows; r++)
+                for (int c = 0; c < cols - SlotWidth; c++)
+                    shifted[r, c] = values[r + 1, c + SlotWidth + 1];
+
+            try { range.ClearComments(); } catch { }   // comments are re-derived by the refresh that follows the commit
+            range.Value2 = shifted;
+
+            SheetOperations.ShowStatusConfirmation(currentCode.Length > 0
+                ? $"Removed {currentCode} from {band.Label} for this date."
+                : $"Removed {band.Label} slot {loc.Slot + 1}.");
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn($"[ScheduleBoard] remove slot failed: {ex.Message}");
+        }
+    }
+
+    /// <summary>Yes / No confirmation with the modal-dialog exception: screen updating + events on, dropdown arrows hidden.</summary>
+    private static bool ConfirmRemoveSlot(string currentCode, Band band, int workerCount, int vehicleCount)
+    {
+        dynamic xlApp = ExcelDna.Integration.ExcelDnaUtil.Application;
+        bool? prevScreen = null, prevEvents = null;
+        try { prevScreen = (bool)xlApp.ScreenUpdating; } catch { }
+        try { prevEvents = (bool)xlApp.EnableEvents; } catch { }
+        try
+        {
+            try { xlApp.ScreenUpdating = true; } catch { }
+            try { xlApp.EnableEvents = true; } catch { }
+            try { Arrow.HideAll(); } catch { }
+
+            string label = currentCode.Length > 0 ? currentCode : $"slot {band.Label}";
+            var answer = System.Windows.Forms.MessageBox.Show(
+                $"Remove '{label}' from {band.Label}?\n({workerCount} worker(s), {vehicleCount} vehicle(s) assigned)\n\n" +
+                $"Workers will remain greyed out in Daily Attendances (Planned Projects) so re-adding '{label}' restores them.",
+                "Remove Slot",
+                System.Windows.Forms.MessageBoxButtons.YesNo,
+                System.Windows.Forms.MessageBoxIcon.Question,
+                System.Windows.Forms.MessageBoxDefaultButton.Button2);
+            return answer == System.Windows.Forms.DialogResult.Yes;
+        }
+        finally
+        {
+            if (prevEvents.HasValue) try { xlApp.EnableEvents = prevEvents.Value; } catch { }
+            if (prevScreen.HasValue) try { xlApp.ScreenUpdating = prevScreen.Value; } catch { }
+        }
+    }
+
+    /// <summary>
+    /// After a project is (re-)added to an empty slot, writes the workers whose 'Daily Attendances' Planned Projects still
+    /// list it (e.g. its slot was removed earlier) into the slot's Staff Name column with one bulk 2D write.
+    /// No-op when the slot already has workers or no worker is planned on the project.
+    /// </summary>
+    private static void RestorePlannedWorkers(dynamic ws, Band band, int slot, string projectId)
+    {
+        try
+        {
+            string code = AttendanceRollupService.NormalizeProjectId(projectId);
+            if (code.Length == 0) return;
+
+            int col = SlotColumn(slot);
+            dynamic workerRange = ws.Range[ws.Cells[band.FirstWorkerRow, col], ws.Cells[band.LastWorkerRow, col]];
+            object[,] current = TableMapper.GetRange2DValues(workerRange, WorkerRowsPerBand, 1);
+            for (int r = 1; r <= WorkerRowsPerBand; r++)
+            {
+                string w = ScheduleMatchEngine.StripPercent(current[r, 1]?.ToString()).Trim();
+                if (w.Length > 0 && !PlaceholderTexts.Contains(w)) return;
+            }
+
+            object wbObj = ws.Parent;
+            dynamic? attendanceSheet = SheetMapperHelper.ResolveSheetSafely(wbObj, SheetMapper.MasterSheetAliases, "Daily Attendances");
+            if (attendanceSheet == null) return;
+            dynamic? table = TableMapper.ResolveTable(attendanceSheet, SheetMapper.MasterTableName);
+            dynamic? body = table?.DataBodyRange;
+            if (table == null || body == null) return;
+
+            int rowCount = (int)body!.Rows.Count;
+            int colCount = (int)table!.ListColumns.Count;
+            object[,] header = TableMapper.GetRange2DValues(table.HeaderRowRange, 1, colCount);
+            int idCol = -1, nameCol = -1, plannedCol = -1;
+            for (int c = 1; c <= colCount; c++)
+            {
+                string h = header[1, c]?.ToString()?.Trim() ?? string.Empty;
+                if (h.Equals("Staff ID", StringComparison.OrdinalIgnoreCase)) idCol = c;
+                else if (h.Equals("Staff Name", StringComparison.OrdinalIgnoreCase)) nameCol = c;
+                else if (h.Equals("Planned Projects", StringComparison.OrdinalIgnoreCase)) plannedCol = c;
+            }
+            if (plannedCol < 0 || (idCol < 0 && nameCol < 0)) return;
+
+            object[,] data = TableMapper.GetRange2DValues(body, rowCount, colCount);
+            var names = new List<string>();
+            for (int r = 1; r <= rowCount && names.Count < WorkerRowsPerBand; r++)
+            {
+                if (!AttendanceRollupService.SplitProjects(data[r, plannedCol]?.ToString()).Contains(code, StringComparer.OrdinalIgnoreCase)) continue;
+
+                StaffInfo? staff = null;
+                if (idCol > 0)
+                {
+                    object? raw = data[r, idCol];
+                    long id = raw is double d ? (long)d : long.TryParse(raw?.ToString()?.Trim(), out long parsed) ? parsed : 0;
+                    if (id > 0) staff = Roster.FindStaff(id);
+                }
+                if (staff == null && nameCol > 0) staff = Roster.FindStaff(data[r, nameCol]?.ToString());
+                if (staff == null || staff.ShortName.Length == 0) continue;   // field workers only
+                if (!names.Contains(staff.ShortName, StringComparer.OrdinalIgnoreCase)) names.Add(staff.ShortName);
+            }
+            if (names.Count == 0) return;
+
+            var grid = new object?[WorkerRowsPerBand, 1];
+            for (int i = 0; i < names.Count; i++) grid[i, 0] = names[i];
+            workerRange.Value2 = grid;
+            SheetOperations.ShowStatusConfirmation($"Restored {names.Count} planned worker(s) to {code} ({band.Label}).");
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn($"[ScheduleBoard] restoring planned workers failed: {ex.Message}");
         }
     }
 

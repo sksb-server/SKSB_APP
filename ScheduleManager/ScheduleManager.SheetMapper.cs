@@ -50,12 +50,8 @@ internal static partial class SheetMapper
     private static HashSet<string> _persistedEntryFingerprints = new(StringComparer.Ordinal);
     private static bool _hasPersistedBaseline;
 
-    // Tracks entries whose ProjectID was auto-derived from the schedule (entry identity -> last auto-derived ProjectID).
-    // Manual edits to a different ProjectID stop matching and are preserved; clearing ProjectID re-enables auto-derivation.
-    private static readonly Dictionary<string, string> _autoDerivedEntryProjects = new(StringComparer.Ordinal);
-
-    private static string EntryIdentityKey(AttendanceEntry e) =>
-        $"{e.Date:yyyy-MM-dd}|{e.Time:HH:mm:ss}|{e.StaffID}|{e.EntryType}|{e.Source}";
+    // Attendance Entries is a pure punch log: the board never writes Project IDs into it. Blank-project punches are
+    // attributed to on-board Planned Projects in memory only (AttendanceRollupService.BuildSpans).
 
     // Full-precision date/time: the default TimeOnly.ToString() drops seconds, which would let a new punch hide behind an
     // existing one in the same minute and be skipped by the delta upsert.
@@ -231,7 +227,7 @@ internal static partial class SheetMapper
             });
             LoadingOverlay.Report("Reading daily schedule board...");
             record.Projects = ScheduleBoardMapper.Read((object)board!, date.Value);
-            RunFrozen(() => SyncEntryProjectsWithSchedule(entriesSheet, record.AttendanceEntries, date.Value, record.Projects, record.DayStartTime, record.NextDayStartTime, record.OTStartTime, resetTracking: false));
+            record.DismissedProjects = ScheduleBoardMapper.GetDismissedProjects();
 
             // Delta upsert: only entries that differ from the known server copy. No baseline => null => full upsert.
             record.ModifiedAttendanceEntries = _hasPersistedBaseline
@@ -503,150 +499,6 @@ internal static partial class SheetMapper
     }
 
     // =========================================================================
-    // 2b. PROJECT ID AUTO-DERIVATION (Daily Schedule -> Attendance Entries)
-    // =========================================================================
-    private static void SyncEntryProjectsWithSchedule(
-        dynamic? entriesSheet, List<AttendanceEntry> entries, DateOnly date,
-        IReadOnlyList<DailyProjectSchedule> slots, TimeOnly dayStartTime, TimeOnly nextDayStartTime, TimeOnly otStartTime, bool resetTracking)
-    {
-        if (resetTracking) _autoDerivedEntryProjects.Clear();
-        var changedByKey = new Dictionary<string, string>(StringComparer.Ordinal);
-
-        foreach (var e in entries)
-        {
-            if (e.StaffID <= 0 || !DeviceSyncManager.IsInWorkingDay(e.Date, e.Time, date, dayStartTime, nextDayStartTime)) continue;
-
-            string key = EntryIdentityKey(e);
-            string current = AttendanceRollupService.NormalizeProjectId(e.ProjectID);
-            string scheduled = AttendanceRollupService.ScheduledProjectFor(e.StaffID, e.Date, e.Time, date, slots, dayStartTime, otStartTime);
-
-            if (resetTracking)
-            {
-                if (current.Length == 0)
-                {
-                    if (scheduled.Length > 0)
-                    {
-                        e.ProjectID = scheduled;
-                        _autoDerivedEntryProjects[key] = scheduled;
-                        changedByKey[key] = scheduled;
-                    }
-                }
-                else if (scheduled.Length > 0 && current.Equals(scheduled, StringComparison.OrdinalIgnoreCase))
-                {
-                    _autoDerivedEntryProjects[key] = scheduled;
-                }
-                // else: manual override already persisted; not tracked.
-            }
-            else
-            {
-                bool wasAuto = _autoDerivedEntryProjects.TryGetValue(key, out string? lastAuto);
-                if (current.Length == 0)
-                {
-                    if (scheduled.Length > 0)
-                    {
-                        e.ProjectID = scheduled;
-                        _autoDerivedEntryProjects[key] = scheduled;
-                        changedByKey[key] = scheduled;
-                    }
-                    else
-                    {
-                        _autoDerivedEntryProjects.Remove(key);
-                    }
-                }
-                else if (wasAuto && current.Equals(lastAuto, StringComparison.OrdinalIgnoreCase))
-                {
-                    if (!current.Equals(scheduled, StringComparison.OrdinalIgnoreCase))
-                    {
-                        e.ProjectID = scheduled;
-                        if (scheduled.Length > 0) _autoDerivedEntryProjects[key] = scheduled;
-                        else _autoDerivedEntryProjects.Remove(key);
-                        changedByKey[key] = scheduled;
-                    }
-                }
-                else
-                {
-                    _autoDerivedEntryProjects.Remove(key); // manual override: preserve e.ProjectID
-                }
-            }
-        }
-
-        if (entriesSheet != null && changedByKey.Count > 0)
-            WriteDerivedProjectIdsToSheet(entriesSheet, changedByKey);
-    }
-
-    private static void WriteDerivedProjectIdsToSheet(dynamic entriesSheet, Dictionary<string, string> changedByKey)
-    {
-        try
-        {
-            dynamic? table = TableMapper.ResolveTable(entriesSheet, EntriesTableName);
-            dynamic? body = table?.DataBodyRange;
-            if (table == null || body == null) return;
-
-            int rows = (int)body!.Rows.Count;
-            int cols = (int)table!.ListColumns.Count;
-            object[,] header = TableMapper.GetRange2DValues(table.HeaderRowRange, 1, cols);
-            int dateCol = -1, timeCol = -1, staffCol = -1, projectCol = -1, typeCol = -1, sourceCol = -1;
-            for (int c = 1; c <= cols; c++)
-            {
-                string h = header[1, c]?.ToString()?.Trim() ?? string.Empty;
-                if (h.Equals("Date", StringComparison.OrdinalIgnoreCase)) dateCol = c;
-                else if (h.Equals("Time", StringComparison.OrdinalIgnoreCase)) timeCol = c;
-                else if (h.Equals("Staff ID", StringComparison.OrdinalIgnoreCase)) staffCol = c;
-                else if (h.Equals("Project ID", StringComparison.OrdinalIgnoreCase)) projectCol = c;
-                else if (h.Equals("Entry Type", StringComparison.OrdinalIgnoreCase)) typeCol = c;
-                else if (h.Equals("Source", StringComparison.OrdinalIgnoreCase)) sourceCol = c;
-            }
-            if (dateCol < 0 || timeCol < 0 || staffCol < 0 || projectCol < 0 || typeCol < 0 || sourceCol < 0) return;
-
-            object[,] data = TableMapper.GetRange2DValues(body, rows, cols);
-            var column = new object?[rows, 1];
-            bool dirty = false;
-            for (int r = 1; r <= rows; r++)
-            {
-                column[r - 1, 0] = data[r, projectCol];
-
-                object? dv = data[r, dateCol], tv = data[r, timeCol], sv = data[r, staffCol];
-                DateOnly rowDate;
-                if (dv is double dd) rowDate = DateOnly.FromDateTime(DateTime.FromOADate(dd));
-                else if (dv is DateTime ddt) rowDate = DateOnly.FromDateTime(ddt);
-                else if (!DateOnly.TryParse(dv?.ToString(), out rowDate)) continue;
-
-                TimeOnly rowTime;
-                if (tv is double td)
-                {
-                    int secs = (int)Math.Round((td - Math.Floor(td)) * 86400.0);
-                    rowTime = TimeOnly.FromTimeSpan(TimeSpan.FromSeconds(secs >= 86400 ? 0 : secs));
-                }
-                else if (tv is DateTime tdt) rowTime = TimeOnly.FromDateTime(tdt);
-                else if (!TimeOnly.TryParse(tv?.ToString(), out rowTime)) continue;
-
-                long staffId;
-                if (sv is double sd) staffId = (long)sd;
-                else if (!long.TryParse(sv?.ToString(), out staffId)) continue;
-
-                if (!Enum.TryParse<AttendanceEntryType>(data[r, typeCol]?.ToString()?.Trim(), true, out var et)) continue;
-                if (!Enum.TryParse<AttendanceSource>(data[r, sourceCol]?.ToString()?.Trim(), true, out var src)) continue;
-                if (staffId <= 0) continue;
-
-                string key = $"{rowDate:yyyy-MM-dd}|{rowTime:HH:mm:ss}|{staffId}|{et}|{src}";
-                if (changedByKey.TryGetValue(key, out string? newProject))
-                {
-                    column[r - 1, 0] = newProject;
-                    dirty = true;
-                }
-            }
-
-            if (!dirty) return;
-            dynamic target = entriesSheet.Range[body.Cells[1, projectCol], body.Cells[rows, projectCol]];
-            target.Value2 = column;
-        }
-        catch (Exception ex)
-        {
-            AppLogger.Warn($"[ScheduleManager] WriteDerivedProjectIdsToSheet warning: {ex.Message}");
-        }
-    }
-
-    // =========================================================================
     // 3. APPROVAL DEFAULTS (Thumbprint/Manual/SKSB_App/Admin => TRUE, WhatsApp => FALSE until an admin confirms)
     // =========================================================================
     private static void NormalizeApprovals(dynamic entriesSheet)
@@ -817,8 +669,8 @@ internal static partial class SheetMapper
                 BoardContext.SetNextDayStartTime(record.NextDayStartTime);
                 BoardContext.SetPreferences(record.Preferences, record.Teams);
 
-                // Server baseline for the delta upsert: captured BEFORE ProjectID auto-derivation and Admin auto entries,
-                // so both still count as changes on the next save. Offline / pending-upload data is never a server baseline.
+                // Server baseline for the delta upsert: captured BEFORE Admin auto entries, so they still count as
+                // changes on the next save. Offline / pending-upload data is never a server baseline.
                 if (ServerEnvironment.IsOnline && !OfflineSnapshot.HasPendingSnapshot<ScheduleRecord>())
                 {
                     _persistedEntryFingerprints = new HashSet<string>(record.AttendanceEntries.Select(EntryFingerprint), StringComparer.Ordinal);
@@ -829,8 +681,6 @@ internal static partial class SheetMapper
                     _persistedEntryFingerprints.Clear();
                     _hasPersistedBaseline = false;
                 }
-
-                SyncEntryProjectsWithSchedule(null, record.AttendanceEntries, date, record.Projects, BoardContext.DayStartTime, BoardContext.NextDayStartTime, BoardContext.OTStartTime, resetTracking: true);
 
                 // Active Admin staff with no punch that working day get approved auto CheckIn/CheckOut entries.
                 // They are fingerprinted as loaded below, and _hasUnsavedGlobalEdits stays false, so merely browsing
@@ -854,6 +704,7 @@ internal static partial class SheetMapper
                 }
 
                 LoadingOverlay.Report("Rendering daily schedule board...");
+                ScheduleBoardMapper.SetDismissedProjects(record.DismissedProjects);
                 ScheduleBoardMapper.Render((object)board!, date, record.Projects, dayEntries, autoPopulate: true);
 
                 if (attendanceSheet != null)
@@ -863,7 +714,7 @@ internal static partial class SheetMapper
                         dayEntries,
                         record.Projects, record.WorkerAttendance, BoardContext.DayStartTime, BoardContext.LateCutOff, BoardContext.OTStartTime, BoardContext.NextDayStartTime,
                         LeavesFor(date));
-                    WriteAttendanceRows(attendanceSheet, rows);
+                    WriteAttendanceRows(attendanceSheet, rows, record.Projects);
                 }
             });
             RibbonController.RefreshWorkingDayDisplay();
@@ -897,8 +748,9 @@ internal static partial class SheetMapper
                     .Where(e => DeviceSyncManager.IsInWorkingDay(e.Date, e.Time, record.DailyScheduleDate, record.DayStartTime, record.NextDayStartTime))
                     .ToList();
 
+                ScheduleBoardMapper.SetDismissedProjects(record.DismissedProjects);
                 if (board != null) ScheduleBoardMapper.Render((object)board!, record.DailyScheduleDate, record.Projects, dayEntries, autoPopulate: true);
-                if (attendanceSheet != null) WriteAttendanceRows(attendanceSheet, record.WorkerAttendance);
+                if (attendanceSheet != null) WriteAttendanceRows(attendanceSheet, record.WorkerAttendance, record.Projects);
             });
             RibbonController.RefreshWorkingDayDisplay();
         }
@@ -1141,10 +993,75 @@ internal static partial class SheetMapper
         }
     }
 
-    private static void WriteAttendanceRows(dynamic attendanceSheet, List<DailyWorkerAttendance> rows)
+    private static void WriteAttendanceRows(dynamic attendanceSheet, List<DailyWorkerAttendance> rows, IReadOnlyList<DailyProjectSchedule> slots)
     {
         foreach (var r in rows) r.StaffName = Roster.NameOf(r.StaffID, r.StaffName);
         TableMapper.PopulateTableSafe<DailyWorkerAttendance>((object)attendanceSheet!, MasterTableName, rows);
+        try { GreyOffBoardPlannedProjects(attendanceSheet, rows, slots); }
+        catch (Exception ex) { AppLogger.Warn($"[ScheduleManager] Planned Projects greying failed: {ex.Message}"); }
+    }
+
+    private static void GreyOffBoardPlannedProjects(dynamic attendanceSheet, List<DailyWorkerAttendance> rows, IReadOnlyList<DailyProjectSchedule> slots)
+    {
+        const int Grey = 0x8C8C8C;
+        dynamic? table = null;
+        try { table = attendanceSheet.ListObjects[MasterTableName]; } catch { }
+        if (table == null) return;
+
+        dynamic? column = null;
+        try
+        {
+            foreach (dynamic lc in table.ListColumns)
+            {
+                if (string.Equals((string)lc.Name, "Planned Projects", StringComparison.OrdinalIgnoreCase)) { column = lc; break; }
+            }
+        }
+        catch { }
+        if (column == null) return;
+
+        dynamic? body = null;
+        try { body = column.DataBodyRange; } catch { }
+        if (body == null) return;
+        try { body.Font.ColorIndex = -4105; } catch { }
+
+        var onBoard = new HashSet<string>(
+            slots.Select(s => AttendanceRollupService.NormalizeProjectId(s.ProjectID)).Where(id => id.Length > 0),
+            StringComparer.OrdinalIgnoreCase);
+
+        for (int i = 0; i < rows.Count; i++)
+        {
+            string text = rows[i].PlannedProjects ?? string.Empty;
+            if (string.IsNullOrWhiteSpace(text)) continue;
+
+            var tokens = new List<(int Start, int Length, bool OnBoard)>();
+            int pos = 0;
+            foreach (var raw in text.Split(','))
+            {
+                string token = raw.Trim();
+                if (token.Length > 0)
+                {
+                    int start = pos + (raw.Length - raw.TrimStart().Length);
+                    tokens.Add((start, token.Length, onBoard.Contains(AttendanceRollupService.NormalizeProjectId(token))));
+                }
+                pos += raw.Length + 1;
+            }
+            if (tokens.Count == 0 || tokens.All(t => t.OnBoard)) continue;
+
+            try
+            {
+                dynamic cell = body.Cells[i + 1, 1];
+                if (tokens.All(t => !t.OnBoard))
+                {
+                    cell.Font.Color = Grey;
+                }
+                else
+                {
+                    foreach (var t in tokens.Where(t => !t.OnBoard))
+                        cell.Characters[t.Start + 1, t.Length].Font.Color = Grey;
+                }
+            }
+            catch { }
+        }
     }
 
     // =========================================================================
@@ -1223,8 +1140,6 @@ internal static partial class SheetMapper
                     }
                 }
 
-                SyncEntryProjectsWithSchedule(entriesSheet, entries, date.Value, slots, BoardContext.DayStartTime, BoardContext.NextDayStartTime, BoardContext.OTStartTime, resetTracking: false);
-
                 ScheduleBoardMapper.Render((object)board!, date.Value, slots, entries);
 
                 if (rollup && attendanceSheet != null)
@@ -1234,7 +1149,13 @@ internal static partial class SheetMapper
                         entries.Where(e => DeviceSyncManager.IsInWorkingDay(e.Date, e.Time, date.Value, BoardContext.DayStartTime, BoardContext.NextDayStartTime)).ToList(),
                         slots, existing, BoardContext.DayStartTime, BoardContext.LateCutOff, BoardContext.OTStartTime, BoardContext.NextDayStartTime,
                         LeavesFor(date.Value));
-                    if (Signature(rows) != Signature(existing)) WriteAttendanceRows(attendanceSheet, rows);
+                    if (Signature(rows) != Signature(existing)) WriteAttendanceRows(attendanceSheet, rows, slots);
+                    else
+                    {
+                        // A removed / re-added slot can change only the grey styling, not the row values.
+                        try { GreyOffBoardPlannedProjects(attendanceSheet, rows, slots); }
+                        catch (Exception ex) { AppLogger.Warn($"[ScheduleManager] Planned Projects greying failed: {ex.Message}"); }
+                    }
                 }
             });
         }
@@ -1250,7 +1171,7 @@ internal static partial class SheetMapper
 
     private static string Signature(IEnumerable<DailyWorkerAttendance> rows) =>
         string.Join("|", rows.OrderBy(r => r.StaffID).Select(r =>
-            $"{r.StaffID}:{r.AttendanceStatus}:{r.ClockInTime:HH:mm}:{r.ClockOutTime:HH:mm}:{r.ProjectCheckIns}:{r.RegularShift}:{r.AdditionalShifts}:{r.OTHours}:{r.AdditionalOTHours}:{r.TotalFlattenedHours}:{r.IsAllocated}"));
+            $"{r.StaffID}:{r.AttendanceStatus}:{r.ClockInTime:HH:mm}:{r.ClockOutTime:HH:mm}:{r.ProjectCheckIns}:{r.PlannedProjects}:{r.RegularShift}:{r.AdditionalShifts}:{r.OTHours}:{r.AdditionalOTHours}:{r.TotalFlattenedHours}:{r.IsAllocated}"));
 
     internal static void QueueRefresh(bool reloadContext, bool rollup)
     {

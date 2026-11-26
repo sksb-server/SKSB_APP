@@ -462,13 +462,21 @@ public static class Arrow
             try { table = singleCell.ListObject; } catch { }
 
             PropertyRuleDescriptor? rule = RuleRegistry.GetRuleForCell(singleCell);
+            CustomDropdownResult? custom = CustomDropdowns.TryBuild(singleCell);
+            if (custom?.AllowOnLockedCell != true && ((rule != null && rule.IsLocked) || Commands.IsCellValidationLocked(singleCell)))
+            {
+                HideAll();
+                return;
+            }
             var processedItems = new List<DropdownOption>();
 
-            CustomDropdownResult? custom = CustomDropdowns.TryBuild(singleCell);
-            _isMultiSelectSession = custom == null && rule != null && rule.HasDropdown && rule.IsMultiSelect;
-            _checkedTokens = _isMultiSelectSession
-                ? new HashSet<string>(RuleEvaluator.SplitMultiSelectTokens(inCellText), StringComparer.OrdinalIgnoreCase)
-                : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            _isMultiSelectSession = (custom != null && custom.IsMultiSelect)
+                || (custom == null && rule != null && rule.HasDropdown && rule.IsMultiSelect);
+            _checkedTokens = custom != null && custom.IsMultiSelect
+                ? new HashSet<string>(custom.InitialChecked ?? Array.Empty<string>(), StringComparer.OrdinalIgnoreCase)
+                : _isMultiSelectSession
+                    ? new HashSet<string>(RuleEvaluator.SplitMultiSelectTokens(inCellText), StringComparer.OrdinalIgnoreCase)
+                    : new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
             // =========================================================================
             // PATH C: Module-supplied dropdown (e.g. Schedule board match-% ranking)
@@ -482,15 +490,33 @@ public static class Arrow
                     var targetItem = processedItems.FirstOrDefault(i => i.Display.Equals(chosenDisplay, StringComparison.OrdinalIgnoreCase));
                     if (targetItem == null) return;
 
+                    if (custom.IsMultiSelect)
+                    {
+                        string val = OptionValue(targetItem);
+                        if (!_checkedTokens.Remove(val)) _checkedTokens.Add(val);
+                    }
+
                     ExcelAsyncUtil.QueueAsMacro(() =>
                     {
+                        if (custom.AllowOnLockedCell && custom.IsMultiSelect)
+                        {
+                            bool origEvents = true;
+                            try { origEvents = (bool)xlApp.EnableEvents; xlApp.EnableEvents = false; } catch { }
+                            try { custom.Commit(singleCell, targetItem); }
+                            finally
+                            {
+                                try { xlApp.EnableEvents = origEvents; } catch { }
+                            }
+                            return;
+                        }
+
                         UndoManager.CaptureCellSnapshot(sheet, singleCell);
-                        bool origEvents = true;
-                        try { origEvents = (bool)xlApp.EnableEvents; xlApp.EnableEvents = false; } catch { }
+                        bool prevEvents = true;
+                        try { prevEvents = (bool)xlApp.EnableEvents; xlApp.EnableEvents = false; } catch { }
                         try { custom.Commit(singleCell, targetItem); }
                         finally
                         {
-                            try { xlApp.EnableEvents = origEvents; } catch { }
+                            try { xlApp.EnableEvents = prevEvents; } catch { }
                         }
 
                         ParameterCells.NotifyChanged(sheet, singleCell);
