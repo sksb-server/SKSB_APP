@@ -53,6 +53,7 @@ public class EventsAutoOpen : IExcelAddIn
         Dapper.DefaultTypeMap.MatchNamesWithUnderscores = true;
 
         RuleRegistry.EnsureInitialized();
+        LoadingTimeEstimator.WarmUp();
 
         if (Environment.GetEnvironmentVariable(HookedPidKey) == "1")
         {

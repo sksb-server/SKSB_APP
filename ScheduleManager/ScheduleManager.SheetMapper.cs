@@ -130,8 +130,19 @@ internal static partial class SheetMapper
             }
             if (dateColIndex < 0) return;
 
-            string oa = ((long)date.ToDateTime(TimeOnly.MinValue).ToOADate()).ToString(CultureInfo.InvariantCulture);
-            table.Range.AutoFilter(dateColIndex, $">={oa}", 1 /* xlAnd */, $"<={oa}");
+            try
+            {
+                // Show the selected date AND blank rows (new entries) — Criteria1 "=" selects blanks,
+                // Criteria2 {2 /* day level */, "M/d/yyyy"} selects the date group.
+                table.Range.AutoFilter(dateColIndex, new object[] { "=" }, 7 /* xlFilterValues */,
+                    new object[] { 2, date.ToString("M/d/yyyy", CultureInfo.InvariantCulture) });
+            }
+            catch (Exception exValues)
+            {
+                AppLogger.Warn($"[ScheduleManager] Value filter with blanks failed on {tableName}, using range filter: {exValues.Message}");
+                string oa = ((long)date.ToDateTime(TimeOnly.MinValue).ToOADate()).ToString(CultureInfo.InvariantCulture);
+                table.Range.AutoFilter(dateColIndex, $">={oa}", 1 /* xlAnd */, $"<={oa}");
+            }
         }
         catch (Exception ex) { AppLogger.Warn($"[ScheduleManager] Could not filter {tableName} to {date:yyyy-MM-dd}: {ex.Message}"); }
     }
@@ -423,6 +434,10 @@ internal static partial class SheetMapper
         int pending = dayEntries.Count(e => !e.IsApproved);
         if (pending > 0)
             warnings.Add($"  [Attendance Entries]: {pending} unapproved entr{(pending == 1 ? "y is" : "ies are")} excluded from the attendance rollup until 'Is Approved' is TRUE.");
+
+        // Project Start / End auto-filled from fallbacks, inverted windows, and Clock-Outs that fell back to the project End.
+        warnings.AddRange(AttendanceRollupService.CollectTimeWarnings(scheduleDate, record.Projects, record.AttendanceEntries,
+            record.DayStartTime, record.NextDayStartTime, record.OTStartTime).Select(w => "  " + w));
     }
 
     // =========================================================================
@@ -999,6 +1014,74 @@ internal static partial class SheetMapper
         TableMapper.PopulateTableSafe<DailyWorkerAttendance>((object)attendanceSheet!, MasterTableName, rows);
         try { GreyOffBoardPlannedProjects(attendanceSheet, rows, slots); }
         catch (Exception ex) { AppLogger.Warn($"[ScheduleManager] Planned Projects greying failed: {ex.Message}"); }
+        try { StyleAttendanceTimeAndOtCells(attendanceSheet, rows); }
+        catch (Exception ex) { AppLogger.Warn($"[ScheduleManager] Clock-In / Clock-Out styling failed: {ex.Message}"); }
+    }
+
+    /// <summary>
+    /// 'Daily Attendances' Clock-In / Clock-Out: per-row source-icon NumberFormat (default "hh:mm"), amber font on auto-fallback
+    /// times, and the equation notes as comments; OT Hours gets its OT equation comment. Rows match the table order written
+    /// by <see cref="TableMapper.PopulateTableSafe{T}"/>. Caller owns the Excel freeze.
+    /// </summary>
+    private static void StyleAttendanceTimeAndOtCells(dynamic attendanceSheet, List<DailyWorkerAttendance> rows)
+    {
+        dynamic? table = null;
+        try { table = attendanceSheet.ListObjects[MasterTableName]; } catch { }
+        if (table == null) return;
+
+        dynamic? inBody = null, outBody = null, otBody = null;
+        try
+        {
+            foreach (dynamic lc in table.ListColumns)
+            {
+                string name = (string)lc.Name;
+                dynamic? body = null;
+                try { body = lc.DataBodyRange; } catch { }
+                if (string.Equals(name, "Clock-In Time", StringComparison.OrdinalIgnoreCase)) inBody = body;
+                else if (string.Equals(name, "Clock-Out Time", StringComparison.OrdinalIgnoreCase)) outBody = body;
+                else if (string.Equals(name, "OT Hours", StringComparison.OrdinalIgnoreCase)) otBody = body;
+            }
+        }
+        catch { }
+
+        if (inBody != null) { try { inBody.Font.ColorIndex = -4105; } catch { } try { inBody.ClearComments(); } catch { } }
+        if (outBody != null) { try { outBody.Font.ColorIndex = -4105; } catch { } try { outBody.ClearComments(); } catch { } }
+        if (otBody != null) { try { otBody.ClearComments(); } catch { } }
+
+        int bodyRows = 0;
+        dynamic? anyBody = inBody ?? outBody ?? otBody;
+        if (anyBody == null) return;
+        try { bodyRows = (int)anyBody.Rows.Count; } catch { }
+        int count = Math.Min(rows.Count, bodyRows);
+
+        for (int i = 0; i < count; i++)
+        {
+            var r = rows[i];
+            if (inBody != null)
+            {
+                try
+                {
+                    dynamic cell = inBody.Cells[i + 1, 1];
+                    ScheduleBoardMapper.StyleTimeCell(cell, r.ClockInDisplayFormat, r.ClockInIsFallback);
+                    if (!string.IsNullOrEmpty(r.ClockInNote)) ScheduleBoardMapper.ApplySizedComment(cell, r.ClockInNote);
+                }
+                catch { }
+            }
+            if (outBody != null)
+            {
+                try
+                {
+                    dynamic cell = outBody.Cells[i + 1, 1];
+                    ScheduleBoardMapper.StyleTimeCell(cell, r.ClockOutDisplayFormat, r.ClockOutIsFallback);
+                    if (!string.IsNullOrEmpty(r.ClockOutNote)) ScheduleBoardMapper.ApplySizedComment(cell, r.ClockOutNote);
+                }
+                catch { }
+            }
+            if (otBody != null && !string.IsNullOrEmpty(r.OTHoursNote))
+            {
+                try { ScheduleBoardMapper.ApplySizedComment(otBody.Cells[i + 1, 1], r.OTHoursNote); } catch { }
+            }
+        }
     }
 
     private static void GreyOffBoardPlannedProjects(dynamic attendanceSheet, List<DailyWorkerAttendance> rows, IReadOnlyList<DailyProjectSchedule> slots)
@@ -1171,7 +1254,7 @@ internal static partial class SheetMapper
 
     private static string Signature(IEnumerable<DailyWorkerAttendance> rows) =>
         string.Join("|", rows.OrderBy(r => r.StaffID).Select(r =>
-            $"{r.StaffID}:{r.AttendanceStatus}:{r.ClockInTime:HH:mm}:{r.ClockOutTime:HH:mm}:{r.ProjectCheckIns}:{r.PlannedProjects}:{r.RegularShift}:{r.AdditionalShifts}:{r.OTHours}:{r.AdditionalOTHours}:{r.TotalFlattenedHours}:{r.IsAllocated}"));
+            $"{r.StaffID}:{r.AttendanceStatus}:{r.ClockInTime:HH:mm}:{r.ClockOutTime:HH:mm}:{r.ClockInDisplayFormat}:{r.ClockOutDisplayFormat}:{r.ClockInIsFallback}:{r.ClockOutIsFallback}:{r.ProjectCheckIns}:{r.PlannedProjects}:{r.RegularShift}:{r.AdditionalShifts}:{r.OTHours}:{r.AdditionalOTHours}:{r.TotalFlattenedHours}:{r.IsAllocated}"));
 
     internal static void QueueRefresh(bool reloadContext, bool rollup)
     {
@@ -1217,6 +1300,18 @@ internal static partial class SheetMapper
                     {
                         try { RunFrozen(() => ScheduleBoardMapper.ClearLeadCell(boardObj, clearRow, clearCol)); }
                         catch (Exception ex) { AppLogger.Warn($"[ScheduleManager] clearing linked cell failed: {ex.Message}"); }
+                        RefreshDerived(reloadContext: false, rollup: true);
+                    });
+                    return;
+                }
+
+                // Project Start / End typed or cleared: commit the manual time (blank = auto fallback), then re-render.
+                if ((int)target.Cells.Count == 1 && ScheduleBoardMapper.IsProjectTimeCell((object)sheet, row, col, out _))
+                {
+                    object timeObj = sheet; int timeRow = row, timeCol = col;
+                    ExcelAsyncUtil.QueueAsMacro(() =>
+                    {
+                        ScheduleBoardMapper.CommitManualTimeEdit(timeObj, timeRow, timeCol);
                         RefreshDerived(reloadContext: false, rollup: true);
                     });
                     return;

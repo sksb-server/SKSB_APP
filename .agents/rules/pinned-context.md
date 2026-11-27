@@ -8,13 +8,14 @@ description: >-
 
 # SKSB_App Pinned & Active Context Index
 
-*Last synced: 2026-11-25 (auto-maintained by the SKSB_App Weekday Conversation Cleanup automation).*
+*Last synced: 2026-11-27 (auto-maintained by the SKSB_App Weekday Conversation Cleanup automation).*
 
 ## Pinned Conversations
 - **[SQL Accounting Software on Linux](conversation://b540ca70-edfc-4ee1-9f10-6084c2223d26)** (`roadmap-erp`)
 - **[WhatsApp SKSB App Development Plan](conversation://99391b48-dbfa-4d1c-97b9-8b486571e3cc)** (`roadmap-erp`)
 
 ## Active Ongoing Planning & Architecture
+- **[ERP and Telegram Bot Setup](conversation://9452e316-7588-4a24-8306-b0679be3a142)** (`roadmap-erp`, `ops-git`)
 - **[SQL Account and Finance SDK Verification](conversation://fb305565-a234-4bd1-8026-cbe9c7c72954)** (`roadmap-erp`)
 - **[Roadmap Email Access Control Review](conversation://c88f47b3-8319-4ff3-b07f-0befd2c7f978)** (`roadmap-erp`)
 - **[SKSB App Roadmap Integration](conversation://0231117c-bbc0-4030-b359-49b838edabc3)** (`roadmap-erp`)

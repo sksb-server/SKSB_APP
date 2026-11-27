@@ -15,6 +15,9 @@ public sealed class UserPreferencesData
     /// <summary>Whether the Cell Guide task pane opens automatically when a manager workbook starts. Defaults to true.</summary>
     public bool ShowGuideOnStartup { get; set; } = true;
 
+    /// <summary>Last app version seen by this user in Portal.exe (used to show the NEW badge once per version).</summary>
+    public string? LastSeenVersion { get; set; }
+
     /// <summary>Round-trips keys written by newer versions (e.g. Step 2 guide preferences) so they are never lost.</summary>
     [JsonExtensionData]
     public Dictionary<string, JsonElement>? Extra { get; set; }

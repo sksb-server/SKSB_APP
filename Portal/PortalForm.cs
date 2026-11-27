@@ -22,8 +22,12 @@ public class PortalForm : Form
     private const int ModuleButtonBaseWidth = 360;
 
     private readonly string _currentVersion;
+    private readonly bool _isNewVersion;
+    private readonly string? _releaseNotesText;
+    private ToolTip? _newBadgeToolTip;
     private TableLayoutPanel _layout = null!;
     private Label _lblHeader = null!;
+    private Label? _lblNewBadge;
     private Label _lblSubheader = null!;
     private Label _lblLanguage = null!;
     private ComboBox _cmbLanguage = null!;
@@ -68,8 +72,10 @@ public class PortalForm : Form
     {
         SuspendLayout();
         Loc.ReloadFromPreferences();
-        Loc.WatchPreferences();
         _currentVersion = ResolveAppVersion();
+        _isNewVersion = CheckAndMarkNewVersion(_currentVersion);
+        if (_isNewVersion) _releaseNotesText = ResolveReleaseNotes(_currentVersion);
+        Loc.WatchPreferences();
 #if DEBUG
         _debugBranchLabel = ResolveDebugBranchLabel();
 #endif
@@ -175,6 +181,8 @@ public class PortalForm : Form
             Loc.LanguageChanged -= _languageChangedHandler;
             _languageChangedHandler = null;
         }
+        _newBadgeToolTip?.Dispose();
+        _newBadgeToolTip = null;
         base.OnFormClosed(e);
     }
 
@@ -252,6 +260,29 @@ public class PortalForm : Form
 
         headerPanel.Controls.Add(_lblHeader);
         headerPanel.Controls.Add(lblVersion);
+
+        if (_isNewVersion)
+        {
+            _lblNewBadge = new Label
+            {
+                Font = new Font("Segoe UI", 8.5f, FontStyle.Bold),
+                ForeColor = Color.FromArgb(4, 120, 87),
+                BackColor = Color.FromArgb(209, 250, 229),
+                Padding = new Padding(6, 2, 6, 2),
+                AutoSize = true,
+                Margin = new Padding(6, 6, 0, 0),
+                Cursor = Cursors.Help
+            };
+            _newBadgeToolTip = new ToolTip
+            {
+                AutoPopDelay = 15000,
+                InitialDelay = 200,
+                ReshowDelay = 100,
+                ShowAlways = true,
+                ToolTipIcon = ToolTipIcon.Info
+            };
+            headerPanel.Controls.Add(_lblNewBadge);
+        }
 
         var languagePanel = new FlowLayoutPanel
         {
@@ -461,18 +492,36 @@ public class PortalForm : Form
             Text = BuildWindowTitle();
 #if DEBUG
             _lblHeader.Text = Loc.T("portal.headerDebug");
+            _lblHeader.Tag = "ui::portal.headerDebug";
 #else
             _lblHeader.Text = Loc.T("portal.header");
+            _lblHeader.Tag = "ui::portal.header";
 #endif
+            if (_lblNewBadge != null) _lblNewBadge.Text = Loc.T("portal.versionNew");
+            if (_lblNewBadge != null && _newBadgeToolTip != null)
+            {
+                _newBadgeToolTip.ToolTipTitle = Loc.T("portal.versionNew.tooltipTitle", _currentVersion);
+                string details = string.IsNullOrWhiteSpace(_releaseNotesText)
+                    ? Loc.T("portal.versionNew.tooltipEmpty", _currentVersion)
+                    : _releaseNotesText;
+                _newBadgeToolTip.SetToolTip(_lblNewBadge, details);
+            }
             _lblLanguage.Text = Loc.T("language.label");
+            _lblLanguage.Tag = "ui::language.label";
             SyncLanguageComboSelection();
 
             _btnReportBug.Text = Loc.T("portal.reportBug");
+            _btnReportBug.Tag = "ui::portal.reportBug";
             _btnDictionary.Text = Loc.T("portal.dictionary");
+            _btnDictionary.Tag = "ui::portal.dictionary";
 #if DEBUG
             UpdateBugInboxText();
 #else
-            if (_btnResetTemplates != null) _btnResetTemplates.Text = Loc.T("portal.resetTemplates");
+            if (_btnResetTemplates != null)
+            {
+                _btnResetTemplates.Text = Loc.T("portal.resetTemplates");
+                _btnResetTemplates.Tag = "ui::portal.resetTemplates";
+            }
 #endif
             _lblFooter.Text = Loc.T("portal.footer", Environment.Version.Major, FolderRegistry.SKSB_App.GetPath());
 
@@ -537,25 +586,30 @@ public class PortalForm : Form
         if (_editTemplateMode)
         {
             _btnEditTemplate.Text = Loc.T("portal.editTemplateOn");
+            _btnEditTemplate.Tag = "ui::portal.editTemplateOn";
             _btnEditTemplate.BackColor = Color.FromArgb(254, 243, 199);
             _btnEditTemplate.ForeColor = Color.FromArgb(180, 83, 9);
             _btnEditTemplate.FlatAppearance.BorderColor = Color.FromArgb(245, 158, 11);
             _btnEditTemplate.FlatAppearance.MouseOverBackColor = Color.FromArgb(253, 230, 138);
 #if DEBUG
             _lblSubheader.Text = Loc.T("portal.subheader.editDebug");
+            _lblSubheader.Tag = "ui::portal.subheader.editDebug";
 #else
             _lblSubheader.Text = Loc.T("portal.subheader.edit");
+            _lblSubheader.Tag = "ui::portal.subheader.edit";
 #endif
             _lblSubheader.ForeColor = Color.FromArgb(180, 83, 9);
         }
         else
         {
             _btnEditTemplate.Text = Loc.T("portal.editTemplate");
+            _btnEditTemplate.Tag = "ui::portal.editTemplate";
             _btnEditTemplate.BackColor = Color.White;
             _btnEditTemplate.ForeColor = Color.FromArgb(79, 70, 229);
             _btnEditTemplate.FlatAppearance.BorderColor = Color.FromArgb(226, 232, 240);
             _btnEditTemplate.FlatAppearance.MouseOverBackColor = Color.FromArgb(238, 242, 255);
             _lblSubheader.Text = Loc.T("portal.subheader");
+            _lblSubheader.Tag = "ui::portal.subheader";
             _lblSubheader.ForeColor = Color.FromArgb(100, 116, 139);
         }
         if (_layout != null && IsHandleCreated) FitClientSizeToLayout();
@@ -631,8 +685,7 @@ public class PortalForm : Form
     {
         try
         {
-            using var dlg = new CollectiveDictionaryDialog();
-            dlg.ShowDialog(this);
+            DictionaryLauncher.Show(this);
         }
         catch (Exception ex)
         {
@@ -736,6 +789,59 @@ public class PortalForm : Form
         return btn;
     }
 
+    private static string? ResolveReleaseNotes(string currentVersion)
+    {
+        try
+        {
+            string[] candidates =
+            {
+                Path.Combine(FolderRegistry.SKSB_App.GetPath(), "release_notes.json"),
+                Path.Combine(AppContext.BaseDirectory, "release_notes.json")
+            };
+            foreach (string path in candidates)
+            {
+                if (!File.Exists(path)) continue;
+
+                using var doc = JsonDocument.Parse(File.ReadAllText(path));
+                var root = doc.RootElement;
+                if (root.ValueKind != JsonValueKind.Object) return null;
+
+                if (root.TryGetProperty("version", out var ver) && ver.ValueKind == JsonValueKind.String)
+                {
+                    string fileVer = (ver.GetString() ?? "").Trim().TrimStart('v', 'V');
+                    string curVer = currentVersion.Trim().TrimStart('v', 'V');
+                    if (fileVer.Length > 0 && !string.Equals(fileVer, curVer, StringComparison.OrdinalIgnoreCase))
+                        return null;
+                }
+
+                if (!root.TryGetProperty("notes", out var notes)) return null;
+
+                if (notes.ValueKind == JsonValueKind.Array)
+                {
+                    var lines = new List<string>();
+                    foreach (var item in notes.EnumerateArray())
+                    {
+                        if (item.ValueKind != JsonValueKind.String) continue;
+                        string? s = item.GetString();
+                        if (!string.IsNullOrWhiteSpace(s)) lines.Add("• " + s.Trim());
+                    }
+                    return lines.Count > 0 ? string.Join(Environment.NewLine, lines) : null;
+                }
+                if (notes.ValueKind == JsonValueKind.String)
+                {
+                    string s = (notes.GetString() ?? "").Trim();
+                    return s.Length > 0 ? s : null;
+                }
+                return null;
+            }
+        }
+        catch
+        {
+            // Never throw from release-notes resolution.
+        }
+        return null;
+    }
+
     private static string ResolveAppVersion()
     {
         try
@@ -778,5 +884,19 @@ public class PortalForm : Form
         catch { }
 
         return "1.0.0";
+    }
+
+    private static bool CheckAndMarkNewVersion(string currentVersion)
+    {
+        string normalized = currentVersion.Trim().TrimStart('v');
+        if (string.IsNullOrEmpty(normalized)) return false;
+
+        var prefs = UserPreferences.Load();
+        string? lastSeen = prefs.LastSeenVersion?.Trim().TrimStart('v');
+        if (string.Equals(lastSeen, normalized, StringComparison.OrdinalIgnoreCase)) return false;
+
+        prefs.LastSeenVersion = normalized;
+        UserPreferences.Save(prefs);
+        return true;
     }
 }

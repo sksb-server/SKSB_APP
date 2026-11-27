@@ -229,14 +229,16 @@ public static partial class ServerDispatcher
 
     // ---- date-scoped board / settings / daily attendance ----
     private const string SqlSlotUpsert = @"
-        INSERT INTO daily_project_schedules (schedule_date, shift, slot_index, project_id, premix_holes, workers, vehicles, remarks, updated_at)
-        VALUES (@ScheduleDate, @Shift, @SlotIndex, @ProjectId, @PremixHoles, @Workers, @Vehicles, @Remarks, clock_timestamp())
+        INSERT INTO daily_project_schedules (schedule_date, shift, slot_index, project_id, premix_holes, workers, vehicles, remarks, actual_start_time, actual_end_time, updated_at)
+        VALUES (@ScheduleDate, @Shift, @SlotIndex, @ProjectId, @PremixHoles, @Workers, @Vehicles, @Remarks, @ActualStartTime, @ActualEndTime, clock_timestamp())
         ON CONFLICT (schedule_date, shift, slot_index) DO UPDATE SET
-            project_id   = EXCLUDED.project_id,
-            premix_holes = EXCLUDED.premix_holes,
-            workers      = EXCLUDED.workers,
-            vehicles     = EXCLUDED.vehicles,
-            remarks      = EXCLUDED.remarks,
+            project_id        = EXCLUDED.project_id,
+            premix_holes      = EXCLUDED.premix_holes,
+            workers           = EXCLUDED.workers,
+            vehicles          = EXCLUDED.vehicles,
+            remarks           = EXCLUDED.remarks,
+            actual_start_time = EXCLUDED.actual_start_time,
+            actual_end_time   = EXCLUDED.actual_end_time,
             updated_at   = GREATEST(clock_timestamp(), daily_project_schedules.updated_at + INTERVAL '1 millisecond');";
 
     private const string SqlDailyAttendanceUpsert = @"
@@ -284,7 +286,8 @@ public static partial class ServerDispatcher
 
         var slots = schedule.Projects
             .Where(p => p.SlotIndex >= 0 &&
-                        (p.Workers.Count > 0 || p.Vehicles.Count > 0 || p.PremixHoles > 0))
+                        (p.Workers.Count > 0 || p.Vehicles.Count > 0 || p.PremixHoles > 0
+                         || p.ActualStartTime.HasValue || p.ActualEndTime.HasValue))
             .Select(p => new
             {
                 ScheduleDate = date,
@@ -294,7 +297,9 @@ public static partial class ServerDispatcher
                 PremixHoles = Math.Max(0, p.PremixHoles),
                 Workers = CleanList(p.Workers),
                 Vehicles = CleanList(p.Vehicles).Select(v => v.ToUpperInvariant()).ToArray(),
-                Remarks = p.Remarks ?? string.Empty
+                Remarks = p.Remarks ?? string.Empty,
+                ActualStartTime = p.ActualStartTime.HasValue ? (TimeSpan?)p.ActualStartTime.Value.ToTimeSpan() : null,
+                ActualEndTime = p.ActualEndTime.HasValue ? (TimeSpan?)p.ActualEndTime.Value.ToTimeSpan() : null
             }).ToList();
         string[] activeSlotKeys = slots.Select(s => $"{s.Shift}:{s.SlotIndex}").ToArray();
 

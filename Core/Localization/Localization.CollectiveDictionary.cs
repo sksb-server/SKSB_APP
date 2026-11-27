@@ -118,7 +118,9 @@ public static class CollectiveDictionaryRepository
     public static readonly string[] CustomTipContextTriggers =
     [
         "offline", "total", "header", "date_filter", "multiselect", "autosync",
-        "dropdown", "auto_defaults", "history", "currency", "readonly", "required"
+        "dropdown", "auto_defaults", "history", "currency", "readonly", "required",
+        "daily_attendance", "attendance_entries", "schedule_board",
+        "staff_summary", "vehicle_summary", "project_summary"
     ];
     public const string CacheFileName = "collective_dict_cache.json";
     public const string AiHelperName = "AI Consistency Helper";

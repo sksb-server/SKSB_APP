@@ -54,8 +54,43 @@ public class GuideTaskPaneControl : UserControl, IGuideTaskPaneControl
     [
         "ctrl_s", "insert_top", "trim_empty", "dedupe", "total_row", "dropdown", "language", "dock_pane",
         "dictionary", "template_portal", "validate", "report_bug", "header_sort", "reload_data",
-        "total_row_filter", "insert_row", "delete_row", "offline_safe", "cell_guide_toggle", "date_filter", "auto_defaults", "multi_select", "dynamic_cost"
+        "total_row_filter", "insert_row", "delete_row", "offline_safe", "cell_guide_toggle", "date_filter", "auto_defaults", "multi_select"
     ];
+
+    // Manager-scoped rotating tips (guide.spotlight.mgr.<manager>.<id>): only rotate inside their own manager.
+    private static readonly Dictionary<string, string[]> ManagerTipIds = new(StringComparer.OrdinalIgnoreCase)
+    {
+        ["project"] = ["dynamic_cost", "close_project", "companies_master", "summary_view"],
+        ["schedule"] = ["attendance_vs_entries", "entries_date_filter", "entries_add_row", "board_date_switch", "project_times", "ot_and_icons"],
+        ["staff"] = ["deactivate_staff", "payroll_sync", "terminal_push", "license_history", "summary_view"],
+        ["vehicle"] = ["retire_vehicle", "fuel_import", "sort_odometers", "service_history", "summary_view"]
+    };
+
+    private static readonly HashSet<string> ScheduleTables = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "DailyAttendanceTable", "AttendanceEntriesTable", "WorkerPreferencesTable", "TeamTable", "SkillsTable", "ProjectRequirementsTable"
+    };
+
+    private static readonly HashSet<string> ScheduleSheets = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "Daily Schedule", "Daily Attendances", "Attendance Entries"
+    };
+
+    private static readonly HashSet<string> ProjectTables = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "CompaniesTable", "AllCompaniesTable", "ProjectSummaryTable"
+    };
+
+    private static readonly HashSet<string> StaffTables = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "AllStaffsTable", "VehicleLicensesTable", "SkillLicensesTable", "StaffSummaryTable"
+    };
+
+    private static readonly HashSet<string> VehicleTables = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "AllVehiclesTable", "MaintenancesTable", "InsurancesTable", "InsuranceClaimsTable",
+        "PermitsTable", "RoadTaxesTable", "InspectionsTable", "OdometersTable", "VehicleSummaryTable"
+    };
 
     // =========================================================================
     // 2. LAYOUT & IDLE FLOATING TRANSPARENCY (Win32 P/Invoke — never touches XLMAIN)
@@ -107,6 +142,8 @@ public class GuideTaskPaneControl : UserControl, IGuideTaskPaneControl
     private int _tipIndex = Random.Shared.Next(GeneralTipIds.Length);
     private bool _tipDismissed;
     private bool _preferGeneralTipForCurrentCell;
+    private bool _showDetailedInspect; // session-scoped: survives cell switches
+    private string _moduleId = string.Empty;
 
     private IntPtr _excelMainHwnd;
     private bool _isFloating = true;
@@ -165,6 +202,55 @@ public class GuideTaskPaneControl : UserControl, IGuideTaskPaneControl
         }
         _excelMainHwnd = excelMainHwnd;
         ApplyFloatingState(isFloating);
+    }
+
+    /// <summary>Sets the owning manager (e.g. "Schedule Manager") so manager-scoped tips rotate. Safe to call from any thread.</summary>
+    public void SetModuleName(string? moduleName)
+    {
+        if (IsDisposed) return;
+        if (InvokeRequired)
+        {
+            try { BeginInvoke(new Action(() => SetModuleName(moduleName))); } catch { }
+            return;
+        }
+        string normalized = NormalizeModuleId(moduleName);
+        if (string.Equals(normalized, _moduleId, StringComparison.Ordinal)) return;
+        _moduleId = normalized;
+        if (!_tipDismissed) Render();
+    }
+
+    private static string NormalizeModuleId(string? moduleName)
+    {
+        string squashed = new string((moduleName ?? string.Empty).Where(char.IsLetterOrDigit).ToArray()).ToLowerInvariant();
+        if (squashed.Length == 0) return string.Empty;
+        if (squashed.EndsWith("manager", StringComparison.Ordinal))
+            squashed = squashed[..^"manager".Length];
+        return squashed is "schedule" or "project" or "staff" or "vehicle" ? squashed : string.Empty;
+    }
+
+    /// <summary>
+    /// Owning manager id ("schedule", "project", "staff", "vehicle"). Uses the module set via
+    /// <see cref="SetModuleName"/>, falling back to the snapshot's table / sheet when unset.
+    /// </summary>
+    private string ResolveActiveManagerId()
+    {
+        if (!string.IsNullOrEmpty(_moduleId)) return _moduleId;
+
+        string table = _snapshot.TableName ?? string.Empty;
+        string sheet = _snapshot.SheetName ?? string.Empty;
+
+        if (ScheduleTables.Contains(table) || ScheduleSheets.Contains(sheet)) return "schedule";
+        if (table.EndsWith("ProjectsTable", StringComparison.OrdinalIgnoreCase) || ProjectTables.Contains(table)) return "project";
+        if (StaffTables.Contains(table)) return "staff";
+        if (VehicleTables.Contains(table)) return "vehicle";
+        return string.Empty;
+    }
+
+    private IReadOnlyList<string> GetRotatingTipKeys()
+    {
+        string managerId = ResolveActiveManagerId();
+        ManagerTipIds.TryGetValue(managerId, out var mgrIds);
+        return Loc.GetAllGeneralTipKeys(GeneralTipIds, managerId, mgrIds);
     }
 
     /// <summary>Updates whether the hosting Custom Task Pane is floating or docked. Safe to call from any thread.</summary>
@@ -336,7 +422,7 @@ public class GuideTaskPaneControl : UserControl, IGuideTaskPaneControl
             try { BeginInvoke(new Action(AdvanceTip)); } catch { }
             return;
         }
-        var allTipKeys = Loc.GetAllGeneralTipKeys(GeneralTipIds);
+        var allTipKeys = GetRotatingTipKeys();
         if (allTipKeys.Count > 0)
             _tipIndex = (_tipIndex + 1) % allTipKeys.Count;
         _preferGeneralTipForCurrentCell = false;
@@ -381,15 +467,14 @@ public class GuideTaskPaneControl : UserControl, IGuideTaskPaneControl
                 AddRow(BuildSpotlightTipCard(width));
             else
                 AddRow(BuildShowTipLink(width));
-            AddRow(BuildContextStrip(s, width));
 
             switch (s.Zone)
             {
                 case CellZone.None:
-                    AddRow(BuildBannerCard(Loc.Tip("guide.banner.noSelection"), width));
+                    AddRow(BuildBannerCard("guide.banner.noSelection", width));
                     break;
                 case CellZone.OutsideTable:
-                    AddRow(BuildBannerCard(Loc.Tip("guide.banner.outside"), width));
+                    AddRow(BuildBannerCard("guide.banner.outside", width));
                     break;
                 default:
                     BuildTableSections(s, width);
@@ -407,38 +492,177 @@ public class GuideTaskPaneControl : UserControl, IGuideTaskPaneControl
         if (s.SelectedCellCount > 1)
             AddRow(MakeLabel(Loc.Tip("guide.banner.multi", s.SelectedCellCount, s.CellAddress), width, TextMuted, italic: true));
 
-        // ---- Column title card ----
+        int inner = CardInner(width);
         var (displayName, description) = Loc.ResolveColumnGuide(s.TableName, s.ColumnHeader);
         string header = string.IsNullOrWhiteSpace(s.ColumnHeader) ? Loc.Tip("guide.label.unnamedColumn") : s.ColumnHeader!;
         string title = displayName ?? header;
 
-        var titleCard = NewCard(width);
-        titleCard.Controls.Add(MakeLabel(title, CardInner(width), TextPrimary, size: 13F, bold: true));
-        if (!string.Equals(title, header, StringComparison.OrdinalIgnoreCase))
-            titleCard.Controls.Add(MakeLabel(Loc.Tip("guide.label.originalHeader", header), CardInner(width), TextMuted));
-        if (s.Zone == CellZone.Data || s.Zone == CellZone.Total)
-            titleCard.Controls.Add(BuildBadges(s, CardInner(width)));
-        AddRow(titleCard);
+        // ---- Main field card (friendly, actionable) ----
+        var card = NewCard(width);
 
-        // ---- Zone banner (header / total) ----
-        if (s.Zone == CellZone.Header)
-            AddRow(BuildBannerCard(Loc.Tip("guide.banner.header"), width));
-        else if (s.Zone == CellZone.Total)
-            AddRow(BuildBannerCard(Loc.Tip("guide.banner.total"), width));
-
-        // ---- About this field ----
-        var about = NewCard(width);
-        about.Controls.Add(MakeSectionHeader(Loc.Tip("guide.section.about"), CardInner(width)));
-        if (!string.IsNullOrWhiteSpace(description))
-            about.Controls.Add(MakeLabel(description!, CardInner(width), TextPrimary));
-        foreach (string tip in BuildFieldTips(s))
-            about.Controls.Add(MakeLabel("• " + tip, CardInner(width), TextPrimary));
-        if (s.Zone == CellZone.Data)
+        var headerRow = new FlowLayoutPanel
         {
-            string value = string.IsNullOrEmpty(s.CurrentValuePreview) ? Loc.Tip("guide.label.empty") : s.CurrentValuePreview!;
-            about.Controls.Add(MakeLabel(Loc.Tip("guide.label.currentValue", value), CardInner(width), TextMuted));
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = true,
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            BackColor = CardBack,
+            Margin = new Padding(0, 0, 0, 2),
+            Padding = Padding.Empty,
+            MaximumSize = new Size(inner, 0)
+        };
+
+        var titleLabel = MakeLabel(title, inner, TextPrimary, size: 12.5F, bold: true);
+        titleLabel.Margin = new Padding(0, 0, 8, 2);
+        if (ResolveColumnLocKey(s.TableName, s.ColumnHeader, "name") is { } nameKey)
+            titleLabel.Tag = TooltipTag(nameKey);
+        headerRow.Controls.Add(titleLabel);
+
+        if (s.Zone == CellZone.Data || s.Zone == CellZone.Total)
+        {
+            var pill = BuildRolePill(s);
+            pill.Margin = new Padding(0, 4, 0, 2);
+            headerRow.Controls.Add(pill);
         }
-        AddRow(about);
+        card.Controls.Add(headerRow);
+
+        if (!string.IsNullOrWhiteSpace(description))
+        {
+            var descLabel = MakeLabel(description!, inner, TextMuted);
+            if (ResolveColumnLocKey(s.TableName, s.ColumnHeader, "desc") is { } descKey)
+                descLabel.Tag = TooltipTag(descKey);
+            card.Controls.Add(descLabel);
+        }
+
+        if (s.Zone == CellZone.Header)
+            card.Controls.Add(MakeBannerLine("guide.banner.header", inner));
+        else if (s.Zone == CellZone.Total)
+            card.Controls.Add(MakeBannerLine("guide.banner.total", inner));
+        else if (s.Zone == CellZone.Data)
+            AddFriendlyGuidance(card, s, inner);
+
+        card.Controls.Add(BuildInspectToggle(inner, CardBack, topMargin: 6));
+        AddRow(card);
+
+        if (_showDetailedInspect)
+            BuildDetailSections(s, width, header, title);
+    }
+
+    /// <summary>Concise "How it's calculated / filled / to enter" + "What it affects" lines for a data cell.</summary>
+    private static void AddFriendlyGuidance(FlowLayoutPanel card, CellGuideSnapshot s, int inner)
+    {
+        bool isOutput = s.IsLocked || s.HasExcelFormula || s.SyncedFromSources.Count > 0;
+        if (isOutput)
+        {
+            if (ResolveColumnLocKey(s.TableName, s.ColumnHeader, "source") is { } sourceKey &&
+                Loc.TryTip(sourceKey, out string evalSource) && !string.IsNullOrWhiteSpace(evalSource))
+            {
+                string headingKey = IsStaffIdentityColumn(s.ColumnHeader) ? "guide.friendly.howFilled" : "guide.friendly.howCalculated";
+                card.Controls.Add(MakeMiniHeading(Loc.Tip(headingKey), inner));
+                var sourceLabel = MakeLabel(evalSource, inner, TextPrimary);
+                sourceLabel.Tag = TooltipTag(sourceKey);
+                card.Controls.Add(sourceLabel);
+                return;
+            }
+
+            bool isCalculated = s.IsStrictlyCalculated || s.HasExcelFormula ||
+                                s.CalculatedFromSources.Count > 0 || s.RollupDescriptions.Count > 0;
+
+            string line;
+            if (s.CalculatedFromSources.Count > 0)
+                line = Loc.Tip("guide.friendly.calcFrom", JoinHeaders(s.TableName, s.CalculatedFromSources));
+            else if (s.RollupDescriptions.Count > 0)
+                line = Loc.Tip("guide.friendly.rollupFrom", string.Join(", ", s.RollupDescriptions.Select(FriendlyRollupName).Distinct(StringComparer.OrdinalIgnoreCase)));
+            else if (s.SyncedFromSources.Count > 0)
+                line = Loc.Tip("guide.friendly.syncedFrom", JoinHeaders(s.TableName, s.SyncedFromSources));
+            else if (!string.IsNullOrWhiteSpace(s.FormulaHint))
+                line = Loc.Tip("guide.friendly.formula", s.FormulaHint!);
+            else
+                line = Loc.Tip("guide.friendly.autoManaged");
+
+            card.Controls.Add(MakeMiniHeading(Loc.Tip(isCalculated ? "guide.friendly.howCalculated" : "guide.friendly.howFilled"), inner));
+            card.Controls.Add(MakeLabel(line, inner, TextPrimary));
+            return;
+        }
+
+        card.Controls.Add(MakeMiniHeading(Loc.Tip("guide.friendly.howToEnter"), inner));
+        card.Controls.Add(MakeLabel(BuildEnterLine(s), inner, TextPrimary));
+
+        if (s.AffectedColumns.Count > 0)
+        {
+            card.Controls.Add(MakeMiniHeading(Loc.Tip("guide.friendly.whatAffects"), inner));
+            card.Controls.Add(MakeLabel(Loc.Tip("guide.friendly.affects", JoinHeaders(s.TableName, s.AffectedColumns)), inner, TextPrimary));
+        }
+    }
+
+    /// <summary>One friendly line: how to fill the cell, an optional date rule, then default / required / optional.</summary>
+    private static string BuildEnterLine(CellGuideSnapshot s)
+    {
+        var parts = new List<string>(3);
+
+        if (s.IsMultiSelect) parts.Add(Loc.Tip("guide.friendly.enter.multiselect"));
+        else if (s.HasDropdown) parts.Add(Loc.Tip("guide.friendly.enter.dropdown"));
+        else if (FormatExample(s) is { } example) parts.Add(Loc.Tip("guide.friendly.enter.example", example));
+
+        if (!string.IsNullOrWhiteSpace(s.DateMustBeGreaterThanHeader))
+        {
+            string refName = ColumnName(s.TableName, s.DateMustBeGreaterThanHeader!);
+            parts.Add(Loc.Tip(s.DateMustBeGreaterThanAllowEqual ? "guide.friendly.enter.dateOnOrAfter" : "guide.friendly.enter.dateAfter", refName));
+        }
+
+        if (s.HasDefaultValue) parts.Add(Loc.Tip("guide.friendly.enter.autoDefault"));
+        else if (s.IsRequired) parts.Add(Loc.Tip("guide.friendly.enter.required"));
+        else if (s.HasRule) parts.Add(Loc.Tip("guide.friendly.enter.optional"));
+
+        if (parts.Count == 0) parts.Add(Loc.Tip("guide.friendly.enter.free"));
+        return string.Join(" ", parts.Take(3));
+    }
+
+    /// <summary>"Maintenances (Cost, Parts)" -> translated table display name when one exists, else the raw collection name.</summary>
+    private static string FriendlyRollupName(string description)
+    {
+        int paren = description.IndexOf(" (", StringComparison.Ordinal);
+        string baseName = (paren > 0 ? description[..paren] : description).Trim();
+        if (baseName.Length == 0) return description;
+
+        string display = Loc.TableDisplayName(baseName);
+        if (!string.Equals(display, baseName, StringComparison.Ordinal)) return display;
+
+        if (!baseName.EndsWith("Table", StringComparison.OrdinalIgnoreCase))
+        {
+            string asTable = baseName + "Table";
+            string tableDisplay = Loc.TableDisplayName(asTable);
+            if (!string.Equals(tableDisplay, asTable, StringComparison.Ordinal)) return tableDisplay;
+        }
+        return baseName;
+    }
+
+    /// <summary>Full technical properties shown under "Inspect cell details".</summary>
+    private void BuildDetailSections(CellGuideSnapshot s, int width, string header, string title)
+    {
+        int inner = CardInner(width);
+
+        // ---- Location strip ----
+        string? originalHeader = !string.Equals(title, header, StringComparison.OrdinalIgnoreCase) ? header : null;
+        AddRow(BuildContextStrip(s, width, originalHeader));
+
+        // ---- Status badges + field tips + current value ----
+        if (s.Zone == CellZone.Data || s.Zone == CellZone.Total || s.Zone == CellZone.Header)
+        {
+            var status = NewCard(width);
+            status.Controls.Add(MakeSectionHeader(Loc.Tip("guide.inspect.status"), inner));
+            if (s.Zone == CellZone.Data || s.Zone == CellZone.Total)
+                status.Controls.Add(BuildBadges(s, inner));
+            foreach (string tip in BuildFieldTips(s))
+                status.Controls.Add(MakeLabel("• " + tip, inner, TextPrimary));
+            if (s.Zone == CellZone.Data)
+            {
+                string value = string.IsNullOrEmpty(s.CurrentValuePreview) ? Loc.Tip("guide.label.empty") : s.CurrentValuePreview!;
+                status.Controls.Add(MakeLabel(Loc.Tip("guide.label.currentValue", value), inner, TextMuted));
+            }
+            if (status.Controls.Count > 1) AddRow(status);
+            else status.Dispose();
+        }
 
         // ---- Rules & format ----
         if (s.Zone == CellZone.Data)
@@ -447,9 +671,9 @@ public class GuideTaskPaneControl : UserControl, IGuideTaskPaneControl
             if (rules.Count > 0)
             {
                 var card = NewCard(width);
-                card.Controls.Add(MakeSectionHeader(Loc.Tip("guide.section.rules"), CardInner(width)));
+                card.Controls.Add(MakeSectionHeader(Loc.Tip("guide.section.rules"), inner));
                 foreach (string line in rules)
-                    card.Controls.Add(MakeLabel("• " + line, CardInner(width), TextPrimary));
+                    card.Controls.Add(MakeLabel("• " + line, inner, TextPrimary));
                 AddRow(card);
             }
         }
@@ -458,13 +682,104 @@ public class GuideTaskPaneControl : UserControl, IGuideTaskPaneControl
         if (s.TableNature.HasValue)
         {
             var card = NewCard(width);
-            card.Controls.Add(MakeSectionHeader(Loc.Tip("guide.section.table"), CardInner(width)));
+            card.Controls.Add(MakeSectionHeader(Loc.Tip("guide.section.table"), inner));
             string natureKey = s.TableNature.Value == TableNature.Additive ? "additive" : "absolute";
-            card.Controls.Add(MakeLabel(Loc.Tip($"guide.nature.{natureKey}.desc"), CardInner(width), TextPrimary));
+            card.Controls.Add(MakeLabel(Loc.Tip($"guide.nature.{natureKey}.desc"), inner, TextPrimary));
             if (s.IsHistoryPreservingTable)
-                card.Controls.Add(MakeLabel(Loc.Tip("guide.nature.history.desc"), CardInner(width), TextMuted));
+                card.Controls.Add(MakeLabel(Loc.Tip("guide.nature.history.desc"), inner, TextMuted));
             AddRow(card);
         }
+
+        // ---- Bottom convenience collapse link ----
+        AddRow(BuildInspectToggle(width, PaneBack, topMargin: 0));
+    }
+
+    private static Label BuildRolePill(CellGuideSnapshot s)
+    {
+        string key;
+        (Color Back, Color Fore) colors;
+        if (s.IsStrictlyCalculated || (s.HasExcelFormula && !s.IsReadOnly)) { key = "guide.role.calculated"; colors = BadgeCalculated; }
+        else if (s.IsReadOnly)
+        {
+            if (!IsStaffIdentityColumn(s.ColumnHeader) &&
+                ResolveColumnLocKey(s.TableName, s.ColumnHeader, "source") is { } sourceKey &&
+                Loc.TryTip(sourceKey, out string evalSource) && !string.IsNullOrWhiteSpace(evalSource))
+            { key = "guide.role.calculated"; colors = BadgeCalculated; }
+            else { key = "guide.role.readonly"; colors = BadgeLocked; }
+        }
+        else if (s.IsRequired) { key = "guide.role.required"; colors = BadgeRequired; }
+        else { key = "guide.role.input"; colors = BadgeDropdown; }
+
+        var pill = MakeBadge(Loc.Tip(key), colors);
+        pill.Tag = TooltipTag(key);
+        return pill;
+    }
+
+    private LinkLabel BuildInspectToggle(int width, Color back, int topMargin)
+    {
+        var link = new LinkLabel
+        {
+            Text = Loc.Tip(_showDetailedInspect ? "guide.inspect.hide" : "guide.inspect.show"),
+            AutoSize = true,
+            MaximumSize = new Size(width, 0),
+            BackColor = back,
+            LinkColor = Accent,
+            ActiveLinkColor = Accent,
+            LinkBehavior = LinkBehavior.HoverUnderline,
+            Font = new Font("Segoe UI", 8.5F, FontStyle.Regular, GraphicsUnit.Point),
+            Margin = new Padding(0, topMargin, 0, 4),
+            UseMnemonic = false,
+            Tag = TooltipTag(_showDetailedInspect ? "guide.inspect.hide" : "guide.inspect.show")
+        };
+        link.LinkClicked += OnInspectToggleClicked;
+        return link;
+    }
+
+    private void OnInspectToggleClicked(object? sender, LinkLabelLinkClickedEventArgs e)
+    {
+        _showDetailedInspect = !_showDetailedInspect;
+        MarkActive();
+        try { BeginInvoke(new Action(Render)); } catch { }
+    }
+
+    // =========================================================================
+    // 3b. SCREEN-PICKER LOCALIZATION TAGS ("tooltips::<key>")
+    // =========================================================================
+    private const string TooltipTagPrefix = "tooltips::";
+
+    private static string TooltipTag(string key) => TooltipTagPrefix + key;
+
+    /// <summary>
+    /// Resolves the dictionary key that supplies a column's name / desc: <c>col.&lt;table&gt;.&lt;col&gt;.&lt;suffix&gt;</c>
+    /// when it exists, else <c>col.&lt;col&gt;.&lt;suffix&gt;</c>. Null when the column header is blank.
+    /// </summary>
+    private static string? ResolveColumnLocKey(string? tableName, string? columnHeader, string suffix)
+    {
+        string normCol = NormalizeLocKeyPart(columnHeader);
+        if (normCol.Length == 0) return null;
+        string normTable = NormalizeLocKeyPart(tableName);
+        if (normTable.Length > 0)
+        {
+            string tableKey = $"col.{normTable}.{normCol}.{suffix}";
+            if (Loc.TryTip(tableKey, out _)) return tableKey;
+        }
+        return $"col.{normCol}.{suffix}";
+    }
+
+    private static bool IsStaffIdentityColumn(string? columnHeader) =>
+        NormalizeLocKeyPart(columnHeader) is "staffid" or "staffname";
+
+    /// <summary>Mirrors Loc's key normalization: lower-case ASCII letters and digits only ("Staff ID" -> "staffid").</summary>
+    private static string NormalizeLocKeyPart(string? raw)
+    {
+        if (string.IsNullOrWhiteSpace(raw)) return string.Empty;
+        var sb = new StringBuilder(raw.Length);
+        foreach (char ch in raw)
+        {
+            if ((ch >= 'a' && ch <= 'z') || (ch >= '0' && ch <= '9')) sb.Append(ch);
+            else if (ch >= 'A' && ch <= 'Z') sb.Append(char.ToLowerInvariant(ch));
+        }
+        return sb.ToString();
     }
 
     // =========================================================================
@@ -646,6 +961,43 @@ public class GuideTaskPaneControl : UserControl, IGuideTaskPaneControl
                 trigger = "offline";
                 builtInKey = "guide.spotlight.ctx.offline";
             }
+            else if (string.Equals(_snapshot.TableName, "DailyAttendanceTable", StringComparison.OrdinalIgnoreCase))
+            {
+                trigger = "daily_attendance";
+                builtInKey = "guide.spotlight.ctx.daily_attendance";
+            }
+            else if (string.Equals(_snapshot.TableName, "StaffSummaryTable", StringComparison.OrdinalIgnoreCase))
+            {
+                trigger = "staff_summary";
+                builtInKey = "guide.spotlight.ctx.staff_summary";
+            }
+            else if (string.Equals(_snapshot.TableName, "VehicleSummaryTable", StringComparison.OrdinalIgnoreCase))
+            {
+                trigger = "vehicle_summary";
+                builtInKey = "guide.spotlight.ctx.vehicle_summary";
+            }
+            else if (string.Equals(_snapshot.TableName, "ProjectSummaryTable", StringComparison.OrdinalIgnoreCase))
+            {
+                trigger = "project_summary";
+                builtInKey = "guide.spotlight.ctx.project_summary";
+            }
+            else if (string.Equals(_snapshot.TableName, "AttendanceEntriesTable", StringComparison.OrdinalIgnoreCase)
+                && (_snapshot.Zone == CellZone.Data
+                    || (_snapshot.Zone == CellZone.Header
+                        && string.Equals(_snapshot.ColumnHeader, "Date", StringComparison.OrdinalIgnoreCase))))
+            {
+                // Date header / Date cells explain the auto date filter; other data cells explain adding punches.
+                trigger = "attendance_entries";
+                builtInKey = string.Equals(_snapshot.ColumnHeader, "Date", StringComparison.OrdinalIgnoreCase)
+                    ? "guide.spotlight.ctx.attendance_entries_filter"
+                    : "guide.spotlight.ctx.attendance_entries_add";
+            }
+            else if (_snapshot.Zone == CellZone.OutsideTable
+                && string.Equals(_snapshot.SheetName, "Daily Schedule", StringComparison.OrdinalIgnoreCase))
+            {
+                trigger = "schedule_board";
+                builtInKey = "guide.spotlight.ctx.schedule_board";
+            }
             else if (_snapshot.Zone == CellZone.Total)
             {
                 trigger = "total";
@@ -722,7 +1074,7 @@ public class GuideTaskPaneControl : UserControl, IGuideTaskPaneControl
             }
         }
 
-        var allTipKeys = Loc.GetAllGeneralTipKeys(GeneralTipIds);
+        var allTipKeys = GetRotatingTipKeys();
         string generalKey = allTipKeys.Count > 0
             ? allTipKeys[Math.Abs(_tipIndex) % allTipKeys.Count]
             : $"guide.spotlight.gen.{GeneralTipIds[0]}";
@@ -753,7 +1105,9 @@ public class GuideTaskPaneControl : UserControl, IGuideTaskPaneControl
         header.Margin = new Padding(0, 0, 0, 3);
         card.Controls.Add(header);
 
-        card.Controls.Add(MakeLabel(Loc.Tip(tipKey), CardInner(width), TextPrimary));
+        var tipBody = MakeLabel(Loc.Tip(tipKey), CardInner(width), TextPrimary);
+        tipBody.Tag = TooltipTag(tipKey);
+        card.Controls.Add(tipBody);
 
         var footer = new FlowLayoutPanel
         {
@@ -820,7 +1174,7 @@ public class GuideTaskPaneControl : UserControl, IGuideTaskPaneControl
     {
         MarkActive();
         _preferGeneralTipForCurrentCell = true;
-        var allTipKeys = Loc.GetAllGeneralTipKeys(GeneralTipIds);
+        var allTipKeys = GetRotatingTipKeys();
         if (allTipKeys.Count > 0)
             _tipIndex = (_tipIndex + 1) % allTipKeys.Count;
         try { BeginInvoke(new Action(Render)); } catch { }
@@ -862,15 +1216,38 @@ public class GuideTaskPaneControl : UserControl, IGuideTaskPaneControl
         return label;
     }
 
-    private Control BuildBannerCard(string text, int width)
+    private static readonly Color BannerBack = Color.FromArgb(232, 240, 254);
+    private static readonly Color BannerFore = Color.FromArgb(23, 78, 166);
+
+    private Control BuildBannerCard(string bannerKey, int width)
     {
         var card = NewCard(width);
-        card.BackColor = Color.FromArgb(232, 240, 254);
-        card.Controls.Add(MakeLabel(text, CardInner(width), Color.FromArgb(23, 78, 166)));
+        card.BackColor = BannerBack;
+        var label = MakeLabel(Loc.Tip(bannerKey), CardInner(width), BannerFore);
+        label.Tag = TooltipTag(bannerKey);
+        card.Controls.Add(label);
         return card;
     }
 
-    private Control BuildContextStrip(CellGuideSnapshot s, int width)
+    /// <summary>Tinted in-card banner line (header / total zones inside the main field card).</summary>
+    private static Label MakeBannerLine(string bannerKey, int width)
+    {
+        var label = MakeLabel(Loc.Tip(bannerKey), width, BannerFore);
+        label.BackColor = BannerBack;
+        label.Padding = new Padding(6, 4, 6, 4);
+        label.Margin = new Padding(0, 6, 0, 2);
+        label.Tag = TooltipTag(bannerKey);
+        return label;
+    }
+
+    private static Label MakeMiniHeading(string text, int width)
+    {
+        var label = MakeLabel(text, width, TextPrimary, bold: true);
+        label.Margin = new Padding(0, 6, 0, 0);
+        return label;
+    }
+
+    private Control BuildContextStrip(CellGuideSnapshot s, int width, string? originalHeader = null)
     {
         var strip = new FlowLayoutPanel
         {
@@ -895,6 +1272,12 @@ public class GuideTaskPaneControl : UserControl, IGuideTaskPaneControl
             string natureKey = s.TableNature.Value == TableNature.Additive ? "additive" : "absolute";
             var colors = s.TableNature.Value == TableNature.Additive ? BadgeSync : BadgeDropdown;
             strip.Controls.Add(MakeBadge(Loc.Tip($"guide.nature.{natureKey}.name"), colors));
+        }
+
+        if (!string.IsNullOrWhiteSpace(originalHeader))
+        {
+            strip.SetFlowBreak(strip.Controls[strip.Controls.Count - 1], true);
+            strip.Controls.Add(MakeLabel(Loc.Tip("guide.label.originalHeader", originalHeader!), width, TextMuted));
         }
         return strip;
     }

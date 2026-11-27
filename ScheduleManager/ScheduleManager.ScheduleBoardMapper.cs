@@ -15,11 +15,14 @@ using SKSB_App.Core.WorkbookOpen.Sheet;
 using SKSB_App.Core.WorkbookSave.SheetMapper;
 
 /// <summary>
-/// Reads and renders the 'Daily Schedule' dispatch board: a dynamic number of three-column slots (B:D, E:G, H:J, ...),
+/// Reads and renders the 'Daily Schedule' dispatch board: a dynamic number of four-column slots (B:E, F:I, J:M, ...),
 /// one per active project of the shown date, for Day Work (rows 4-18) and Night Work (rows 20-34).
-///   row 4 / 20 : Project Code (+ requirement flag) | Premix Hole Amount | Project start time - end time
-///   workers    : Staff Name | Staff Skills (icons) | Check in and out Time        (10 rows: 5-14 / 21-30)
-///   vehicles   : Vehicle Plate | Vehicle Type (icon) | Current Odometer             (4 rows: 15-18 / 31-34)
+///   row 4 / 20 : Col 0 Project Code (+ requirement flag) | Col 1 Premix Hole Amount / Type icons | Col 2 Project Start Time | Col 3 Project End Time
+///   workers    : Col 0 Staff Name | Col 1 Staff Skills (icons) | Col 2 Effective Check-In | Col 3 Effective Check-Out   (10 rows: 5-14 / 21-30)
+///   vehicles   : Col 0 Vehicle Plate | Col 1 Vehicle Type (icon) | Col 2 Current Odometer | Col 3 blank                   (4 rows: 15-18 / 31-34)
+/// Project Start / End are real Excel time values: a manual time typed / picked by the user (kept in <see cref="_manualTimes"/>,
+/// persisted as <see cref="DailyProjectSchedule.ActualStartTime"/> / <see cref="DailyProjectSchedule.ActualEndTime"/>), else an
+/// auto fallback (latest check-in / earliest exit) drawn in amber with a "⚠" prefix that is never read back as manual.
 /// The template carries its own static labels; the board only writes the header row and the data blocks.
 /// The board is not a ListObject, so reads and writes are single 2D-array COM calls per block.
 /// </summary>
@@ -33,7 +36,7 @@ internal static class ScheduleBoardMapper
     internal const string DateCell = "A2";
     internal const string DayCell = "B2";
 
-    internal const int SlotWidth = 3;
+    internal const int SlotWidth = 4;
     internal const int FirstSlotColumn = 2;                 // B
     internal const int WorkerRowsPerBand = 10;
     internal const int VehicleRowsPerBand = 4;
@@ -45,7 +48,43 @@ internal static class ScheduleBoardMapper
 
     /// <summary>Slots currently drawn across the board (refreshed by <see cref="Read"/> / <see cref="Render"/>).</summary>
     private static int _slotCount = 1;
-    internal static void ResetSlotCount() => _slotCount = 1;
+    internal static void ResetSlotCount()
+    {
+        _slotCount = 1;
+        ClearManualTimes();
+    }
+
+    /// <summary>OLE (BGR) colour of auto-fallback times: RGB(180, 101, 0), a readable dark amber.</summary>
+    internal const int FallbackAmberColor = 0x0065B4;
+
+    private const string TimeFormat = "hh:mm";
+    private static readonly string FallbackTimeFormat = $"\"{AttendanceRollupService.FallbackIcon} \"hh:mm";
+    private const string ClearTimeToken = "__CLEAR_TIME__";
+    private const string ClearTimeDisplay = "✕ Clear (Use Auto Fallback)";
+
+    /// <summary>
+    /// Manual project Start / End per (band, project) for the shown date. The board cells also show auto-fallback times,
+    /// so <see cref="Read"/> takes manual times from here only - an amber fallback is never promoted to a manual override.
+    /// Hydrated on a date load (<see cref="Render"/> with autoPopulate), edited by <see cref="CommitManualTimeEdit"/> /
+    /// <see cref="ApplyProjectTimePick"/>.
+    /// </summary>
+    private static readonly Dictionary<(Shifts Shift, string ProjectId), (TimeOnly? Start, TimeOnly? End)> _manualTimes = new();
+
+    private static string TimeKey(string? projectId) => (projectId ?? string.Empty).Trim().ToUpperInvariant();
+
+    internal static void ClearManualTimes() => _manualTimes.Clear();
+
+    private static (TimeOnly? Start, TimeOnly? End) ManualTimesFor(Shifts shift, string projectId) =>
+        _manualTimes.TryGetValue((shift, TimeKey(projectId)), out var t) ? t : (null, null);
+
+    private static void SetManualTime(Shifts shift, string projectId, bool isStart, TimeOnly? value)
+    {
+        var key = (shift, TimeKey(projectId));
+        var current = _manualTimes.TryGetValue(key, out var t) ? t : (Start: (TimeOnly?)null, End: (TimeOnly?)null);
+        current = isStart ? (value, current.End) : (current.Start, value);
+        if (current.Start == null && current.End == null) _manualTimes.Remove(key);
+        else _manualTimes[key] = current;
+    }
 
     /// <summary>Raw value of the "✕ Remove Slot" Project Header option.</summary>
     private const string RemoveSlotToken = "__REMOVE_SLOT__";
@@ -86,7 +125,7 @@ internal static class ScheduleBoardMapper
     private const string PremixHoleFormat = "[=1]0 \"Hole\";0 \"Holes\"";
     private const string EmptyOdometerDash = "—";
 
-    internal enum CellKind { None, Header, Premix, Worker, WorkerSkill, Vehicle, VehicleType }
+    internal enum CellKind { None, Header, Premix, Worker, WorkerSkill, Vehicle, VehicleType, ProjectStart, ProjectEnd }
     internal readonly record struct CellLocation(CellKind Kind, Shifts Shift, int Slot, int Row);
 
     internal static CellLocation Locate(int row, int column)
@@ -102,6 +141,8 @@ internal static class ScheduleBoardMapper
             {
                 if (within == 0) return new(CellKind.Header, b.Shift, slot, row);
                 if (within == 1) return new(CellKind.Premix, b.Shift, slot, row);
+                if (within == 2) return new(CellKind.ProjectStart, b.Shift, slot, row);
+                if (within == 3) return new(CellKind.ProjectEnd, b.Shift, slot, row);
             }
             if (row >= b.FirstWorkerRow && row <= b.LastWorkerRow)
             {
@@ -283,6 +324,13 @@ internal static class ScheduleBoardMapper
                     ProjectID = projectId,
                     PremixHoles = Roster.SupportsPremixHoles(projectId) ? ParsePremixHoles(Text(grid, band.HeaderRow, col + 1)) : 0
                 };
+                if (projectId.Length > 0)
+                {
+                    // Manual times only (never the amber auto-fallback values drawn in the cells).
+                    var manual = ManualTimesFor(band.Shift, projectId);
+                    record.ActualStartTime = manual.Start;
+                    record.ActualEndTime = manual.End;
+                }
 
                 for (int r = band.FirstWorkerRow; r <= band.LastWorkerRow; r++)
                 {
@@ -295,7 +343,8 @@ internal static class ScheduleBoardMapper
                     if (plate.Length > 0 && !PlaceholderTexts.Contains(plate)) record.Vehicles.Add(plate);
                 }
 
-                if (record.ProjectID.Length > 0 || record.Workers.Count > 0 || record.Vehicles.Count > 0 || record.PremixHoles > 0)
+                if (record.ProjectID.Length > 0 || record.Workers.Count > 0 || record.Vehicles.Count > 0 || record.PremixHoles > 0
+                    || record.ActualStartTime.HasValue || record.ActualEndTime.HasValue)
                     result.Add(record);
             }
         }
@@ -515,7 +564,17 @@ internal static class ScheduleBoardMapper
     internal static void Render(object wsObj, DateOnly date, IReadOnlyList<DailyProjectSchedule> slots, IReadOnlyList<AttendanceEntry> entries, bool autoPopulate = false)
     {
         dynamic ws = wsObj;
-        string cutOffText = BoardContext.LateCutOff.ToString("HH:mm", CultureInfo.InvariantCulture);
+
+        // A date load re-seeds the manual project times from the saved rows (live refreshes keep the in-memory edits).
+        if (autoPopulate)
+        {
+            ClearManualTimes();
+            foreach (var s in slots.Where(s => !string.IsNullOrWhiteSpace(s.ProjectID)))
+            {
+                if (s.ActualStartTime.HasValue) SetManualTime(s.Shift, s.ProjectID, isStart: true, s.ActualStartTime);
+                if (s.ActualEndTime.HasValue) SetManualTime(s.Shift, s.ProjectID, isStart: false, s.ActualEndTime);
+            }
+        }
 
         var layouts = Bands.ToDictionary(b => b.Shift, b => LayoutSlots(b.Shift, date, slots, autoPopulate));
 
@@ -532,7 +591,16 @@ internal static class ScheduleBoardMapper
         {
             var layout = layouts[band.Shift];
             for (int i = 0; i < layout.Count; i++)
-                board.Add(new DailyProjectSchedule { DailyScheduleDate = date, Shift = band.Shift, SlotIndex = i, ProjectID = layout[i].ProjectID, Workers = layout[i].Workers, Vehicles = layout[i].Vehicles });
+            {
+                var manual = ManualTimesFor(band.Shift, layout[i].ProjectID);
+                board.Add(new DailyProjectSchedule
+                {
+                    DailyScheduleDate = date, Shift = band.Shift, SlotIndex = i, ProjectID = layout[i].ProjectID,
+                    Workers = layout[i].Workers, Vehicles = layout[i].Vehicles,
+                    ActualStartTime = manual.Start ?? layout[i].ActualStartTime,
+                    ActualEndTime = manual.End ?? layout[i].ActualEndTime
+                });
+            }
         }
 
         // Blank-project (thumbprint-only) punches are attributed in memory to the worker's on-board planned project.
@@ -563,14 +631,29 @@ internal static class ScheduleBoardMapper
             var vehicles = new object?[VehicleRowsPerBand, cols];
             var headerComments = new string?[slotCount];
             var typeComments = new string?[slotCount];
-            var windowComments = new string?[slotCount];
+            var startComments = new string?[slotCount];
+            var endComments = new string?[slotCount];
+            var startFallback = new bool[slotCount];
+            var endFallback = new bool[slotCount];
             var workerComments = new string?[WorkerRowsPerBand, slotCount];
             var vehicleComments = new string?[VehicleRowsPerBand, slotCount];
+            var inFormats = new string?[WorkerRowsPerBand, slotCount];
+            var outFormats = new string?[WorkerRowsPerBand, slotCount];
+            var inFallback = new bool[WorkerRowsPerBand, slotCount];
+            var outFallback = new bool[WorkerRowsPerBand, slotCount];
+            var inNotes = new string?[WorkerRowsPerBand, slotCount];
+            var outNotes = new string?[WorkerRowsPerBand, slotCount];
 
             for (int slot = 0; slot < slotCount; slot++)
             {
                 var data = slot < layout.Count ? layout[slot] : new DailyProjectSchedule { DailyScheduleDate = date, Shift = band.Shift };
                 int c0 = slot * SlotWidth;
+
+                // Same manual-time resolution as the laid-out board above (in-memory edits win over the loaded row).
+                var manual = ManualTimesFor(band.Shift, data.ProjectID);
+                ProjectWindow? window = data.ProjectID.Length > 0
+                    ? AttendanceRollupService.WindowFor(data.ProjectID, spans, manual.Start ?? data.ActualStartTime, manual.End ?? data.ActualEndTime, BoardContext.DayStartTime)
+                    : null;
                 SlotContext? slotContext = data.Workers.Count > 0
                     ? ReadSlotContext(board, date, new CellLocation(CellKind.Worker, band.Shift, slot, 0))
                     : null;
@@ -593,9 +676,20 @@ internal static class ScheduleBoardMapper
 
                     workers[i, c0] = name;
                     workers[i, c0 + 1] = string.Join(" ", skills.Select(BoardContext.IconFor).Where(s => s.Length > 0));
-                    workers[i, c0 + 2] = staff != null && data.ProjectID.Length > 0 && spans.TryGetValue((staff.Id, data.ProjectID), out var list) && list.Count > 0
-                        ? FormatSpan(list[0].In, list.Any(s => s.Out == null) ? null : list.Max(s => s.Out))
-                        : FormatSpan(null, null);
+                    var resolved = staff != null && window != null
+                        ? AttendanceRollupService.ResolveWorkerProjectSpan(staff.Id, data.ProjectID, spans, window)
+                        : null;
+                    if (resolved != null)
+                    {
+                        workers[i, c0 + 2] = resolved.EffectiveIn.ToTimeSpan().TotalDays;
+                        workers[i, c0 + 3] = resolved.EffectiveOut.HasValue ? resolved.EffectiveOut.Value.ToTimeSpan().TotalDays : null;
+                        inFormats[i, slot] = resolved.InFormat;
+                        outFormats[i, slot] = resolved.OutFormat;
+                        inFallback[i, slot] = resolved.InIsFallback;
+                        outFallback[i, slot] = resolved.OutIsFallback;
+                        inNotes[i, slot] = resolved.InNote;
+                        outNotes[i, slot] = resolved.OutNote;
+                    }
                 }
 
                 // Keep pending skill filters (Staff Skills set, Staff Name still empty) on unassigned rows,
@@ -644,13 +738,20 @@ internal static class ScheduleBoardMapper
                     }
                 }
 
-                var h = BuildHeader(data, spans, assignedSkills, vehicleTypes);
+                var h = BuildHeader(data, assignedSkills, vehicleTypes);
                 header[0, c0] = h.Text;
                 header[0, c0 + 1] = FormatPremixCell(data);
-                header[0, c0 + 2] = h.Window;
                 headerComments[slot] = h.Comment;
                 typeComments[slot] = BuildProjectTypeComment(data);
-                windowComments[slot] = h.WindowComment;
+                if (window != null)
+                {
+                    header[0, c0 + 2] = window.Start.HasValue ? window.Start.Value.ToTimeSpan().TotalDays : null;
+                    header[0, c0 + 3] = window.End.HasValue ? window.End.Value.ToTimeSpan().TotalDays : null;
+                    startComments[slot] = window.StartNote;
+                    endComments[slot] = window.EndNote;
+                    startFallback[slot] = window.StartIsFallback;
+                    endFallback[slot] = window.EndIsFallback;
+                }
             }
 
             WriteBlock(ws, band.HeaderRow, band.HeaderRow, header);
@@ -661,9 +762,32 @@ internal static class ScheduleBoardMapper
             for (int slot = 0; slot < slotCount; slot++)
                 for (int i = 0; i < WorkerRowsPerBand; i++)
                 {
-                    if (string.IsNullOrEmpty(workerComments[i, slot])) continue;
-                    try { ApplySizedComment(ws.Cells[band.FirstWorkerRow + i, SlotColumn(slot)], workerComments[i, slot]!); } catch { }
+                    if (!string.IsNullOrEmpty(workerComments[i, slot]))
+                        try { ApplySizedComment(ws.Cells[band.FirstWorkerRow + i, SlotColumn(slot)], workerComments[i, slot]!); } catch { }
+                    if (!string.IsNullOrEmpty(inNotes[i, slot]))
+                        try { ApplySizedComment(ws.Cells[band.FirstWorkerRow + i, SlotColumn(slot) + 2], inNotes[i, slot]!); } catch { }
+                    if (!string.IsNullOrEmpty(outNotes[i, slot]))
+                        try { ApplySizedComment(ws.Cells[band.FirstWorkerRow + i, SlotColumn(slot) + 3], outNotes[i, slot]!); } catch { }
                 }
+
+            // Effective check-in / check-out: source-icon NumberFormats, amber font on auto-fallback times.
+            for (int slot = 0; slot < slotCount; slot++)
+            {
+                try
+                {
+                    dynamic timeBlock = ws.Range[ws.Cells[band.FirstWorkerRow, SlotColumn(slot) + 2], ws.Cells[band.LastWorkerRow, SlotColumn(slot) + 3]];
+                    try { timeBlock.NumberFormat = TimeFormat; } catch { }
+                    try { timeBlock.Font.ColorIndex = -4105; } catch { }
+                }
+                catch { }
+                for (int i = 0; i < WorkerRowsPerBand; i++)
+                {
+                    if (!string.IsNullOrEmpty(inFormats[i, slot]) || inFallback[i, slot])
+                        StyleTimeCell(ws.Cells[band.FirstWorkerRow + i, SlotColumn(slot) + 2], inFormats[i, slot], inFallback[i, slot]);
+                    if (!string.IsNullOrEmpty(outFormats[i, slot]) || outFallback[i, slot])
+                        StyleTimeCell(ws.Cells[band.FirstWorkerRow + i, SlotColumn(slot) + 3], outFormats[i, slot], outFallback[i, slot]);
+                }
+            }
 
             try { ws.Range[ws.Cells[band.FirstVehicleRow, FirstSlotColumn], ws.Cells[band.LastVehicleRow, FirstSlotColumn + cols - 1]].ClearComments(); } catch { }
             for (int slot = 0; slot < slotCount; slot++)
@@ -681,8 +805,14 @@ internal static class ScheduleBoardMapper
                     try { ApplySizedComment(ws.Cells[band.HeaderRow, SlotColumn(slot)], headerComments[slot]!); } catch { /* comments are advisory */ }
                 if (!string.IsNullOrEmpty(typeComments[slot]))
                     try { ApplySizedComment(ws.Cells[band.HeaderRow, SlotColumn(slot) + 1], typeComments[slot]!); } catch { }
-                if (!string.IsNullOrEmpty(windowComments[slot]))
-                    try { ApplySizedComment(ws.Cells[band.HeaderRow, SlotColumn(slot) + 2], windowComments[slot]!); } catch { }
+
+                // Project Start / End: plain "hh:mm" when manual (or empty), "⚠ hh:mm" in amber when auto-filled.
+                StyleTimeCell(ws.Cells[band.HeaderRow, SlotColumn(slot) + 2], startFallback[slot] ? FallbackTimeFormat : TimeFormat, startFallback[slot]);
+                StyleTimeCell(ws.Cells[band.HeaderRow, SlotColumn(slot) + 3], endFallback[slot] ? FallbackTimeFormat : TimeFormat, endFallback[slot]);
+                if (!string.IsNullOrEmpty(startComments[slot]))
+                    try { ApplySizedComment(ws.Cells[band.HeaderRow, SlotColumn(slot) + 2], startComments[slot]!); } catch { }
+                if (!string.IsNullOrEmpty(endComments[slot]))
+                    try { ApplySizedComment(ws.Cells[band.HeaderRow, SlotColumn(slot) + 3], endComments[slot]!); } catch { }
             }
         }
 
@@ -697,12 +827,20 @@ internal static class ScheduleBoardMapper
         var headerCells = new HashSet<(int Row, int Col)>(DuplicateProjectSlots(board)
             .Select(d => (Bands.First(b => b.Shift == d.Shift).HeaderRow, SlotColumn(d.Slot))));
 
-        EnsureConditionalFormats(ws, cutOffText, slotCount, workerCells, headerCells);
+        EnsureConditionalFormats(ws, slotCount, workerCells, headerCells);
+    }
+
+    /// <summary>Sets a time cell's NumberFormat (default "hh:mm") and its font: amber when auto-fallback, automatic otherwise.</summary>
+    internal static void StyleTimeCell(dynamic cell, string? numberFormat, bool isFallback)
+    {
+        try { cell.NumberFormat = string.IsNullOrEmpty(numberFormat) ? TimeFormat : numberFormat; } catch { }
+        if (isFallback) { try { cell.Font.Color = FallbackAmberColor; } catch { } }
+        else { try { cell.Font.ColorIndex = -4105; } catch { } }
     }
 
     // Excel does not reflow AutoSize for hidden comments while ScreenUpdating = false, so the box
     // is sized deterministically from text metrics (points), padded for >100% DPI font scaling.
-    private static void ApplySizedComment(dynamic cell, string text)
+    internal static void ApplySizedComment(dynamic cell, string text)
     {
         string normalized = text.Replace("\r\n", "\n");
         dynamic comment = cell.AddComment(normalized);
@@ -810,13 +948,6 @@ internal static class ScheduleBoardMapper
         return null;
     }
 
-    private static string FormatSpan(TimeOnly? start, TimeOnly? end)
-    {
-        string s = start.HasValue ? start.Value.ToString("HH:mm", CultureInfo.InvariantCulture) : "No Start";
-        string e = end.HasValue ? end.Value.ToString("HH:mm", CultureInfo.InvariantCulture) : "No End";
-        return $"{s} - {e}";
-    }
-
     private static string TypeText(VehicleType type) =>
         $"{BoardContext.IconFor(type)} {type.ToString().Replace('_', ' ')}".Trim();
 
@@ -843,16 +974,11 @@ internal static class ScheduleBoardMapper
         return skills;
     }
 
-    // ---- header: "CODE ⚠" + derived "HH:mm - HH:mm" window + requirements note --------------------
-    private static (string Text, string? Window, string? Comment, string? WindowComment) BuildHeader(
-        DailyProjectSchedule data,
-        Dictionary<(long StaffId, string ProjectId), List<WorkerProjectSpan>> spans,
-        List<string> assignedSkills, List<VehicleType> assignedVehicleTypes)
+    // ---- header: "CODE ⚠" + requirements note (Start / End live in their own columns) -----------
+    private static (string Text, string? Comment) BuildHeader(
+        DailyProjectSchedule data, List<string> assignedSkills, List<VehicleType> assignedVehicleTypes)
     {
-        if (data.ProjectID.Length == 0) return (EmptyHeaderText, null, null, null);
-
-        var window = AttendanceRollupService.WindowFor(data.ProjectID, spans);
-        string windowText = FormatSpan(window.Start, window.End);
+        if (data.ProjectID.Length == 0) return (EmptyHeaderText, null);
 
         var info = Roster.FindProject(data.ProjectID);
         var (reqSkills, reqVehicles) = BoardContext.RequirementsFor(info?.Types ?? Array.Empty<ProjectType>());
@@ -870,7 +996,7 @@ internal static class ScheduleBoardMapper
             comment = sb.ToString();
         }
 
-        return ($"{data.ProjectID}{(unmet ? " ⚠" : string.Empty)}", windowText, comment, BuildWindowComment(window));
+        return ($"{data.ProjectID}{(unmet ? " ⚠" : string.Empty)}", comment);
     }
 
     private static string? BuildProjectTypeComment(DailyProjectSchedule data)
@@ -896,34 +1022,6 @@ internal static class ScheduleBoardMapper
         return string.Join("\n", lines);
     }
 
-    private static string? BuildWindowComment(ProjectWindow window)
-    {
-        if (!window.Start.HasValue && !window.End.HasValue) return null;
-
-        var lines = new List<string>();
-        if (window.Start.HasValue)
-            lines.Add($"Start: {window.Start.Value.ToString("HH:mm", CultureInfo.InvariantCulture)} (earliest check-in: {(window.StartWorkers.Count > 0 ? string.Join(", ", window.StartWorkers) : "-")})");
-
-        if (window.End.HasValue)
-        {
-            var formatted = window.EndContributors.Select(c =>
-                c.OutEntryType == AttendanceEntryType.CheckIn && !string.IsNullOrWhiteSpace(c.OutProject)
-                    ? $"{c.WorkerName} -> {c.OutProject}"
-                    : c.WorkerName).ToList();
-            string reason = window.EndContributors.Count > 0 && window.EndContributors.All(c => c.OutEntryType == AttendanceEntryType.CheckIn)
-                ? "latest project switch"
-                : window.EndContributors.Any(c => c.OutEntryType == AttendanceEntryType.CheckIn)
-                    ? "latest exit"
-                    : "latest check-out";
-            lines.Add($"End: {window.End.Value.ToString("HH:mm", CultureInfo.InvariantCulture)} ({reason}: {string.Join(", ", formatted)})");
-        }
-        else
-        {
-            lines.Add($"End: No End (still checked in: {(window.OpenWorkers.Count > 0 ? string.Join(", ", window.OpenWorkers) : "-")})");
-        }
-        return string.Join("\n", lines);
-    }
-
     // =========================================================================
     // 6. CONDITIONAL FORMATS (duplicate worker = red, late check-in = amber)
     // =========================================================================
@@ -938,10 +1036,11 @@ internal static class ScheduleBoardMapper
         catch (Exception ex) { AppLogger.Warn($"[ScheduleBoard] duplicate highlight rule failed: {ex.Message}"); }
     }
 
-    private static void EnsureConditionalFormats(dynamic ws, string cutOffText, int slotCount,
+    private static void EnsureConditionalFormats(dynamic ws, int slotCount,
         HashSet<(int Row, int Col)> workerCells, HashSet<(int Row, int Col)> headerCells)
     {
         const int xlExpression = 2;
+        var cutOff = BoardContext.LateCutOff;
         foreach (var band in Bands)
         {
             // Duplicate project headers: clear the header row rules, then flag only the conflicting header cells.
@@ -957,7 +1056,8 @@ internal static class ScheduleBoardMapper
             for (int slot = 0; slot < slotCount; slot++)
             {
                 string nameCol = ColumnLetter(SlotColumn(slot));
-                string timeCol = ColumnLetter(SlotColumn(slot) + 2);
+                string inCol = ColumnLetter(SlotColumn(slot) + 2);
+                string outCol = ColumnLetter(SlotColumn(slot) + 3);
 
                 // Duplicate worker: clear stale rules, then flag only the conflicting name cells.
                 try
@@ -969,13 +1069,19 @@ internal static class ScheduleBoardMapper
                 for (int r = band.FirstWorkerRow; r <= band.LastWorkerRow; r++)
                     if (workerCells.Contains((r, SlotColumn(slot)))) AddDuplicateHighlight(ws, r, SlotColumn(slot));
 
+                // Effective In / Out are real time values now: clear stale rules on both (also left over from the
+                // 3-column layout), then flag a late Day Work check-in on the In column only. A late check-in always
+                // keeps the worker's own punch, so this never overlaps the amber auto-fallback font.
+                try { ws.Range[$"{inCol}{band.FirstWorkerRow}:{outCol}{band.LastWorkerRow}"].FormatConditions.Delete(); }
+                catch (Exception ex) { AppLogger.Warn($"[ScheduleBoard] clearing time rules failed: {ex.Message}"); }
+
                 if (band.Shift != Shifts.Morning) continue;
                 try
                 {
-                    dynamic times = ws.Range[$"{timeCol}{band.FirstWorkerRow}:{timeCol}{band.LastWorkerRow}"];
-                    times.FormatConditions.Delete();
-                    string first = $"{timeCol}{band.FirstWorkerRow}";
-                    dynamic late = times.FormatConditions.Add(xlExpression, Type.Missing, $"=AND(LEN({first})>=5,ISNUMBER(--LEFT({first},2)),LEFT({first},5)>\"{cutOffText}\")");
+                    dynamic times = ws.Range[$"{inCol}{band.FirstWorkerRow}:{inCol}{band.LastWorkerRow}"];
+                    string first = $"{inCol}{band.FirstWorkerRow}";
+                    dynamic late = times.FormatConditions.Add(xlExpression, Type.Missing,
+                        $"=AND(ISNUMBER({first}),{first}>TIME({cutOff.Hour},{cutOff.Minute},0))");
                     late.Interior.Color = 10284031;  // RGB(255,235,156)
                     late.Font.Color = 22428;         // RGB(156,87,0)
                 }
@@ -1009,7 +1115,8 @@ internal static class ScheduleBoardMapper
         if (col > LastBoardColumn && IsBoardArea(row, col)) _slotCount = Math.Max(_slotCount, DetectSlotCount((object)cell.Worksheet));
 
         var loc = Locate(row, col);
-        return loc.Kind is CellKind.Header or CellKind.Worker or CellKind.WorkerSkill or CellKind.Vehicle or CellKind.VehicleType;
+        return loc.Kind is CellKind.Header or CellKind.Worker or CellKind.WorkerSkill or CellKind.Vehicle or CellKind.VehicleType
+            or CellKind.ProjectStart or CellKind.ProjectEnd;
     }
 
     private static CustomDropdownResult? BuildDropdown(dynamic cell)
@@ -1038,9 +1145,201 @@ internal static class ScheduleBoardMapper
             case CellKind.VehicleType:
                 return BuildVehicleTypeDropdown(ws, date, loc);
 
+            case CellKind.ProjectStart:
+            case CellKind.ProjectEnd:
+                return BuildProjectTimeDropdown(ws, date, loc, loc.Kind == CellKind.ProjectStart);
+
             default:
                 return null;
         }
+    }
+
+    // ---- Project Start / End -------------------------------------------------------------------
+    /// <summary>
+    /// Project Start / End picks: "✕ Clear (Use Auto Fallback)" (only while a manual time is set), the punch times of the
+    /// staff checked into the project (latest check-in / earliest exit marked), then the band's default and standard
+    /// 30-minute times. Returns null for a slot without a project.
+    /// </summary>
+    private static CustomDropdownResult? BuildProjectTimeDropdown(object wsObj, DateOnly date, CellLocation loc, bool isStart)
+    {
+        var band = Bands.FirstOrDefault(b => b.Shift == loc.Shift);
+        if (band == null) return null;
+        string projectId = SlotProjectId(wsObj, band, loc.Slot);
+        if (projectId.Length == 0) return null;
+
+        var options = new List<DropdownOption>();
+        var listed = new HashSet<TimeOnly>();
+        int rank = 0;
+
+        var manual = ManualTimesFor(loc.Shift, projectId);
+        if ((isStart ? manual.Start : manual.End).HasValue)
+            options.Add(new DropdownOption { Display = ClearTimeDisplay, Raw = ClearTimeToken, Section = rank++ });
+
+        // Section 1: punch times of the staff on this project.
+        try
+        {
+            var spans = AttendanceRollupService.BuildSpans(ReadEntries(wsObj), date, BoardContext.DayStartTime,
+                BoardContext.NextDayStartTime, Read(wsObj, date), BoardContext.OTStartTime);
+            string key = AttendanceRollupService.NormalizeProjectId(projectId);
+            var punches = spans.Where(kv => kv.Key.ProjectId.Equals(key, StringComparison.OrdinalIgnoreCase))
+                .SelectMany(kv => kv.Value.Select(sp => (Name: Roster.NameOf(kv.Key.StaffId, $"#{kv.Key.StaffId}"), Span: sp)))
+                .ToList();
+
+            var times = isStart
+                ? punches.Select(p => (Time: p.Span.In, Offset: p.Span.InOffset, p.Name)).ToList()
+                : punches.Where(p => p.Span.Out.HasValue && p.Span.OutOffset.HasValue)
+                         .Select(p => (Time: p.Span.Out!.Value, Offset: p.Span.OutOffset!.Value, p.Name)).ToList();
+
+            if (times.Count > 0)
+            {
+                // Start: latest check-in first (the auto fallback); End: earliest exit first.
+                var groups = times.GroupBy(t => t.Time)
+                    .Select(g => (Time: g.Key, Offset: g.Min(x => x.Offset), Names: g.Select(x => x.Name).Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(n => n, StringComparer.OrdinalIgnoreCase).ToList()))
+                    .ToList();
+                groups = isStart ? groups.OrderByDescending(g => g.Offset).ToList() : groups.OrderBy(g => g.Offset).ToList();
+                for (int i = 0; i < groups.Count; i++)
+                {
+                    var g = groups[i];
+                    string tag = i == 0 ? (isStart ? " (latest)" : " (earliest)") : string.Empty;
+                    if (listed.Add(g.Time))
+                        options.Add(new DropdownOption { Display = $"{Hm(g.Time)} — {string.Join(", ", g.Names)}{tag}", Raw = Hm(g.Time), Section = rank++ });
+                }
+            }
+        }
+        catch (Exception ex) { AppLogger.Warn($"[ScheduleBoard] project time punch options failed: {ex.Message}"); }
+
+        // Section 2: band default, then standard 30-minute times.
+        bool night = loc.Shift == Shifts.Night;
+        (TimeOnly def, int fromMin, int toMin) = (night, isStart) switch
+        {
+            (false, true) => (new TimeOnly(9, 0), 7 * 60, 12 * 60),
+            (false, false) => (new TimeOnly(18, 0), 16 * 60, (23 * 60) + 30),
+            (true, true) => (new TimeOnly(20, 0), 19 * 60, (23 * 60) + 30),
+            (true, false) => (new TimeOnly(6, 0), 0, 8 * 60)
+        };
+        if (listed.Add(def))
+            options.Add(new DropdownOption { Display = $"{Hm(def)} (Default)", Raw = Hm(def), Section = rank++ });
+        for (int m = fromMin; m <= toMin; m += 30)
+        {
+            var t = new TimeOnly(m / 60, m % 60);
+            if (listed.Add(t))
+                options.Add(new DropdownOption { Display = Hm(t), Raw = Hm(t), Section = rank++ });
+        }
+
+        return new CustomDropdownResult(options, (c, opt) => ApplyProjectTimePick(c, loc, projectId, isStart, opt.Raw));
+    }
+
+    /// <summary>Stores the picked manual time (or clears it) and writes the time value so the change observer refreshes cleanly.</summary>
+    private static void ApplyProjectTimePick(dynamic cell, CellLocation loc, string projectId, bool isStart, string raw)
+    {
+        if (raw == ClearTimeToken)
+        {
+            SetManualTime(loc.Shift, projectId, isStart, null);
+            cell.Value2 = null;
+            return;
+        }
+        if (!TryParseTime(raw, out var t)) return;
+        SetManualTime(loc.Shift, projectId, isStart, t);
+        cell.Value2 = t.ToTimeSpan().TotalDays;
+        try { cell.NumberFormat = TimeFormat; } catch { }
+    }
+
+    /// <summary>True when (row, col) is a project-header Start / End cell (re-detects the board width when needed).</summary>
+    internal static bool IsProjectTimeCell(object wsObj, int row, int col, out CellLocation loc)
+    {
+        if (col > LastBoardColumn && IsBoardArea(row, col)) _slotCount = Math.Max(_slotCount, DetectSlotCount(wsObj));
+        loc = Locate(row, col);
+        return loc.Kind is CellKind.ProjectStart or CellKind.ProjectEnd;
+    }
+
+    /// <summary>
+    /// Commits a typed / cleared Project Start / End cell into <see cref="_manualTimes"/> (macro thread). Blank reverts
+    /// that side to the auto fallback; an unparseable value is ignored. False when the cell is not a time cell or the
+    /// slot has no project.
+    /// </summary>
+    internal static bool CommitManualTimeEdit(object wsObj, int row, int col)
+    {
+        try
+        {
+            if (!IsProjectTimeCell(wsObj, row, col, out var loc)) return false;
+            var band = Bands.FirstOrDefault(b => b.Shift == loc.Shift);
+            if (band == null) return false;
+            string projectId = SlotProjectId(wsObj, band, loc.Slot);
+            if (projectId.Length == 0) return false;
+
+            bool isStart = loc.Kind == CellKind.ProjectStart;
+            dynamic ws = wsObj;
+            object? raw = ws.Cells[row, col].Value2;
+            if (raw == null || string.IsNullOrWhiteSpace(raw.ToString()))
+            {
+                SetManualTime(loc.Shift, projectId, isStart, null);
+                return true;
+            }
+
+            TimeOnly t;
+            bool ok = raw is double d ? TryFromOADate(d, out t) : TryParseTime(raw.ToString()!, out t);
+            if (ok) SetManualTime(loc.Shift, projectId, isStart, t);
+            else AppLogger.Warn($"[ScheduleBoard] '{raw}' is not a valid time for {projectId} {(isStart ? "Start" : "End")}; ignored.");
+            return true;
+        }
+        catch (Exception ex)
+        {
+            AppLogger.Warn($"[ScheduleBoard] committing project time failed: {ex.Message}");
+            return false;
+        }
+    }
+
+    private static string SlotProjectId(object wsObj, Band band, int slot)
+    {
+        try
+        {
+            dynamic ws = wsObj;
+            return ParseProjectCode((ws.Cells[band.HeaderRow, SlotColumn(slot)].Value2 as object)?.ToString() ?? string.Empty);
+        }
+        catch { return string.Empty; }
+    }
+
+    private static List<AttendanceEntry> ReadEntries(object wsObj)
+    {
+        dynamic ws = wsObj;
+        object wbObj = ws.Parent;
+        dynamic? entriesSheet = SheetMapperHelper.ResolveSheetSafely(wbObj, SheetMapper.EntriesAliases, "Attendance Entries");
+        return entriesSheet != null
+            ? TableMapper.ExtractFromTable<AttendanceEntry>((object)entriesSheet!, SheetMapper.EntriesTableName)
+            : new List<AttendanceEntry>();
+    }
+
+    private static string Hm(TimeOnly t) => t.ToString("HH:mm", CultureInfo.InvariantCulture);
+
+    /// <summary>Time of day from an Excel serial (the fractional day; the date part is ignored).</summary>
+    private static bool TryFromOADate(double d, out TimeOnly time)
+    {
+        time = default;
+        double frac = d - Math.Floor(d);
+        if (double.IsNaN(frac) || frac < 0 || frac >= 1) return false;
+        long ticks = (long)Math.Round(frac * TimeSpan.TicksPerDay / TimeSpan.TicksPerMinute) * TimeSpan.TicksPerMinute;
+        time = new TimeOnly(ticks % TimeSpan.TicksPerDay);
+        return true;
+    }
+
+    /// <summary>Accepts "HH:mm", "H:mm", "HHmm" ("0900", "1800"), and anything <see cref="TimeOnly"/> / <see cref="DateTime"/> can parse.</summary>
+    private static bool TryParseTime(string text, out TimeOnly time)
+    {
+        time = default;
+        string s = text.Trim();
+        if (s.Length == 0) return false;
+        if (s.Length is 3 or 4 && s.All(char.IsDigit))
+        {
+            int v = int.Parse(s, CultureInfo.InvariantCulture);
+            int h = v / 100, m = v % 100;
+            if (h > 23 || m > 59) return false;
+            time = new TimeOnly(h, m);
+            return true;
+        }
+        if (TimeOnly.TryParse(s, CultureInfo.InvariantCulture, DateTimeStyles.None, out time)) return true;
+        if (TimeOnly.TryParse(s, CultureInfo.CurrentCulture, DateTimeStyles.None, out time)) return true;
+        if (DateTime.TryParse(s, CultureInfo.CurrentCulture, DateTimeStyles.None, out var dt)) { time = TimeOnly.FromDateTime(dt); return true; }
+        return false;
     }
 
     private static string FormatProjectDisplay(ProjectInfo p) =>

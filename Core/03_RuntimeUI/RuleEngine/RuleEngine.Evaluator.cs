@@ -1,6 +1,7 @@
 namespace SKSB_App.Core.RuntimeUI.RuleEngine;
 
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.Linq;
@@ -22,6 +23,23 @@ public sealed class DropdownOption
 public static class RuleEvaluator
 {
     private static bool _isEvaluating = false;
+
+    // Per-table overrides for DefaultKind.Today (e.g. Schedule Manager defaults entry dates to the board date).
+    private static readonly ConcurrentDictionary<string, Func<DateOnly?>> _todayDefaultProviders = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>Overrides the "Today" default for the given table with a custom date provider.</summary>
+    public static void RegisterTodayDefaultProvider(string tableName, Func<DateOnly?> provider)
+    {
+        if (string.IsNullOrWhiteSpace(tableName) || provider == null) return;
+        _todayDefaultProviders[tableName.Trim()] = provider;
+    }
+
+    /// <summary>Removes a "Today" default override registered via <see cref="RegisterTodayDefaultProvider"/>.</summary>
+    public static void UnregisterTodayDefaultProvider(string tableName)
+    {
+        if (string.IsNullOrWhiteSpace(tableName)) return;
+        _todayDefaultProviders.TryRemove(tableName.Trim(), out _);
+    }
 
     private static readonly HashSet<string> OdometerHeaders = new(StringComparer.OrdinalIgnoreCase)
     {
@@ -1004,7 +1022,17 @@ public static class RuleEvaluator
                 return defaultRule.LiteralValue;
 
             case DefaultKind.Today:
-                return DateOnly.FromDateTime(DateTime.Today);
+                {
+                    string? tableName = null;
+                    try { tableName = table?.Name?.ToString(); } catch { }
+                    if (!string.IsNullOrWhiteSpace(tableName) && _todayDefaultProviders.TryGetValue(tableName!, out var provider))
+                    {
+                        DateOnly? provided = null;
+                        try { provided = provider(); } catch { }
+                        if (provided is DateOnly p) return p;
+                    }
+                    return DateOnly.FromDateTime(DateTime.Today);
+                }
 
             case DefaultKind.DateOffsetDays:
                 {

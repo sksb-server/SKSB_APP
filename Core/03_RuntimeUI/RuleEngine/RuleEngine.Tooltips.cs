@@ -57,7 +57,11 @@ public static partial class RuleRegistry
 
         if (rule.IsReadOnly)
         {
-            return (Loc.Tip("note.readonly.title"), Loc.Tip("note.readonly.body"));
+            string? source = Loc.ResolveColumnSource(rule.TableName, rule.HeaderName);
+            string body = string.IsNullOrWhiteSpace(source)
+                ? Loc.Tip("note.readonly.body")
+                : $"{source}\n{Loc.Tip("note.readonly.body")}";
+            return (Loc.Tip("note.readonly.title"), body);
         }
 
         if (!string.IsNullOrWhiteSpace(legacyFormula))

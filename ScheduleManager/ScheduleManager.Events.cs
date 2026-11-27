@@ -5,6 +5,7 @@ using System.Linq;
 using ExcelDna.Integration;
 using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.RuntimeUI.DropDown;
+using SKSB_App.Core.RuntimeUI.RuleEngine;
 using SKSB_App.Core.Types;
 using SKSB_App.Core.WorkbookOpen.Entry;
 using SKSB_App.Core.WorkbookSave.Entry;
@@ -124,6 +125,7 @@ public class Events : ManagerEventsBase<ScheduleRecord>
         if (_boardHooked) return;
         ScheduleBoardMapper.RegisterDropdowns();
         SheetMapper.RegisterPreferenceDropdowns();
+        RuleEvaluator.RegisterTodayDefaultProvider(SheetMapper.EntriesTableName, () => SheetMapper.LoadedDate ?? CurrentDate());
         ParameterCells.RegisterChangeObserver(SheetObserver);
         _boardHooked = true;
     }
@@ -131,6 +133,7 @@ public class Events : ManagerEventsBase<ScheduleRecord>
     public override void AutoClose()
     {
         ParameterCells.UnregisterChangeObserver(SheetObserver);
+        RuleEvaluator.UnregisterTodayDefaultProvider(SheetMapper.EntriesTableName);
         CustomDropdowns.Clear();
         PastRecordGuard.ResetEditSession(SheetMapper.GuardSession);
         _boardHooked = false;

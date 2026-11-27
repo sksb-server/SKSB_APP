@@ -3,6 +3,7 @@ namespace SKSB_App.Core.RuntimeUI.Ribbon;
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Drawing;
 using System.Runtime.InteropServices;
 using System.Security;
 using System.Windows.Forms;
@@ -948,8 +949,7 @@ public abstract class ManagerRibbonBase : ExcelRibbon
                 try { xlApp.EnableEvents = true; } catch { }
                 try { Arrow.HideAll(); } catch { }
 
-                using var dialog = new CollectiveDictionaryDialog();
-                dialog.ShowDialog(new BugReportOwnerWindow(ExcelDnaUtil.WindowHandle));
+                DictionaryLauncher.Show(new BugReportOwnerWindow(ExcelDnaUtil.WindowHandle), ResolveExcelCellAtPoint);
             }
             catch (Exception ex)
             {
@@ -957,6 +957,30 @@ public abstract class ManagerRibbonBase : ExcelRibbon
                 MessageBox.Show(Loc.T("dict.openFailed", ex.Message), Loc.T("ribbon.support.dictionary.label"), MessageBoxButtons.OK, MessageBoxIcon.Error);
             }
         });
+    }
+
+    /// <summary>
+    /// Resolves the worksheet cell under a screen point (pixels) into a Cell Guide snapshot for the
+    /// "Pick Text on Screen" tool. Runs synchronously inside the QueueAsMacro callback that hosts the dialog loop.
+    /// </summary>
+    private static CellGuideSnapshot? ResolveExcelCellAtPoint(Point pt)
+    {
+        try
+        {
+            dynamic xlApp = ExcelDnaUtil.Application;
+            dynamic? win = xlApp?.ActiveWindow;
+            if (win == null) return null;
+            dynamic? obj = win.RangeFromPoint(pt.X, pt.Y);
+            if (obj == null) return null;
+            dynamic? ws = null;
+            try { ws = obj.Worksheet; } catch { return null; }
+            if (ws == null) return null;
+            return (CellGuideSnapshot)CellContextInspector.Inspect(ws, obj);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     // =========================================================================

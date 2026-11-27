@@ -11,10 +11,11 @@ using System.Windows.Forms;
 using Npgsql;
 using SKSB_App.Core.Diagnostics;
 using SKSB_App.Core.Integration.Database;
+using SKSB_App.Core.RuntimeUI.BugReport;
 
 /// <summary>
-/// DEBUG-only diagnostics window displaying per-PC relative loading speeds
-/// from <c>app.pc_speed_ranking</c> and per-operation breakdowns from <c>app.operation_timings</c>.
+/// DEBUG-only diagnostics window displaying per-PC relative loading speeds,
+/// operation breakdowns, and per-step bottleneck analytics (software vs. hardware).
 /// </summary>
 public sealed class OfficeManagerDialog : Form
 {
@@ -31,6 +32,20 @@ public sealed class OfficeManagerDialog : Form
     private static readonly Color Emerald600 = Color.FromArgb(5, 150, 105);
     private static readonly Color Amber600 = Color.FromArgb(217, 119, 6);
     private static readonly Color Red600 = Color.FromArgb(220, 38, 38);
+
+    private sealed class TimeframeOption
+    {
+        public string Label { get; init; } = string.Empty;
+        public int? Days { get; init; }
+        public override string ToString() => Label;
+    }
+
+    private sealed class VersionOption
+    {
+        public string Label { get; init; } = string.Empty;
+        public string? Version { get; init; }
+        public override string ToString() => Label;
+    }
 
     private sealed class PcRankingRow
     {
@@ -55,17 +70,50 @@ public sealed class OfficeManagerDialog : Form
         public DateTime UpdatedAt { get; init; }
     }
 
+    private sealed class StepPcRow
+    {
+        public string MachineName { get; init; } = string.Empty;
+        public double AvgMs { get; init; }
+        public double MinMs { get; init; }
+        public double MaxMs { get; init; }
+        public int SampleCount { get; init; }
+        public DateTime LastSeenAt { get; init; }
+    }
+
+    private sealed class BottleneckRow
+    {
+        public string OperationKey { get; init; } = string.Empty;
+        public string StepKey { get; init; } = string.Empty;
+        public double ServerAvgMs { get; init; }
+        public double MaxMs { get; init; }
+        public double MinMs { get; init; }
+        public double FastestPcAvgMs { get; init; }
+        public double SlowestPcAvgMs { get; init; }
+        public int PcCount { get; init; }
+        public int TotalSamples { get; init; }
+        public string Diagnosis { get; init; } = "Normal";
+        public List<StepPcRow> PerPc { get; init; } = new();
+    }
+
     private sealed class TelemetrySnapshot
     {
         public List<PcRankingRow> Rankings { get; init; } = new();
         public List<OperationTimingRow> Timings { get; init; } = new();
+        public List<BottleneckRow> Bottlenecks { get; init; } = new();
+        public List<string> AvailableVersions { get; init; } = new();
+        public bool IsLegacyFallback { get; init; }
+        public bool StepTableMissing { get; init; }
     }
 
+    private readonly string _currentAppVersion;
     private List<PcRankingRow> _pcRows = new();
     private List<OperationTimingRow> _allTimings = new();
     private Dictionary<string, OperationTimingRow> _globalTimings = new(StringComparer.OrdinalIgnoreCase);
+    private List<BottleneckRow> _bottlenecks = new();
     private bool _busy;
     private bool _suppressSelection;
+    private bool _suppressFilterEvents;
+    private bool _bottleneckSplitterInitialized;
 
     private Font? _titleFont;
     private Font? _sectionFont;
@@ -74,16 +122,30 @@ public sealed class OfficeManagerDialog : Form
 
     private Button _btnRefresh = null!;
     private Button _btnDeletePc = null!;
+    private ComboBox _cboTimeframe = null!;
+    private ComboBox _cboVersion = null!;
     private Label _lblSummary = null!;
+    private TabControl _tabs = null!;
+
+    // Tab 1: PC Speed Ranking
     private SplitContainer _split = null!;
     private DataGridView _pcGrid = null!;
     private Label _lblOpsHeader = null!;
     private DataGridView _opGrid = null!;
 
+    // Tab 2: Hanging Functions / Bottlenecks
+    private SplitContainer _bottleneckSplit = null!;
+    private Label _lblBottleneckHeader = null!;
+    private DataGridView _bottleneckGrid = null!;
+    private Label _lblStepPcHeader = null!;
+    private DataGridView _stepPcGrid = null!;
+
     public OfficeManagerDialog()
     {
+        _currentAppVersion = ResolveCurrentVersion();
+
         SuspendLayout();
-        Text = "Office Manager — PC Speeds (Debug)";
+        Text = "Office Manager — PC Speeds & Bottlenecks (Debug)";
         StartPosition = FormStartPosition.CenterParent;
         FormBorderStyle = FormBorderStyle.Sizable;
         MinimizeBox = true;
@@ -92,8 +154,8 @@ public sealed class OfficeManagerDialog : Form
         BackColor = Slate50;
         Font = new Font("Segoe UI", 9f, FontStyle.Regular);
         Padding = new Padding(12);
-        ClientSize = new Size(1060, 620);
-        MinimumSize = new Size(780, 460);
+        ClientSize = new Size(1120, 660);
+        MinimumSize = new Size(860, 500);
 
         _titleFont = new Font("Segoe UI", 13f, FontStyle.Bold);
         _sectionFont = new Font("Segoe UI", 9.5f, FontStyle.Bold);
@@ -106,6 +168,19 @@ public sealed class OfficeManagerDialog : Form
         AutoScaleMode = AutoScaleMode.Dpi;
         ResumeLayout(false);
         PerformLayout();
+    }
+
+    private static string ResolveCurrentVersion()
+    {
+        try
+        {
+            string? v = BugReportRepository.ResolveAppVersion();
+            return string.IsNullOrWhiteSpace(v) ? "unknown" : v.Trim();
+        }
+        catch
+        {
+            return "unknown";
+        }
     }
 
     // =========================================================================
@@ -137,11 +212,56 @@ public sealed class OfficeManagerDialog : Form
 
         var lblTitle = new Label
         {
-            Text = "Office Manager — PC Speeds",
+            Text = "Office Manager",
             Font = _titleFont,
             ForeColor = Slate900,
             AutoSize = true,
-            Margin = new Padding(0, 0, 16, 0)
+            Margin = new Padding(0, 2, 14, 0)
+        };
+
+        var lblWindow = new Label
+        {
+            Text = "Window:",
+            ForeColor = Slate800,
+            AutoSize = true,
+            Margin = new Padding(0, 6, 4, 0)
+        };
+
+        _cboTimeframe = new ComboBox
+        {
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            Width = 152,
+            Margin = new Padding(0, 2, 10, 0)
+        };
+        _cboTimeframe.Items.Add(new TimeframeOption { Label = "Last 7 days", Days = 7 });
+        _cboTimeframe.Items.Add(new TimeframeOption { Label = "Last 30 days", Days = 30 });
+        _cboTimeframe.Items.Add(new TimeframeOption { Label = "Last 3 months (90d)", Days = 90 });
+        _cboTimeframe.Items.Add(new TimeframeOption { Label = "All time", Days = null });
+        _cboTimeframe.SelectedIndex = 2; // Last 3 months (90d) default
+        _cboTimeframe.SelectedIndexChanged += async (s, e) =>
+        {
+            if (!_suppressFilterEvents) await ReloadAsync(GetSelectedMachineName());
+        };
+
+        var lblVersion = new Label
+        {
+            Text = "Version:",
+            ForeColor = Slate800,
+            AutoSize = true,
+            Margin = new Padding(0, 6, 4, 0)
+        };
+
+        _cboVersion = new ComboBox
+        {
+            DropDownStyle = ComboBoxStyle.DropDownList,
+            Width = 150,
+            Margin = new Padding(0, 2, 12, 0)
+        };
+        _cboVersion.Items.Add(new VersionOption { Label = "All versions", Version = null });
+        _cboVersion.SelectedIndex = 0;
+        _cboVersion.SelectedIndexChanged += async (s, e) =>
+        {
+            if (!_suppressFilterEvents) await ReloadAsync(GetSelectedMachineName());
         };
 
         _btnRefresh = CreateButton("Refresh", primary: false);
@@ -154,7 +274,10 @@ public sealed class OfficeManagerDialog : Form
         _btnDeletePc.Margin = new Padding(0, 1, 12, 0);
         _btnDeletePc.Click += async (s, e) => await DeleteSelectedPcAsync();
 
-        leftBar.Controls.AddRange(new Control[] { lblTitle, _btnRefresh, _btnDeletePc });
+        leftBar.Controls.AddRange(new Control[]
+        {
+            lblTitle, lblWindow, _cboTimeframe, lblVersion, _cboVersion, _btnRefresh, _btnDeletePc
+        });
 
         _lblSummary = new Label
         {
@@ -169,7 +292,32 @@ public sealed class OfficeManagerDialog : Form
         topBar.Controls.Add(leftBar, 0, 0);
         topBar.Controls.Add(_lblSummary, 1, 0);
 
-        // --- Split container (Left ~44% PC Ranking, Right ~56% Operation Breakdown) ---
+        // --- TabControl ---
+        _tabs = new TabControl
+        {
+            Dock = DockStyle.Fill,
+            Margin = new Padding(0)
+        };
+        _tabs.SelectedIndexChanged += (s, e) =>
+        {
+            if (_tabs.SelectedIndex == 1 && !_bottleneckSplitterInitialized && _bottleneckSplit.ClientSize.Height > 100)
+            {
+                try
+                {
+                    _bottleneckSplit.SplitterDistance = (int)(_bottleneckSplit.ClientSize.Height * 0.55);
+                    _bottleneckSplitterInitialized = true;
+                }
+                catch { }
+            }
+        };
+
+        // --- Tab 1: PC Speed Ranking ---
+        var tabRanking = new TabPage("PC Speed Ranking")
+        {
+            BackColor = Slate50,
+            Padding = new Padding(6)
+        };
+
         _split = new SplitContainer
         {
             Dock = DockStyle.Fill,
@@ -192,7 +340,43 @@ public sealed class OfficeManagerDialog : Form
         rightPanel.Controls.Add(_opGrid, 0, 1);
         _split.Panel2.Controls.Add(rightPanel);
 
-        Controls.Add(_split);
+        tabRanking.Controls.Add(_split);
+
+        // --- Tab 2: Hanging Functions / Bottlenecks ---
+        var tabBottlenecks = new TabPage("Hanging Functions / Bottlenecks")
+        {
+            BackColor = Slate50,
+            Padding = new Padding(6)
+        };
+
+        _bottleneckSplit = new SplitContainer
+        {
+            Dock = DockStyle.Fill,
+            Orientation = Orientation.Horizontal,
+            BackColor = Slate200,
+            SplitterWidth = 5
+        };
+        _bottleneckSplit.Panel1.BackColor = Slate50;
+        _bottleneckSplit.Panel1.Padding = new Padding(0, 0, 0, 4);
+        _bottleneckSplit.Panel2.BackColor = Slate50;
+        _bottleneckSplit.Panel2.Padding = new Padding(0, 4, 0, 0);
+
+        var topBottleneckPanel = BuildSectionContainer("Slowest Functions / Steps (Software vs. Hardware)", out _lblBottleneckHeader);
+        _bottleneckGrid = BuildBottleneckGrid();
+        topBottleneckPanel.Controls.Add(_bottleneckGrid, 0, 1);
+        _bottleneckSplit.Panel1.Controls.Add(topBottleneckPanel);
+
+        var bottomStepPcPanel = BuildSectionContainer("Per-PC Breakdown", out _lblStepPcHeader);
+        _stepPcGrid = BuildStepPcGrid();
+        bottomStepPcPanel.Controls.Add(_stepPcGrid, 0, 1);
+        _bottleneckSplit.Panel2.Controls.Add(bottomStepPcPanel);
+
+        tabBottlenecks.Controls.Add(_bottleneckSplit);
+
+        _tabs.TabPages.Add(tabRanking);
+        _tabs.TabPages.Add(tabBottlenecks);
+
+        Controls.Add(_tabs);
         Controls.Add(topBar);
     }
 
@@ -288,6 +472,41 @@ public sealed class OfficeManagerDialog : Form
         return grid;
     }
 
+    private DataGridView BuildBottleneckGrid()
+    {
+        var grid = CreateBaseGrid();
+
+        grid.Columns.Add(CreateCol("colStep", "Function / Step", 36, DataGridViewAutoSizeColumnMode.Fill));
+        grid.Columns.Add(CreateCol("colStepOp", "Operation", 26, DataGridViewAutoSizeColumnMode.Fill));
+        grid.Columns.Add(CreateCol("colStepServerAvg", "Server Avg", 12, DataGridViewAutoSizeColumnMode.AllCells, DataGridViewContentAlignment.MiddleRight));
+        grid.Columns.Add(CreateCol("colStepMax", "Max (Hang)", 12, DataGridViewAutoSizeColumnMode.AllCells, DataGridViewContentAlignment.MiddleRight));
+        grid.Columns.Add(CreateCol("colStepMin", "Min", 10, DataGridViewAutoSizeColumnMode.AllCells, DataGridViewContentAlignment.MiddleRight));
+        grid.Columns.Add(CreateCol("colStepSpread", "PC Spread", 20, DataGridViewAutoSizeColumnMode.AllCells, DataGridViewContentAlignment.MiddleRight));
+        grid.Columns.Add(CreateCol("colStepPcs", "PCs", 8, DataGridViewAutoSizeColumnMode.AllCells, DataGridViewContentAlignment.MiddleRight));
+        grid.Columns.Add(CreateCol("colStepSamples", "Samples", 10, DataGridViewAutoSizeColumnMode.AllCells, DataGridViewContentAlignment.MiddleRight));
+        grid.Columns.Add(CreateCol("colStepDiagnosis", "Diagnosis", 22, DataGridViewAutoSizeColumnMode.AllCells));
+
+        grid.CellFormatting += OnBottleneckGridCellFormatting;
+        grid.SelectionChanged += (s, e) => OnBottleneckSelectionChanged();
+        return grid;
+    }
+
+    private DataGridView BuildStepPcGrid()
+    {
+        var grid = CreateBaseGrid();
+
+        grid.Columns.Add(CreateCol("colStepPcName", "PC Name", 36, DataGridViewAutoSizeColumnMode.Fill));
+        grid.Columns.Add(CreateCol("colStepPcAvg", "PC Avg", 14, DataGridViewAutoSizeColumnMode.AllCells, DataGridViewContentAlignment.MiddleRight));
+        grid.Columns.Add(CreateCol("colStepPcVsAvg", "vs. Server Avg", 14, DataGridViewAutoSizeColumnMode.AllCells, DataGridViewContentAlignment.MiddleRight));
+        grid.Columns.Add(CreateCol("colStepPcMin", "Min", 12, DataGridViewAutoSizeColumnMode.AllCells, DataGridViewContentAlignment.MiddleRight));
+        grid.Columns.Add(CreateCol("colStepPcMax", "Max (Hang)", 12, DataGridViewAutoSizeColumnMode.AllCells, DataGridViewContentAlignment.MiddleRight));
+        grid.Columns.Add(CreateCol("colStepPcSamples", "Samples", 12, DataGridViewAutoSizeColumnMode.AllCells, DataGridViewContentAlignment.MiddleRight));
+        grid.Columns.Add(CreateCol("colStepPcLastSeen", "Last Seen", 18, DataGridViewAutoSizeColumnMode.AllCells));
+
+        grid.CellFormatting += OnStepPcGridCellFormatting;
+        return grid;
+    }
+
     private static DataGridViewTextBoxColumn CreateCol(
         string name,
         string header,
@@ -334,11 +553,24 @@ public sealed class OfficeManagerDialog : Form
     {
         base.OnShown(e);
         try { _split.SplitterDistance = (int)(_split.ClientSize.Width * 0.44); } catch { }
+        if (_bottleneckSplit.ClientSize.Height > 100)
+        {
+            try
+            {
+                _bottleneckSplit.SplitterDistance = (int)(_bottleneckSplit.ClientSize.Height * 0.55);
+                _bottleneckSplitterInitialized = true;
+            }
+            catch { }
+        }
     }
 
     // =========================================================================
     // 3. DATA LOADING & SERVER QUERIES
     // =========================================================================
+    private int? GetSelectedWindowDays() => (_cboTimeframe.SelectedItem as TimeframeOption)?.Days;
+
+    private string? GetSelectedVersionFilter() => (_cboVersion.SelectedItem as VersionOption)?.Version;
+
     private async Task ReloadAsync(string? reselectMachine)
     {
         if (_busy || IsDisposed) return;
@@ -352,11 +584,16 @@ public sealed class OfficeManagerDialog : Form
             return;
         }
 
-        SetBusy(true, "Loading PC speed telemetry...");
+        int? windowDays = GetSelectedWindowDays();
+        string? versionFilter = GetSelectedVersionFilter();
+
+        SetBusy(true, "Loading telemetry...");
         try
         {
-            TelemetrySnapshot snapshot = await Task.Run(FetchTelemetryFromServer);
+            TelemetrySnapshot snapshot = await Task.Run(() => FetchTelemetryFromServer(windowDays, versionFilter));
             if (IsDisposed) return;
+
+            SyncVersionDropdown(snapshot.AvailableVersions, versionFilter);
 
             _allTimings = snapshot.Timings;
             _globalTimings = _allTimings
@@ -366,6 +603,9 @@ public sealed class OfficeManagerDialog : Form
             _pcRows = BuildPcDisplayRows(snapshot.Rankings, _globalTimings);
             PopulatePcGrid(reselectMachine);
 
+            _bottlenecks = snapshot.Bottlenecks;
+            PopulateBottleneckGrid(snapshot.StepTableMissing);
+
             int pcCount = _pcRows.Count(r => !r.IsGlobal);
             int opCount = _globalTimings.Count > 0
                 ? _globalTimings.Count
@@ -373,7 +613,8 @@ public sealed class OfficeManagerDialog : Form
             int sampleCount = _pcRows.Where(r => !r.IsGlobal).Sum(r => r.TotalSamples);
 
             _lblSummary.ForeColor = Slate500;
-            _lblSummary.Text = $"{pcCount} PC(s) · {opCount} operation(s) · {sampleCount} sample(s)";
+            string legacyNote = snapshot.IsLegacyFallback ? " · (legacy all-time data)" : string.Empty;
+            _lblSummary.Text = $"{pcCount} PC(s) · {opCount} operation(s) · {sampleCount} sample(s){legacyNote}";
         }
         catch (PostgresException pgEx) when (pgEx.SqlState == "42P01")
         {
@@ -396,6 +637,31 @@ public sealed class OfficeManagerDialog : Form
         }
     }
 
+    private void SyncVersionDropdown(List<string> versions, string? selectedVersion)
+    {
+        _suppressFilterEvents = true;
+        try
+        {
+            _cboVersion.Items.Clear();
+            _cboVersion.Items.Add(new VersionOption { Label = "All versions", Version = null });
+
+            int targetIdx = 0;
+            foreach (string v in versions)
+            {
+                bool isCurrent = string.Equals(v, _currentAppVersion, StringComparison.OrdinalIgnoreCase);
+                string label = isCurrent ? $"{v} (Current)" : v;
+                int idx = _cboVersion.Items.Add(new VersionOption { Label = label, Version = v });
+                if (selectedVersion != null && string.Equals(v, selectedVersion, StringComparison.OrdinalIgnoreCase))
+                    targetIdx = idx;
+            }
+            _cboVersion.SelectedIndex = targetIdx;
+        }
+        finally
+        {
+            _suppressFilterEvents = false;
+        }
+    }
+
     private static NpgsqlConnection OpenTelemetryConnection()
     {
         string cs = new NpgsqlConnectionStringBuilder(PostgreSqlService.ReleaseConnectionString)
@@ -409,60 +675,343 @@ public sealed class OfficeManagerDialog : Form
         return conn;
     }
 
-    private static TelemetrySnapshot FetchTelemetryFromServer()
+    private static TelemetrySnapshot FetchTelemetryFromServer(int? windowDays, string? versionFilter)
     {
         using var conn = OpenTelemetryConnection();
 
+        // 1. Distinct app versions from samples
+        var availableVersions = new List<string>();
+        bool samplesTableMissing = false;
+        try
+        {
+            const string versionSql = @"
+SELECT app_version
+FROM app.operation_timing_samples
+GROUP BY app_version
+ORDER BY MAX(recorded_at) DESC, app_version DESC;";
+            using var cmd = new NpgsqlCommand(versionSql, conn);
+            using var r = cmd.ExecuteReader();
+            while (r.Read())
+            {
+                if (!r.IsDBNull(0))
+                {
+                    string v = r.GetString(0);
+                    if (!string.IsNullOrWhiteSpace(v)) availableVersions.Add(v);
+                }
+            }
+        }
+        catch (PostgresException pgEx) when (pgEx.SqlState == "42P01")
+        {
+            samplesTableMissing = true;
+        }
+
+        // 2. Operation timings & PC rankings from app.operation_timing_samples
         var rankings = new List<PcRankingRow>();
-        const string rankingSql = @"
+        var timings = new List<OperationTimingRow>();
+        bool isLegacyFallback = false;
+
+        if (!samplesTableMissing)
+        {
+            string where = BuildFilterWhereClause(windowDays, versionFilter);
+
+            string pcOpSql = $@"
+SELECT operation_key,
+       machine_name,
+       AVG(duration_ms) AS avg_ms,
+       MIN(duration_ms) AS min_ms,
+       MAX(duration_ms) AS max_ms,
+       (ARRAY_AGG(duration_ms ORDER BY recorded_at DESC))[1] AS last_ms,
+       COUNT(*)::int AS sample_count,
+       MAX(recorded_at) AS updated_at
+FROM app.operation_timing_samples
+{where}
+GROUP BY operation_key, machine_name
+ORDER BY operation_key ASC, machine_name ASC;";
+
+            using (var cmd = new NpgsqlCommand(pcOpSql, conn))
+            {
+                AddFilterParams(cmd, windowDays, versionFilter);
+                using var r = cmd.ExecuteReader();
+                while (r.Read())
+                {
+                    timings.Add(new OperationTimingRow
+                    {
+                        OperationKey = r.GetString(0),
+                        MachineName = r.GetString(1),
+                        AvgMs = r.GetDouble(2),
+                        MinMs = r.GetDouble(3),
+                        MaxMs = r.GetDouble(4),
+                        LastMs = r.GetDouble(5),
+                        SampleCount = r.GetInt32(6),
+                        UpdatedAt = r.GetDateTime(7)
+                    });
+                }
+            }
+
+            if (timings.Count > 0)
+            {
+                string globalOpSql = $@"
+SELECT operation_key,
+       AVG(duration_ms) AS avg_ms,
+       MIN(duration_ms) AS min_ms,
+       MAX(duration_ms) AS max_ms,
+       (ARRAY_AGG(duration_ms ORDER BY recorded_at DESC))[1] AS last_ms,
+       COUNT(*)::int AS sample_count,
+       MAX(recorded_at) AS updated_at
+FROM app.operation_timing_samples
+{where}
+GROUP BY operation_key
+ORDER BY operation_key ASC;";
+
+                var globalByOp = new Dictionary<string, OperationTimingRow>(StringComparer.OrdinalIgnoreCase);
+                using (var cmd = new NpgsqlCommand(globalOpSql, conn))
+                {
+                    AddFilterParams(cmd, windowDays, versionFilter);
+                    using var r = cmd.ExecuteReader();
+                    while (r.Read())
+                    {
+                        var row = new OperationTimingRow
+                        {
+                            OperationKey = r.GetString(0),
+                            MachineName = LoadingTimeEstimator.GlobalMachineKey,
+                            AvgMs = r.GetDouble(1),
+                            MinMs = r.GetDouble(2),
+                            MaxMs = r.GetDouble(3),
+                            LastMs = r.GetDouble(4),
+                            SampleCount = r.GetInt32(5),
+                            UpdatedAt = r.GetDateTime(6)
+                        };
+                        globalByOp[row.OperationKey] = row;
+                        timings.Add(row);
+                    }
+                }
+
+                // Compute PC speed rankings from per-PC vs server-wide averages
+                foreach (var pcGroup in timings
+                    .Where(t => !string.Equals(t.MachineName, LoadingTimeEstimator.GlobalMachineKey, StringComparison.OrdinalIgnoreCase))
+                    .GroupBy(t => t.MachineName, StringComparer.OrdinalIgnoreCase))
+                {
+                    var ratios = new List<double>();
+                    foreach (var op in pcGroup)
+                    {
+                        if (globalByOp.TryGetValue(op.OperationKey, out var gOp) && gOp.AvgMs > 0.0)
+                            ratios.Add(op.AvgMs / gOp.AvgMs);
+                    }
+
+                    rankings.Add(new PcRankingRow
+                    {
+                        MachineName = pcGroup.Key,
+                        OperationsMeasured = pcGroup.Count(),
+                        TotalSamples = pcGroup.Sum(x => x.SampleCount),
+                        RelativeDurationRatio = ratios.Count > 0 ? Math.Round(ratios.Average(), 2) : 1.0,
+                        AvgMs = Math.Round(pcGroup.Average(x => x.AvgMs), 0),
+                        LastSeenAt = pcGroup.Max(x => x.UpdatedAt),
+                        IsGlobal = false
+                    });
+                }
+
+                rankings.Sort((a, b) =>
+                {
+                    int cmp = a.RelativeDurationRatio.CompareTo(b.RelativeDurationRatio);
+                    return cmp != 0 ? cmp : string.Compare(a.MachineName, b.MachineName, StringComparison.OrdinalIgnoreCase);
+                });
+            }
+        }
+
+        // 3. Fallback to legacy app.pc_speed_ranking / app.operation_timings if samples empty/missing and no version filter
+        if (timings.Count == 0 && versionFilter == null)
+        {
+            isLegacyFallback = true;
+            const string rankingSql = @"
 SELECT machine_name, operations_measured, total_samples, relative_duration_ratio, avg_ms, last_seen_at
 FROM app.pc_speed_ranking
 ORDER BY relative_duration_ratio ASC NULLS LAST, machine_name ASC;";
 
-        using (var cmd = new NpgsqlCommand(rankingSql, conn))
-        using (var r = cmd.ExecuteReader())
-        {
-            while (r.Read())
+            using (var cmd = new NpgsqlCommand(rankingSql, conn))
+            using (var r = cmd.ExecuteReader())
             {
-                rankings.Add(new PcRankingRow
+                while (r.Read())
                 {
-                    MachineName = r.GetString(0),
-                    OperationsMeasured = Convert.ToInt32(r.GetValue(1)),
-                    TotalSamples = Convert.ToInt32(r.GetValue(2)),
-                    RelativeDurationRatio = r.IsDBNull(3) ? 1.0 : Convert.ToDouble(r.GetValue(3)),
-                    AvgMs = r.IsDBNull(4) ? 0.0 : Convert.ToDouble(r.GetValue(4)),
-                    LastSeenAt = r.IsDBNull(5) ? null : r.GetDateTime(5),
-                    IsGlobal = false
-                });
+                    rankings.Add(new PcRankingRow
+                    {
+                        MachineName = r.GetString(0),
+                        OperationsMeasured = Convert.ToInt32(r.GetValue(1)),
+                        TotalSamples = Convert.ToInt32(r.GetValue(2)),
+                        RelativeDurationRatio = r.IsDBNull(3) ? 1.0 : Convert.ToDouble(r.GetValue(3)),
+                        AvgMs = r.IsDBNull(4) ? 0.0 : Convert.ToDouble(r.GetValue(4)),
+                        LastSeenAt = r.IsDBNull(5) ? null : r.GetDateTime(5),
+                        IsGlobal = false
+                    });
+                }
             }
-        }
 
-        var timings = new List<OperationTimingRow>();
-        const string timingsSql = @"
+            const string timingsSql = @"
 SELECT operation_key, machine_name, avg_ms, min_ms, max_ms, last_ms, sample_count, updated_at
 FROM app.operation_timings
 ORDER BY operation_key ASC, machine_name ASC;";
 
-        using (var cmd = new NpgsqlCommand(timingsSql, conn))
-        using (var r = cmd.ExecuteReader())
-        {
-            while (r.Read())
+            using (var cmd = new NpgsqlCommand(timingsSql, conn))
+            using (var r = cmd.ExecuteReader())
             {
-                timings.Add(new OperationTimingRow
+                while (r.Read())
                 {
-                    OperationKey = r.GetString(0),
-                    MachineName = r.GetString(1),
-                    AvgMs = r.GetDouble(2),
-                    MinMs = r.GetDouble(3),
-                    MaxMs = r.GetDouble(4),
-                    LastMs = r.GetDouble(5),
-                    SampleCount = r.GetInt32(6),
-                    UpdatedAt = r.GetDateTime(7)
-                });
+                    timings.Add(new OperationTimingRow
+                    {
+                        OperationKey = r.GetString(0),
+                        MachineName = r.GetString(1),
+                        AvgMs = r.GetDouble(2),
+                        MinMs = r.GetDouble(3),
+                        MaxMs = r.GetDouble(4),
+                        LastMs = r.GetDouble(5),
+                        SampleCount = r.GetInt32(6),
+                        UpdatedAt = r.GetDateTime(7)
+                    });
+                }
             }
         }
 
-        return new TelemetrySnapshot { Rankings = rankings, Timings = timings };
+        // 4. Per-step bottleneck samples from app.operation_step_samples
+        var bottlenecks = new List<BottleneckRow>();
+        bool stepTableMissing = false;
+        try
+        {
+            string where = BuildFilterWhereClause(windowDays, versionFilter);
+            string stepSql = $@"
+SELECT operation_key,
+       step_key,
+       machine_name,
+       AVG(duration_ms) AS avg_ms,
+       MIN(duration_ms) AS min_ms,
+       MAX(duration_ms) AS max_ms,
+       COUNT(*)::int AS cnt,
+       MAX(recorded_at) AS last_seen
+FROM app.operation_step_samples
+{where}
+GROUP BY operation_key, step_key, machine_name;";
+
+            var rawSteps = new Dictionary<(string Op, string Step), List<StepPcRow>>();
+            using (var cmd = new NpgsqlCommand(stepSql, conn))
+            {
+                AddFilterParams(cmd, windowDays, versionFilter);
+                using var r = cmd.ExecuteReader();
+                while (r.Read())
+                {
+                    string opKey = r.GetString(0);
+                    string stepKey = r.GetString(1);
+                    var pcRow = new StepPcRow
+                    {
+                        MachineName = r.GetString(2),
+                        AvgMs = r.GetDouble(3),
+                        MinMs = r.GetDouble(4),
+                        MaxMs = r.GetDouble(5),
+                        SampleCount = r.GetInt32(6),
+                        LastSeenAt = r.GetDateTime(7)
+                    };
+
+                    var key = (opKey, stepKey);
+                    if (!rawSteps.TryGetValue(key, out var list))
+                    {
+                        list = new List<StepPcRow>();
+                        rawSteps[key] = list;
+                    }
+                    list.Add(pcRow);
+                }
+            }
+
+            foreach (var kv in rawSteps)
+            {
+                var pcs = kv.Value.OrderByDescending(p => p.AvgMs).ThenBy(p => p.MachineName, StringComparer.OrdinalIgnoreCase).ToList();
+                int totalSamples = pcs.Sum(p => p.SampleCount);
+                if (totalSamples <= 0) continue;
+
+                double weightedSum = pcs.Sum(p => p.AvgMs * p.SampleCount);
+                double serverAvgMs = weightedSum / totalSamples;
+                double maxMs = pcs.Max(p => p.MaxMs);
+                double minMs = pcs.Min(p => p.MinMs);
+                double fastestPcAvgMs = pcs.Min(p => p.AvgMs);
+                double slowestPcAvgMs = pcs.Max(p => p.AvgMs);
+                int pcCount = pcs.Count;
+
+                string diagnosis = ClassifyBottleneck(serverAvgMs, maxMs, fastestPcAvgMs, slowestPcAvgMs, pcCount);
+
+                bottlenecks.Add(new BottleneckRow
+                {
+                    OperationKey = kv.Key.Op,
+                    StepKey = kv.Key.Step,
+                    ServerAvgMs = serverAvgMs,
+                    MaxMs = maxMs,
+                    MinMs = minMs,
+                    FastestPcAvgMs = fastestPcAvgMs,
+                    SlowestPcAvgMs = slowestPcAvgMs,
+                    PcCount = pcCount,
+                    TotalSamples = totalSamples,
+                    Diagnosis = diagnosis,
+                    PerPc = pcs
+                });
+            }
+
+            bottlenecks.Sort((a, b) =>
+            {
+                int cmp = b.ServerAvgMs.CompareTo(a.ServerAvgMs);
+                return cmp != 0 ? cmp : b.MaxMs.CompareTo(a.MaxMs);
+            });
+        }
+        catch (PostgresException pgEx) when (pgEx.SqlState == "42P01")
+        {
+            stepTableMissing = true;
+        }
+
+        return new TelemetrySnapshot
+        {
+            Rankings = rankings,
+            Timings = timings,
+            Bottlenecks = bottlenecks,
+            AvailableVersions = availableVersions,
+            IsLegacyFallback = isLegacyFallback,
+            StepTableMissing = stepTableMissing
+        };
+    }
+
+    private static string BuildFilterWhereClause(int? windowDays, string? versionFilter)
+    {
+        var clauses = new List<string>();
+        if (windowDays.HasValue)
+            clauses.Add("recorded_at >= CURRENT_TIMESTAMP - (@WindowDays * INTERVAL '1 day')");
+        if (!string.IsNullOrWhiteSpace(versionFilter))
+            clauses.Add("app_version = @Version");
+        return clauses.Count == 0 ? string.Empty : "WHERE " + string.Join(" AND ", clauses);
+    }
+
+    private static void AddFilterParams(NpgsqlCommand cmd, int? windowDays, string? versionFilter)
+    {
+        if (windowDays.HasValue)
+            cmd.Parameters.AddWithValue("WindowDays", windowDays.Value);
+        if (!string.IsNullOrWhiteSpace(versionFilter))
+            cmd.Parameters.AddWithValue("Version", versionFilter);
+    }
+
+    private static string ClassifyBottleneck(
+        double serverAvgMs,
+        double maxMs,
+        double fastestPcAvgMs,
+        double slowestPcAvgMs,
+        int pcCount)
+    {
+        double spreadRatio = fastestPcAvgMs > 0.0 ? slowestPcAvgMs / fastestPcAvgMs : 1.0;
+
+        if (serverAvgMs >= 1500.0 && pcCount >= 2 && (fastestPcAvgMs >= 1200.0 || spreadRatio <= 1.8))
+            return "Software Bottleneck";
+
+        if (pcCount == 1 && serverAvgMs >= 1500.0)
+            return "Slow (1 PC)";
+
+        if (pcCount >= 2 && spreadRatio > 1.8 && fastestPcAvgMs < 1200.0)
+            return "Hardware / PC-Specific";
+
+        if (maxMs >= serverAvgMs * 3.0 && maxMs >= 2000.0)
+            return "Intermittent Hang";
+
+        return "Normal";
     }
 
     private static List<PcRankingRow> BuildPcDisplayRows(
@@ -497,9 +1046,14 @@ ORDER BY operation_key ASC, machine_name ASC;";
         _pcRows.Clear();
         _allTimings.Clear();
         _globalTimings.Clear();
+        _bottlenecks.Clear();
         _pcGrid.Rows.Clear();
         _opGrid.Rows.Clear();
+        _bottleneckGrid.Rows.Clear();
+        _stepPcGrid.Rows.Clear();
         _lblOpsHeader.Text = "Operations";
+        _lblBottleneckHeader.Text = "Slowest Functions / Steps (Software vs. Hardware)";
+        _lblStepPcHeader.Text = "Per-PC Breakdown";
     }
 
     private void PopulatePcGrid(string? reselectMachine)
@@ -641,6 +1195,124 @@ ORDER BY operation_key ASC, machine_name ASC;";
         _opGrid.ResumeLayout();
     }
 
+    private void PopulateBottleneckGrid(bool stepTableMissing)
+    {
+        _suppressSelection = true;
+        try
+        {
+            _bottleneckGrid.SuspendLayout();
+            _bottleneckGrid.Rows.Clear();
+
+            if (stepTableMissing)
+            {
+                _lblBottleneckHeader.Text = "Slowest Functions / Steps — step telemetry table not created yet (run a Release build first)";
+            }
+            else if (_bottlenecks.Count == 0)
+            {
+                _lblBottleneckHeader.Text = "Slowest Functions / Steps — no step samples in selected filter";
+            }
+            else
+            {
+                _lblBottleneckHeader.Text = $"Slowest Functions / Steps ({_bottlenecks.Count} measured)";
+            }
+
+            foreach (BottleneckRow b in _bottlenecks)
+            {
+                string spreadText;
+                if (b.PcCount >= 2)
+                {
+                    double ratio = b.FastestPcAvgMs > 0.0 ? b.SlowestPcAvgMs / b.FastestPcAvgMs : 1.0;
+                    spreadText = $"{FormatSeconds(b.FastestPcAvgMs)} – {FormatSeconds(b.SlowestPcAvgMs)} ({ratio:0.0}×)";
+                }
+                else
+                {
+                    spreadText = "—";
+                }
+
+                int idx = _bottleneckGrid.Rows.Add(
+                    b.StepKey,
+                    b.OperationKey,
+                    FormatSeconds(b.ServerAvgMs),
+                    FormatSeconds(b.MaxMs),
+                    FormatSeconds(b.MinMs),
+                    spreadText,
+                    b.PcCount,
+                    b.TotalSamples,
+                    b.Diagnosis);
+
+                _bottleneckGrid.Rows[idx].Tag = b;
+            }
+
+            _bottleneckGrid.ResumeLayout();
+
+            if (_bottleneckGrid.Rows.Count > 0)
+            {
+                _bottleneckGrid.ClearSelection();
+                _bottleneckGrid.Rows[0].Selected = true;
+                _bottleneckGrid.CurrentCell = _bottleneckGrid.Rows[0].Cells[0];
+            }
+        }
+        finally
+        {
+            _suppressSelection = false;
+        }
+
+        OnBottleneckSelectionChanged();
+    }
+
+    private void OnBottleneckSelectionChanged()
+    {
+        if (_suppressSelection) return;
+
+        BottleneckRow? selected = _bottleneckGrid.SelectedRows.Count > 0
+            ? _bottleneckGrid.SelectedRows[0].Tag as BottleneckRow
+            : null;
+
+        _stepPcGrid.SuspendLayout();
+        _stepPcGrid.Rows.Clear();
+
+        if (selected == null)
+        {
+            _lblStepPcHeader.Text = "Per-PC Breakdown";
+            _stepPcGrid.ResumeLayout();
+            return;
+        }
+
+        _lblStepPcHeader.Text = $"Per-PC Breakdown — {selected.StepKey} ({selected.OperationKey})";
+
+        foreach (StepPcRow pc in selected.PerPc)
+        {
+            bool isThisPc = string.Equals(pc.MachineName, Environment.MachineName, StringComparison.OrdinalIgnoreCase);
+            string pcDisplay = isThisPc ? $"{pc.MachineName} (This PC)" : pc.MachineName;
+
+            string vsAvgText;
+            double? ratio = null;
+            if (selected.ServerAvgMs > 0.0)
+            {
+                ratio = pc.AvgMs / selected.ServerAvgMs;
+                int pct = (int)Math.Round((ratio.Value - 1.0) * 100.0);
+                vsAvgText = pct > 0 ? $"+{pct}%" : $"{pct}%";
+            }
+            else
+            {
+                vsAvgText = "—";
+            }
+
+            int idx = _stepPcGrid.Rows.Add(
+                pcDisplay,
+                FormatSeconds(pc.AvgMs),
+                vsAvgText,
+                FormatSeconds(pc.MinMs),
+                FormatSeconds(pc.MaxMs),
+                pc.SampleCount,
+                pc.LastSeenAt.ToLocalTime().ToString("dd MMM HH:mm"));
+
+            _stepPcGrid.Rows[idx].Tag = (pc.MachineName, ratio);
+        }
+
+        _stepPcGrid.ResumeLayout();
+    }
+
     private void OnPcGridCellFormatting(object? sender, DataGridViewCellFormattingEventArgs e)
     {
         if (e.CellStyle == null || e.RowIndex < 0 || e.RowIndex >= _pcGrid.Rows.Count) return;
@@ -684,6 +1356,68 @@ ORDER BY operation_key ASC, machine_name ASC;";
         else
         {
             e.CellStyle.ForeColor = Slate400;
+        }
+    }
+
+    private void OnBottleneckGridCellFormatting(object? sender, DataGridViewCellFormattingEventArgs e)
+    {
+        if (e.CellStyle == null || e.RowIndex < 0 || e.RowIndex >= _bottleneckGrid.Rows.Count) return;
+        if (_bottleneckGrid.Rows[e.RowIndex].Tag is not BottleneckRow row) return;
+
+        string colName = _bottleneckGrid.Columns[e.ColumnIndex].Name;
+        if (colName == "colStepDiagnosis")
+        {
+            switch (row.Diagnosis)
+            {
+                case "Software Bottleneck":
+                    e.CellStyle.ForeColor = Red600;
+                    e.CellStyle.Font = _boldCellFont;
+                    break;
+                case "Slow (1 PC)":
+                case "Intermittent Hang":
+                    e.CellStyle.ForeColor = Amber600;
+                    e.CellStyle.Font = _boldCellFont;
+                    break;
+                case "Hardware / PC-Specific":
+                    e.CellStyle.ForeColor = Indigo600;
+                    e.CellStyle.Font = _boldCellFont;
+                    break;
+                default:
+                    e.CellStyle.ForeColor = Emerald600;
+                    break;
+            }
+        }
+        else if (colName == "colStepMax" && row.MaxMs >= row.ServerAvgMs * 3.0 && row.MaxMs >= 2000.0)
+        {
+            e.CellStyle.ForeColor = Amber600;
+            e.CellStyle.Font = _boldCellFont;
+        }
+    }
+
+    private void OnStepPcGridCellFormatting(object? sender, DataGridViewCellFormattingEventArgs e)
+    {
+        if (e.CellStyle == null || e.RowIndex < 0 || e.RowIndex >= _stepPcGrid.Rows.Count) return;
+        if (_stepPcGrid.Rows[e.RowIndex].Tag is not ValueTuple<string, double?> tag) return;
+
+        string colName = _stepPcGrid.Columns[e.ColumnIndex].Name;
+        if (colName == "colStepPcName" &&
+            string.Equals(tag.Item1, Environment.MachineName, StringComparison.OrdinalIgnoreCase))
+        {
+            e.CellStyle.Font = _boldCellFont;
+            e.CellStyle.ForeColor = Indigo600;
+        }
+        else if (colName == "colStepPcVsAvg")
+        {
+            if (tag.Item2 is double ratio)
+            {
+                e.CellStyle.ForeColor = GetSpeedColor(ratio);
+                if (ratio < 0.95 || ratio > 1.05)
+                    e.CellStyle.Font = _boldCellFont;
+            }
+            else
+            {
+                e.CellStyle.ForeColor = Slate400;
+            }
         }
     }
 
@@ -734,10 +1468,24 @@ ORDER BY operation_key ASC, machine_name ASC;";
     private static void DeleteMachineTimings(string machineName)
     {
         using var conn = OpenTelemetryConnection();
-        using var cmd = new NpgsqlCommand(
-            "DELETE FROM app.operation_timings WHERE machine_name = @Machine;", conn);
-        cmd.Parameters.AddWithValue("Machine", machineName);
-        cmd.ExecuteNonQuery();
+
+        ExecDeleteSafe(conn, "DELETE FROM app.operation_timings WHERE machine_name = @Machine;", machineName, ignoreMissingTable: false);
+        ExecDeleteSafe(conn, "DELETE FROM app.operation_timing_samples WHERE machine_name = @Machine;", machineName, ignoreMissingTable: true);
+        ExecDeleteSafe(conn, "DELETE FROM app.operation_step_samples WHERE machine_name = @Machine;", machineName, ignoreMissingTable: true);
+    }
+
+    private static void ExecDeleteSafe(NpgsqlConnection conn, string sql, string machineName, bool ignoreMissingTable)
+    {
+        try
+        {
+            using var cmd = new NpgsqlCommand(sql, conn);
+            cmd.Parameters.AddWithValue("Machine", machineName);
+            cmd.ExecuteNonQuery();
+        }
+        catch (PostgresException pgEx) when (ignoreMissingTable && pgEx.SqlState == "42P01")
+        {
+            // Table not yet created; nothing to delete.
+        }
     }
 
     // =========================================================================
@@ -756,6 +1504,8 @@ ORDER BY operation_key ASC, machine_name ASC;";
         _busy = busy;
         UseWaitCursor = busy;
         _btnRefresh.Enabled = !busy;
+        _cboTimeframe.Enabled = !busy;
+        _cboVersion.Enabled = !busy;
         UpdateDeleteButtonState();
         if (busy && status != null)
         {

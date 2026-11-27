@@ -141,6 +141,18 @@ public static class CellContextInspector
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToList();
         try { snap.SyncedFromSources = RuleRegistry.GetSyncSourcesForColumn(tableName, rule.HeaderName); } catch { }
+        try { snap.CalculatedFromSources = RuleRegistry.GetCalculationSources(tableName, rule.HeaderName); } catch { }
+        try { snap.AffectedColumns = RuleRegistry.GetAffectedColumnsForInput(tableName, rule.HeaderName); } catch { }
+        try
+        {
+            snap.RollupDescriptions = rule.RollupRules
+                .Select(r => r.SourceProperties.Length > 0
+                    ? $"{r.CollectionOrTable} ({string.Join(", ", r.SourceProperties)})"
+                    : r.CollectionOrTable)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+        }
+        catch { }
 
         snap.DateMustBeGreaterThanHeader = rule.DateMustBeGreaterThanHeader;
         snap.DateMustBeGreaterThanAllowEqual = rule.DateMustBeGreaterThanAllowEqual;

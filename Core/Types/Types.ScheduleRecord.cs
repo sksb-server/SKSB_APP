@@ -250,35 +250,32 @@ public record DailyWorkerAttendance
     public DateOnly DailyScheduleDate { get; set; } = DateOnly.FromDateTime(DateTime.Today);
 
     [ExcelColumn("Staff ID", isRequired: true)]
-    [ColumnRule("StaffIDList", IsRequired = true)]
-    [ColumnSync("Staff Name", "StaffIDList", "StaffNameList")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
     [ColumnFormat(ColumnFormatKind.Id, zero: ZeroBehavior.Blank)]
     public long StaffID { get; set; }
 
     [JsonIgnore]
     [ExcelColumn("Staff Name")]
-    [ColumnRule("StaffNameList", IsRequired = false, IsWarningOnly = true)]
-    [ColumnSync("Staff ID", "StaffNameList", "StaffIDList")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
     public string StaffName { get; set; } = string.Empty;
 
     [ExcelColumn("Status")]
-    [ColumnRule("AttendanceStatusList", IsRequired = false)]
-    [ColumnDefault(DefaultKind.Literal, literalValue: "Absence")]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
     public AttendanceStatus AttendanceStatus { get; set; } = AttendanceStatus.Absence;
 
     [ExcelColumn("Clock-In Time")]
-    [ColumnRule(IsRequired = false)]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
     [ColumnFormat(ColumnFormatKind.Time, ZeroBehavior.Blank)]
     public TimeOnly? ClockInTime { get; set; }
 
     [ExcelColumn("Clock-Out Time")]
-    [ColumnRule(IsRequired = false)]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
     [ColumnFormat(ColumnFormatKind.Time, ZeroBehavior.Blank)]
     public TimeOnly? ClockOutTime { get; set; }
 
     /// <summary>Distinct projects checked into that day, comma-separated (e.g. <c>PROJ-A, PROJ-B</c>), derived strictly from Attendance Entries.</summary>
     [ExcelColumn("Project Check-Ins")]
-    [ColumnRule(IsRequired = false)]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
     public string ProjectCheckIns { get; set; } = string.Empty;
 
     /// <summary>
@@ -293,24 +290,24 @@ public record DailyWorkerAttendance
     public List<string> ProjectsDone { get; set; } = new();
 
     [ExcelColumn("Regular Shift")]
-    [ColumnRule(IsRequired = false, AllowNonNegativeZero = true, RoundDownStep = 0.5)]
+    [ColumnRule(IsRequired = false, AllowNonNegativeZero = true, RoundDownStep = 0.5, IsReadOnly = true)]
     [ColumnFormat(ColumnFormatKind.Shifts)]
     public decimal RegularShift { get; set; }
 
     /// <summary>+0.5 per distinct project beyond two: <c>Math.Max(0, distinctProjects - 2) * 0.5</c>.</summary>
     [ExcelColumn("Additional Shifts")]
-    [ColumnRule(IsRequired = false, AllowNonNegativeZero = true, RoundDownStep = 0.5)]
+    [ColumnRule(IsRequired = false, AllowNonNegativeZero = true, RoundDownStep = 0.5, IsReadOnly = true)]
     [ColumnFormat(ColumnFormatKind.Shifts)]
     public decimal AdditionalShifts { get; set; }
 
     [ExcelColumn("OT Hours")]
-    [ColumnRule(IsRequired = false, AllowNonNegativeZero = true, RoundDownStep = 0.5)]
+    [ColumnRule(IsRequired = false, AllowNonNegativeZero = true, RoundDownStep = 0.5, IsReadOnly = true)]
     [ColumnFormat(ColumnFormatKind.Hours)]
     public decimal OTHours { get; set; }
 
     /// <summary>+1.0 per premix hole fixed by the worker's slots that day.</summary>
     [ExcelColumn("Additional OT Hours")]
-    [ColumnRule(IsRequired = false, AllowNonNegativeZero = true, RoundDownStep = 0.5)]
+    [ColumnRule(IsRequired = false, AllowNonNegativeZero = true, RoundDownStep = 0.5, IsReadOnly = true)]
     [ColumnFormat(ColumnFormatKind.Hours)]
     public decimal AdditionalOTHours { get; set; }
 
@@ -321,6 +318,36 @@ public record DailyWorkerAttendance
 
     /// <summary>Persisted for DB / JSON compatibility; no longer an Excel column (replaced by <see cref="PlannedProjects"/>).</summary>
     public bool IsAllocated { get; set; }
+
+    // ---- UI-only display / tooltip metadata (not Excel columns, not serialized) ----
+
+    /// <summary>Excel custom NumberFormat for the Clock-In cell (source icon + optional tag).</summary>
+    [JsonIgnore]
+    public string ClockInDisplayFormat { get; set; } = string.Empty;
+
+    /// <summary>Excel custom NumberFormat for the Clock-Out cell (source icon + optional tag).</summary>
+    [JsonIgnore]
+    public string ClockOutDisplayFormat { get; set; } = string.Empty;
+
+    /// <summary>True when the Clock-In time was auto-filled from a project fallback Start.</summary>
+    [JsonIgnore]
+    public bool ClockInIsFallback { get; set; }
+
+    /// <summary>True when the Clock-Out time was auto-filled from a project fallback End.</summary>
+    [JsonIgnore]
+    public bool ClockOutIsFallback { get; set; }
+
+    /// <summary>Equation note explaining how the Clock-In time was derived.</summary>
+    [JsonIgnore]
+    public string ClockInNote { get; set; } = string.Empty;
+
+    /// <summary>Equation note explaining how the Clock-Out time was derived.</summary>
+    [JsonIgnore]
+    public string ClockOutNote { get; set; } = string.Empty;
+
+    /// <summary>Equation note explaining the OT Hours math.</summary>
+    [JsonIgnore]
+    public string OTHoursNote { get; set; } = string.Empty;
 }
 
 // =========================================================================
@@ -348,6 +375,12 @@ public record DailyProjectSchedule
     public List<string> Workers { get; set; } = new();
     public List<string> Vehicles { get; set; } = new();
     public string Remarks { get; set; } = string.Empty;
+
+    /// <summary>Manual project Start override for the day; null = auto fallback (latest worker check-in).</summary>
+    public TimeOnly? ActualStartTime { get; set; }
+
+    /// <summary>Manual project End override for the day; null = auto fallback (earliest worker exit).</summary>
+    public TimeOnly? ActualEndTime { get; set; }
 }
 
 // =========================================================================
@@ -380,7 +413,7 @@ public record WorkerPreference
 
     /// <summary>Read-only: derived from StaffManager's valid vehicle / skill licenses on every load.</summary>
     [ExcelColumn("Licensed Skills")]
-    [ColumnRule(IsRequired = false)]
+    [ColumnRule(IsRequired = false, IsReadOnly = true)]
     public List<string> LicensedSkills { get; set; } = new();
 
     [ExcelColumn("Other Skills")]

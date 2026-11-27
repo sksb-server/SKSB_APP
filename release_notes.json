@@ -1,0 +1,8 @@
+{
+  "version": "1.2.0",
+  "date": "2026-11-27",
+  "notes": [
+    "Added a NEW version badge beside the version number in Portal when updated.",
+    "Hover over the NEW badge to view the latest update details."
+  ]
+}

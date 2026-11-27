@@ -27,6 +27,7 @@ public static class GuideTaskPaneManager
         public CustomTaskPane Pane = null!;
         public GuideTaskPaneControl Control = null!;
         public string WorkbookName = string.Empty;
+        public string ModuleName = string.Empty;
     }
 
     private static readonly Dictionary<string, PaneEntry> _panes = new(StringComparer.OrdinalIgnoreCase);
@@ -231,6 +232,8 @@ public static class GuideTaskPaneManager
             }
 
             var entry = GetOrCreate(key, xlApp, wb);
+            entry.ModuleName = moduleName ?? string.Empty;
+            entry.Control.SetModuleName(moduleName);
             RefreshEntry(entry, xlApp);
             if (!persistPreference)
             {
@@ -446,6 +449,7 @@ public static class GuideTaskPaneManager
                         try { window = entry.Pane.Window; } catch { }
 
                         string workbookName = entry.WorkbookName;
+                        string moduleName = entry.ModuleName;
                         DisposeEntry(entry);
                         _panes.Remove(key);
 
@@ -478,11 +482,13 @@ public static class GuideTaskPaneManager
                         {
                             Pane = newPane,
                             Control = (GuideTaskPaneControl)newPane.ContentControl,
-                            WorkbookName = workbookName
+                            WorkbookName = workbookName,
+                            ModuleName = moduleName
                         };
                         newEntry.Control.ConfigureHostWindow(
                             ExcelDnaUtil.WindowHandle,
                             newPane.DockPosition == MsoCTPDockPosition.msoCTPDockPositionFloating);
+                        newEntry.Control.SetModuleName(moduleName);
                         _panes[key] = newEntry;
 
                         if (xlApp != null)

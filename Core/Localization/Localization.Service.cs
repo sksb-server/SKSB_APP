@@ -339,13 +339,29 @@ public static class Loc
     }
 
     /// <summary>
-    /// Returns all spotlight general tip keys: built-in <c>guide.spotlight.gen.&lt;id&gt;</c> keys
-    /// followed by any approved custom community tips (<c>guide.spotlight.custom.*</c>), deduplicated.
+    /// Returns all rotating spotlight tip keys: manager-scoped <c>guide.spotlight.mgr.&lt;manager&gt;.&lt;id&gt;</c>
+    /// keys (when <paramref name="managerId"/> is supplied), built-in <c>guide.spotlight.gen.&lt;id&gt;</c> keys,
+    /// then any approved custom community tips (<c>guide.spotlight.custom.*</c>), deduplicated.
     /// </summary>
-    public static IReadOnlyList<string> GetAllGeneralTipKeys(IReadOnlyList<string> builtInIds)
+    public static IReadOnlyList<string> GetAllGeneralTipKeys(
+        IReadOnlyList<string> builtInIds,
+        string? managerId = null,
+        IReadOnlyList<string>? managerTipIds = null)
     {
-        var keys = new List<string>(builtInIds?.Count ?? 0);
+        var keys = new List<string>((builtInIds?.Count ?? 0) + (managerTipIds?.Count ?? 0));
         var seen = new HashSet<string>(StringComparer.Ordinal);
+
+        if (!string.IsNullOrWhiteSpace(managerId) && managerTipIds != null)
+        {
+            string mgr = managerId.Trim().ToLowerInvariant();
+            foreach (string id in managerTipIds)
+            {
+                if (string.IsNullOrWhiteSpace(id)) continue;
+                string fullKey = $"guide.spotlight.mgr.{mgr}.{id.Trim()}";
+                if (seen.Add(fullKey)) keys.Add(fullKey);
+            }
+        }
+
         if (builtInIds != null)
         {
             foreach (string id in builtInIds)
@@ -404,6 +420,19 @@ public static class Loc
         if (name == null && TryTip($"col.{normCol}.name", out string n)) name = n;
         if (desc == null && TryTip($"col.{normCol}.desc", out string d)) desc = d;
         return (name, desc);
+    }
+
+    /// <summary>
+    /// Optional plain-language explanation of where a read-only / auto-evaluated column gets its value
+    /// (<c>col.&lt;table&gt;.&lt;col&gt;.source</c> first, then <c>col.&lt;col&gt;.source</c>).
+    /// </summary>
+    public static string? ResolveColumnSource(string? tableName, string? columnHeader)
+    {
+        string normCol = NormalizeKeyPart(columnHeader);
+        if (normCol.Length == 0) return null;
+        string normTable = NormalizeKeyPart(tableName);
+        if (normTable.Length > 0 && TryTip($"col.{normTable}.{normCol}.source", out string ts)) return ts;
+        return TryTip($"col.{normCol}.source", out string s) ? s : null;
     }
 
     /// <summary>Translated table display name (<c>table.&lt;table&gt;.name</c>); unknown tables pass through.</summary>

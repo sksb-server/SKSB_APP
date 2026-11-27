@@ -506,6 +506,115 @@ public static partial class RuleRegistry
             .ToList();
     }
 
+    private static readonly Regex BracketTokenRegex = new(@"\[([^\[\]]+)\]", RegexOptions.Compiled);
+
+    /// <summary>
+    /// Returns the sibling columns that react when the given input column changes: its own [ColumnSync] targets and
+    /// count target, plus every column whose dropdown sources, state guards, date rule or calculation reference it.
+    /// </summary>
+    internal static List<string> GetAffectedColumnsForInput(string tableName, string headerName)
+    {
+        EnsureInitialized();
+        var result = new List<string>();
+        if (string.IsNullOrWhiteSpace(tableName) || string.IsNullOrWhiteSpace(headerName))
+            return result;
+
+        if (!TryResolveTableDictionary(tableName, out var colDict))
+            return result;
+
+        string normHeader = NormalizeIdentifier(headerName);
+        string stripped = normHeader.TrimEnd('s');
+
+        bool MatchesHeader(string? candidate)
+        {
+            if (string.IsNullOrWhiteSpace(candidate)) return false;
+            string norm = NormalizeIdentifier(candidate);
+            return norm.Length > 0 &&
+                   (norm.Equals(normHeader, StringComparison.OrdinalIgnoreCase) ||
+                    norm.TrimEnd('s').Equals(stripped, StringComparison.OrdinalIgnoreCase));
+        }
+
+        string Canonical(string raw) => ResolveHeaderInDictionary(colDict, raw)?.HeaderName ?? raw;
+
+        // a) The source column's own outgoing rules
+        var self = ResolveHeaderInDictionary(colDict, headerName);
+        if (self != null)
+        {
+            foreach (var sync in self.SyncRules)
+            {
+                if (!string.IsNullOrWhiteSpace(sync.TargetHeader))
+                    result.Add(Canonical(sync.TargetHeader));
+            }
+            if (!string.IsNullOrWhiteSpace(self.CountTargetHeader))
+                result.Add(Canonical(self.CountTargetHeader!));
+        }
+
+        // b) Sibling columns that depend on this column
+        foreach (var d in colDict.Values)
+        {
+            if (d.NormalizedHeader.Equals(normHeader, StringComparison.OrdinalIgnoreCase)) continue;
+
+            bool depends = false;
+
+            if (d.Sources.Any(src =>
+                {
+                    if (MatchesHeader(src)) return true;
+                    int open = src.IndexOf('[');
+                    int close = open >= 0 ? src.IndexOf(']', open + 1) : -1;
+                    return close > open + 1 && MatchesHeader(src.Substring(open + 1, close - open - 1));
+                }))
+            {
+                depends = true;
+            }
+
+            if (!depends && d.StateGuards.Any(g => g.ReferenceHeaders.Any(MatchesHeader)))
+                depends = true;
+
+            if (!depends && MatchesHeader(d.DateMustBeGreaterThanHeader))
+                depends = true;
+
+            if (!depends && d.CalculateRule != null)
+            {
+                string expr = RuleCalculator.GetColumnExpressionOverride(tableName, d.HeaderName) ?? d.CalculateRule.Expression ?? string.Empty;
+                if (BracketTokenRegex.Matches(expr).Any(m => MatchesHeader(m.Groups[1].Value)))
+                    depends = true;
+            }
+
+            if (depends) result.Add(d.HeaderName);
+        }
+
+        return result
+            .Where(h => !MatchesHeader(h))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
+    /// <summary>Returns the sibling columns referenced (as [Column] tokens) by the column's C# calculation expression.</summary>
+    internal static List<string> GetCalculationSources(string tableName, string headerName)
+    {
+        EnsureInitialized();
+        if (string.IsNullOrWhiteSpace(tableName) || string.IsNullOrWhiteSpace(headerName))
+            return new List<string>();
+
+        if (!TryResolveTableDictionary(tableName, out var colDict))
+            return new List<string>();
+
+        var rule = ResolveHeaderInDictionary(colDict, headerName);
+        if (rule?.CalculateRule == null)
+            return new List<string>();
+
+        string expr = RuleCalculator.GetColumnExpressionOverride(tableName, rule.HeaderName) ?? rule.CalculateRule.Expression ?? string.Empty;
+        string normSelf = NormalizeIdentifier(rule.HeaderName);
+
+        return BracketTokenRegex.Matches(expr)
+            .Select(m => m.Groups[1].Value.Trim())
+            .Where(raw => raw.Length > 0 && !NormalizeIdentifier(raw).Equals(normSelf, StringComparison.OrdinalIgnoreCase))
+            .Select(raw => ResolveHeaderInDictionary(colDict, raw)?.HeaderName ?? raw)
+            .Where(h => !NormalizeIdentifier(h).Equals(normSelf, StringComparison.OrdinalIgnoreCase))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+    }
+
     internal static string NormalizeIdentifier(string raw)
     {
         if (string.IsNullOrWhiteSpace(raw)) return string.Empty;

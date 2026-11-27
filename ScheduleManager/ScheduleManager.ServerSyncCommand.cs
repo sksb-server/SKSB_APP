@@ -236,13 +236,15 @@ internal static class ServerSyncCommands
         };
 
         foreach (var p in s.Projects
-                     .Where(p => p.SlotIndex >= 0 && (p.Workers.Count > 0 || p.Vehicles.Count > 0 || p.PremixHoles > 0))
+                     .Where(p => p.SlotIndex >= 0 && (p.Workers.Count > 0 || p.Vehicles.Count > 0 || p.PremixHoles > 0
+                                                      || p.ActualStartTime.HasValue || p.ActualEndTime.HasValue))
                      .OrderBy(p => p.Shift.ToString(), StringComparer.Ordinal).ThenBy(p => p.SlotIndex))
         {
             parts.Add(string.Join("|",
                 p.Shift.ToString(), p.SlotIndex.ToString(CultureInfo.InvariantCulture),
                 Norm(p.ProjectID).ToUpperInvariant(), Math.Max(0, p.PremixHoles).ToString(CultureInfo.InvariantCulture),
-                NormList(p.Workers), NormList(p.Vehicles, upper: true), Norm(p.Remarks)));
+                NormList(p.Workers), NormList(p.Vehicles, upper: true), Norm(p.Remarks),
+                NormTime(p.ActualStartTime), NormTime(p.ActualEndTime)));
         }
 
         foreach (var a in s.WorkerAttendance.Where(a => a.StaffID > 0).OrderBy(a => a.StaffID))
@@ -706,7 +708,9 @@ internal static class ServerSyncCommands
                 PremixHoles = Convert.ToInt32(r.premix_holes),
                 Workers = Arr(r.workers),
                 Vehicles = Arr(r.vehicles),
-                Remarks = Text(r.remarks)
+                Remarks = Text(r.remarks),
+                ActualStartTime = Time((object?)r.actual_start_time),
+                ActualEndTime = Time((object?)r.actual_end_time)
             });
         }
 

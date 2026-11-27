@@ -11,10 +11,15 @@ CREATE TABLE IF NOT EXISTS daily_project_schedules (
     workers       TEXT[]       NOT NULL DEFAULT '{}',
     vehicles      TEXT[]       NOT NULL DEFAULT '{}',
     remarks       TEXT         NOT NULL DEFAULT '',
+    actual_start_time TIME,                         -- manual project Start override (NULL = auto fallback)
+    actual_end_time   TIME,                         -- manual project End override (NULL = auto fallback)
     created_at    TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP,
     updated_at    TIMESTAMPTZ  NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (schedule_date, shift, slot_index)
 );
+
+ALTER TABLE daily_project_schedules ADD COLUMN IF NOT EXISTS actual_start_time TIME;
+ALTER TABLE daily_project_schedules ADD COLUMN IF NOT EXISTS actual_end_time TIME;
 
 CREATE TABLE IF NOT EXISTS attendance_entries (
     entry_id         BIGSERIAL    PRIMARY KEY,

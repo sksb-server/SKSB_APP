@@ -32,3 +32,34 @@ JOIN app.operation_timings g
 WHERE p.machine_name <> '__global__'
 GROUP BY p.machine_name
 ORDER BY relative_duration_ratio ASC;
+
+CREATE TABLE IF NOT EXISTS app.operation_timing_samples (
+    id            BIGSERIAL        PRIMARY KEY,
+    operation_key TEXT             NOT NULL,
+    machine_name  TEXT             NOT NULL,
+    app_version   TEXT             NOT NULL DEFAULT 'unknown',
+    duration_ms   DOUBLE PRECISION NOT NULL,
+    recorded_at   TIMESTAMPTZ      NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS ix_operation_timing_samples_op_rec
+    ON app.operation_timing_samples (operation_key, recorded_at DESC);
+
+CREATE INDEX IF NOT EXISTS ix_operation_timing_samples_pc_rec
+    ON app.operation_timing_samples (machine_name, recorded_at DESC);
+
+CREATE TABLE IF NOT EXISTS app.operation_step_samples (
+    id            BIGSERIAL        PRIMARY KEY,
+    operation_key TEXT             NOT NULL,
+    step_key      TEXT             NOT NULL,
+    machine_name  TEXT             NOT NULL,
+    app_version   TEXT             NOT NULL DEFAULT 'unknown',
+    duration_ms   DOUBLE PRECISION NOT NULL,
+    recorded_at   TIMESTAMPTZ      NOT NULL DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE INDEX IF NOT EXISTS ix_operation_step_samples_op_rec
+    ON app.operation_step_samples (operation_key, recorded_at DESC);
+
+CREATE INDEX IF NOT EXISTS ix_operation_step_samples_step_rec
+    ON app.operation_step_samples (step_key, recorded_at DESC);

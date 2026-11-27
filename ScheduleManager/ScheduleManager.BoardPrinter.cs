@@ -73,13 +73,17 @@ internal static class BoardPrinter
                 try { xlApp.Calculation = -4135; } catch { }
                 try { xlApp.DisplayAlerts = false; } catch { }
 
+                // Hide each slot's Start / In (col 2) and End / Out (col 3); Code + Premix / Name + Skills stay printed.
                 for (int slot = 0; slot < activeSlotCount; slot++)
                 {
-                    int col = ScheduleBoardMapper.SlotColumn(slot) + 2;
-                    bool was = false;
-                    try { was = (bool)ws.Columns[col].Hidden; } catch { }
-                    hiddenCols.Add((col, was));
-                    try { ws.Columns[col].Hidden = true; } catch { }
+                    for (int offset = 2; offset <= 3; offset++)
+                    {
+                        int col = ScheduleBoardMapper.SlotColumn(slot) + offset;
+                        bool was = false;
+                        try { was = (bool)ws.Columns[col].Hidden; } catch { }
+                        hiddenCols.Add((col, was));
+                        try { ws.Columns[col].Hidden = true; } catch { }
+                    }
                 }
 
                 if (hideDayRows)

@@ -7,7 +7,10 @@ param(
     [string]$ServerHost = "http://192.168.0.20:5000",
 
     [Parameter(Mandatory = $false, HelpMessage = "Build and zip only; skip upload and version.json update.")]
-    [switch]$SkipUpload
+    [switch]$SkipUpload,
+
+    [Parameter(Mandatory = $false, HelpMessage = "Optional list of user-facing update notes bundled into release_notes.json.")]
+    [string[]]$ReleaseNotes = @()
 )
 
 $ErrorActionPreference = "Stop"
@@ -15,6 +18,7 @@ $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Definition
 $StagingDir = Join-Path $ScriptDir "publish_staging"
 $ZipOut = Join-Path $ScriptDir "SKSB_Release_Package.zip"
 $VersionFile = Join-Path $ScriptDir "version.json"
+$ReleaseNotesFile = Join-Path $ScriptDir "release_notes.json"
 
 Write-Host "==========================================================" -ForegroundColor Cyan
 Write-Host " [SKSB System] Building Production Release Package" -ForegroundColor Cyan
@@ -166,6 +170,20 @@ $Manifest = @{
 }
 $ManifestJson = $Manifest | ConvertTo-Json -Depth 2
 $ManifestJson | Out-File (Join-Path $StagingDir "version.json") -Encoding utf8
+
+$CleanNotes = @($ReleaseNotes | Where-Object { -not [string]::IsNullOrWhiteSpace($_) } | ForEach-Object { $_.Trim() })
+$ReleaseNotesJson = $null
+if ($CleanNotes.Count -gt 0) {
+    $NotesObj = [ordered]@{
+        version = $FinalVersion
+        date = (Get-Date).ToString("yyyy-MM-dd")
+        notes = $CleanNotes
+    }
+    $ReleaseNotesJson = $NotesObj | ConvertTo-Json -Depth 3
+    $ReleaseNotesJson | Out-File (Join-Path $StagingDir "release_notes.json") -Encoding utf8
+} elseif (Test-Path $ReleaseNotesFile) {
+    Copy-Item $ReleaseNotesFile -Destination (Join-Path $StagingDir "release_notes.json") -Force
+}
 # 8. Compress Package
 Compress-Archive -Path "$StagingDir\*" -DestinationPath $ZipOut -Force
 Remove-Item $StagingDir -Recurse -Force
@@ -194,5 +212,6 @@ if ($curlCmd -and $curlCmd.Source) {
 }
 
 $ManifestJson | Out-File $VersionFile -Encoding utf8
+if ($ReleaseNotesJson) { $ReleaseNotesJson | Out-File $ReleaseNotesFile -Encoding utf8 }
 Write-Host "DEPLOYMENT SUCCESS! Server activated version: v$FinalVersion" -ForegroundColor Green
 Write-Host "Distributable Launcher: $LauncherExe" -ForegroundColor Green

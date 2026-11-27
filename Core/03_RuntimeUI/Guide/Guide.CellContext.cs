@@ -65,6 +65,15 @@ public sealed class CellGuideSnapshot
     public List<string> SyncTargets { get; set; } = new();
     public List<string> SyncedFromSources { get; set; } = new();
 
+    /// <summary>Sibling columns referenced by this column's C# calculation expression.</summary>
+    public List<string> CalculatedFromSources { get; set; } = new();
+
+    /// <summary>Sibling columns that react (sync, count, dropdown, guard, date rule, calculation) when this column changes.</summary>
+    public List<string> AffectedColumns { get; set; } = new();
+
+    /// <summary>"Table (Col1, Col2)" descriptions of the child collections this column rolls up from.</summary>
+    public List<string> RollupDescriptions { get; set; } = new();
+
     public string? DateMustBeGreaterThanHeader { get; set; }
     public bool DateMustBeGreaterThanAllowEqual { get; set; }
 
